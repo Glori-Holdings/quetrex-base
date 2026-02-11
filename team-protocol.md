@@ -1,9 +1,9 @@
 # Team Orchestration Protocol
 
-**Version:** 1.1
+**Version:** 1.2
 **Owner:** Glen Barnhardt
-**Effective:** 2026-02-10
-**Referenced by:** Autonomous pipeline runner, /build-feature skill, CLAUDE.md
+**Effective:** 2026-02-11
+**Referenced by:** Autonomous pipeline runner, /create-issue skill, CLAUDE.md
 
 This protocol governs how agent teams are created, coordinated, and dissolved.
 It is the single source of truth for team orchestration. Both the automated
@@ -381,18 +381,16 @@ Your session prompt declares whether you are in AUTONOMOUS or INTERACTIVE mode.
 - Report progress to the user at key milestones (wave completion, review verdict)
 - User can intervene at any point to redirect work
 
-### Orchestration Method by Mode
+### Orchestration Method
 
-The tool used to spawn agents differs by mode:
+Both INTERACTIVE and AUTONOMOUS modes use `TeamCreate` to create teams with
+named teammates, shared task lists, and `SendMessage`-based coordination.
 
-- **INTERACTIVE mode:** Use `TeamCreate` to create teams with named teammates,
-  shared task lists, and `SendMessage`-based coordination.
-- **AUTONOMOUS mode:** Use the `Task` tool with `subagent_type` to spawn
-  independent subagents. TeamCreate is not available in `--print` mode.
+Set `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in the environment to enable
+TeamCreate in `--print` mode (autonomous pipelines set this automatically).
 
 Both modes follow the same phased protocol (Planning → Staggered Creation →
-Coordination → Validation → Cleanup). The difference is the orchestration
-primitive, not the process.
+Coordination → Validation → Cleanup) using the same orchestration primitive.
 
 ---
 
