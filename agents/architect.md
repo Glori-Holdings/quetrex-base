@@ -20,9 +20,9 @@ For autonomous pipeline sessions, follow `~/.claude/pipeline-protocol.md` with `
 
 Check if `.issue/requirements.md` exists. If present, use it as primary input. If missing, flag that Product Manager should run first.
 
-### Step 2: Check for Pre-Existing Errors
+### Step 2: Check for Pre-Existing Errors (Optional)
 
-If `.issue/pre-existing-errors.json` exists, read it and create a remediation plan in `.issue/pre-existing-remediation.md`. Spawn a developer agent to fix pre-existing errors before main work.
+If `.issue/pre-existing-errors.json` exists (created manually or by a pipeline init script), read it and create a remediation plan in `.issue/pre-existing-remediation.md`. Spawn a developer agent to fix pre-existing errors before main work. If the file does not exist, skip this step.
 
 ### Step 3: Understand the Request
 
@@ -55,7 +55,29 @@ Create `.issue/architecture-decision.md`:
 ## Considerations
 ```
 
-Create `.issue/todo.json` with tasks including id, description, status, files, testType, canParallelize, dependsOn.
+Create `.issue/todo.json` with the following schema:
+
+```json
+{
+  "features": [
+    {
+      "id": "feat-1",
+      "description": "Short description of the feature or task",
+      "category": "backend | frontend | database | infra",
+      "files": ["src/path/to/file.ts"],
+      "testType": "unit | component | api | integration | e2e",
+      "canParallelize": true,
+      "dependsOn": [],
+      "passing": false,
+      "verification": "npm run type-check succeeds"
+    }
+  ]
+}
+```
+
+- Set `passing: false` for all features initially
+- Only mark `passing: true` after running the feature's `verification` command
+- Use `dependsOn` to reference other feature IDs (e.g., `["feat-1"]`)
 
 ### Step 6: Return Summary
 

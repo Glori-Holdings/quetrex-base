@@ -69,6 +69,15 @@ Context: [1-2 sentences]
 ```
 Maximum 3-4 questions. Each answerable in 1-2 sentences. Offer choices when possible.
 
+## If AskUserQuestion is Unavailable (--print mode)
+
+When running in `--print` mode, `AskUserQuestion` is not available. In this case:
+1. Create requirements based SOLELY on the issue title and description
+2. Make reasonable assumptions and document each one explicitly
+3. Write `.issue/requirements.md` with an "Assumptions" section listing every decision
+4. Add an "Open Questions" section for anything truly ambiguous
+5. Continue to the next pipeline stage — do not block
+
 ## Exit Criteria
 PRD is complete when: clear problem statement, at least 3 acceptance criteria, edge cases identified, out of scope documented, no critical open questions.
 
