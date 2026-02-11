@@ -96,6 +96,13 @@ try {
       ON tasks(session_id, task_id);
   `);
 
+  // Migration: add project column
+  try {
+    db.exec('ALTER TABLE sessions ADD COLUMN project TEXT DEFAULT NULL');
+  } catch (e) {
+    // Column already exists, ignore
+  }
+
   console.log('✓ SQLite initialized:', DB_PATH);
 } catch (err) {
   console.warn('⚠ SQLite unavailable (memory-only mode):', err.message);
@@ -145,6 +152,14 @@ function broadcastSSE(event) {
   });
 }
 
+function parseTeamProject(teamName) {
+  const match = teamName.match(/^(.+)-([A-Z][A-Z0-9]*-[0-9]+)$/);
+  if (match) {
+    return { project: match[1], identifier: match[2] };
+  }
+  return { project: null, identifier: null };
+}
+
 // ============================================================================
 // FILE SCANNING
 // ============================================================================
@@ -180,7 +195,8 @@ function scanTeamsDirectory() {
       const existingTeam = state.teams[teamName];
       const hasChanged = !existingTeam || JSON.stringify(existingTeam.members) !== JSON.stringify(members);
 
-      state.teams[teamName] = { name: teamName, members };
+      const { project, identifier } = parseTeamProject(teamName);
+      state.teams[teamName] = { name: teamName, members, project, identifier };
 
       if (hasChanged) {
         // Persist to SQLite
@@ -189,9 +205,10 @@ function scanTeamsDirectory() {
           let sessionId;
 
           if (!session) {
-            const result = db.prepare('INSERT INTO sessions (team_name, started_at) VALUES (?, ?)').run(
+            const result = db.prepare('INSERT INTO sessions (team_name, started_at, project) VALUES (?, ?, ?)').run(
               teamName,
-              new Date().toISOString()
+              new Date().toISOString(),
+              project
             );
             sessionId = result.lastInsertRowid;
           } else {
@@ -490,7 +507,7 @@ const server = http.createServer(async (req, res) => {
 
     const sessions = db.prepare(`
       SELECT
-        s.id, s.team_name, s.started_at, s.ended_at,
+        s.id, s.team_name, s.started_at, s.ended_at, s.project,
         COUNT(DISTINCT a.id) as agent_count,
         COUNT(DISTINCT m.id) as message_count,
         COUNT(DISTINCT t.id) as task_count
@@ -616,6 +633,20 @@ const server = http.createServer(async (req, res) => {
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ success: true }));
+    return;
+  }
+
+  // Route: GET /api/projects
+  if (pathname === '/api/projects' && method === 'GET') {
+    const projects = {};
+    Object.values(state.teams).forEach(team => {
+      const key = team.project || 'Ungrouped';
+      if (!projects[key]) projects[key] = [];
+      projects[key].push(team);
+    });
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(projects));
     return;
   }
 
@@ -1114,6 +1145,98 @@ function getHTML() {
       padding: 3rem 1rem;
       color: var(--t2);
     }
+
+    /* Project Tree */
+    .project-tree {
+      margin-bottom: 1rem;
+    }
+
+    .project-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.5rem 0.75rem;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 0.375rem;
+      margin-bottom: 0.25rem;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.875rem;
+      transition: all 0.2s;
+    }
+
+    .project-header:hover {
+      border-color: var(--accent);
+    }
+
+    .project-header.active {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+    }
+
+    .project-teams {
+      padding-left: 1rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .team-item {
+      padding: 0.375rem 0.75rem;
+      font-size: 0.8rem;
+      color: var(--t2);
+      cursor: pointer;
+      border-radius: 0.25rem;
+      margin-bottom: 0.125rem;
+      transition: all 0.2s;
+    }
+
+    .team-item:hover {
+      background: var(--bg3);
+      color: var(--t1);
+    }
+
+    .team-item.active {
+      background: var(--accent);
+      color: white;
+    }
+
+    .filter-clear {
+      display: inline-block;
+      color: var(--accent);
+      font-size: 0.75rem;
+      cursor: pointer;
+      margin-bottom: 0.75rem;
+    }
+
+    .filter-clear:hover {
+      text-decoration: underline;
+    }
+
+    .project-count {
+      font-size: 0.75rem;
+      font-weight: 400;
+      color: var(--t2);
+    }
+
+    .project-header.active .project-count {
+      color: rgba(255, 255, 255, 0.8);
+    }
+
+    .history-project-group {
+      margin-bottom: 1.5rem;
+    }
+
+    .history-project-title {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--t2);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.75rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--border);
+    }
   </style>
 </head>
 <body>
@@ -1137,6 +1260,8 @@ function getHTML() {
 
     <div id="live-view" class="main-layout">
       <div class="left-panel">
+        <div class="section-title">Projects</div>
+        <div id="project-tree"></div>
         <div class="section-title">Agent Roster</div>
         <div id="agent-roster"></div>
       </div>
@@ -1171,8 +1296,8 @@ function getHTML() {
       </div>
     </div>
 
-    <div id="history-view" class="hidden">
-      <div id="history-list" class="history-grid"></div>
+    <div id="history-view" class="hidden" style="overflow-y: auto; flex: 1;">
+      <div id="history-list" style="padding: 1rem;"></div>
     </div>
   </div>
 
@@ -1200,6 +1325,8 @@ function getHTML() {
     let currentTheme = localStorage.getItem('theme') || 'dark';
     let liveState = { teams: {}, inboxes: {}, tasks: {} };
     let currentSessionId = null;
+    let selectedProject = null;
+    let selectedTeam = null;
     let eventSource = null;
 
     // =========================================================================
@@ -1316,10 +1443,139 @@ function getHTML() {
     }
 
     // =========================================================================
+    // PROJECT FILTERING
+    // =========================================================================
+
+    function parseTeamProjectClient(teamName) {
+      var match = teamName.match(/^(.+)-([A-Z][A-Z0-9]*-[0-9]+)$/);
+      if (match) {
+        return { project: match[1], identifier: match[2] };
+      }
+      return { project: null, identifier: null };
+    }
+
+    function buildProjectTree() {
+      var groups = {};
+      Object.values(liveState.teams).forEach(function(team) {
+        var parsed = parseTeamProjectClient(team.name);
+        var key = parsed.project || 'Ungrouped';
+        if (!groups[key]) groups[key] = [];
+        groups[key].push({ name: team.name, identifier: parsed.identifier });
+      });
+      return groups;
+    }
+
+    function renderProjectTree() {
+      var container = document.getElementById('project-tree');
+      var groups = buildProjectTree();
+      var keys = Object.keys(groups).sort();
+
+      if (keys.length === 0) {
+        container.innerHTML = '<div class="empty-state" style="padding: 1rem; font-size: 0.8rem;">No active teams</div>';
+        return;
+      }
+
+      var html = '';
+
+      if (selectedProject || selectedTeam) {
+        html += '<div class="filter-clear" data-action="clear">Clear filter</div>';
+      }
+
+      keys.forEach(function(key) {
+        var teams = groups[key];
+        var isActiveProject = selectedProject === key;
+        var projectHasActiveTeam = teams.some(function(t) { return t.name === selectedTeam; });
+        var isExpanded = isActiveProject || projectHasActiveTeam;
+
+        html += '<div class="project-tree">';
+        html += '<div class="project-header' + (isActiveProject && !selectedTeam ? ' active' : '') + '" data-action="project" data-key="' + key.replace(/"/g, '&quot;') + '">';
+        html += '<span>' + (isExpanded ? '&#9660; ' : '&#9654; ') + key + '</span>';
+        html += '<span class="project-count">' + teams.length + '</span>';
+        html += '</div>';
+
+        if (isExpanded) {
+          html += '<div class="project-teams">';
+          teams.forEach(function(t) {
+            var isActiveTeam = selectedTeam === t.name;
+            html += '<div class="team-item' + (isActiveTeam ? ' active' : '') + '" data-action="team" data-team="' + t.name.replace(/"/g, '&quot;') + '" data-project="' + key.replace(/"/g, '&quot;') + '">';
+            html += t.identifier || t.name;
+            html += '</div>';
+          });
+          html += '</div>';
+        }
+
+        html += '</div>';
+      });
+
+      container.innerHTML = html;
+
+      // Event delegation — avoids template literal escaping issues
+      container.querySelectorAll('[data-action]').forEach(function(el) {
+        el.addEventListener('click', function(e) {
+          var action = el.getAttribute('data-action');
+          if (action === 'clear') { clearFilter(); }
+          else if (action === 'project') { selectProject(el.getAttribute('data-key')); }
+          else if (action === 'team') {
+            e.stopPropagation();
+            selectTeam(el.getAttribute('data-team'), el.getAttribute('data-project'));
+          }
+        });
+      });
+    }
+
+    function selectProject(key) {
+      if (selectedProject === key && !selectedTeam) {
+        selectedProject = null;
+      } else {
+        selectedProject = key;
+        selectedTeam = null;
+      }
+      renderLiveView();
+    }
+
+    function selectTeam(name, projectKey) {
+      if (selectedTeam === name) {
+        selectedTeam = null;
+        selectedProject = projectKey;
+      } else {
+        selectedTeam = name;
+        selectedProject = projectKey;
+      }
+      renderLiveView();
+    }
+
+    function clearFilter() {
+      selectedProject = null;
+      selectedTeam = null;
+      renderLiveView();
+    }
+
+    function getVisibleTeams() {
+      if (!selectedProject && !selectedTeam) return null;
+
+      if (selectedTeam) {
+        var s = new Set();
+        s.add(selectedTeam);
+        return s;
+      }
+
+      var visible = new Set();
+      Object.values(liveState.teams).forEach(function(team) {
+        var parsed = parseTeamProjectClient(team.name);
+        var key = parsed.project || 'Ungrouped';
+        if (key === selectedProject) {
+          visible.add(team.name);
+        }
+      });
+      return visible;
+    }
+
+    // =========================================================================
     // RENDERING - LIVE VIEW
     // =========================================================================
 
     function renderLiveView() {
+      renderProjectTree();
       renderAgentRoster();
       renderMessages();
       renderTaskBoard();
@@ -1327,7 +1583,10 @@ function getHTML() {
 
     function renderAgentRoster() {
       const container = document.getElementById('agent-roster');
-      const teams = Object.values(liveState.teams);
+      const visibleTeams = getVisibleTeams();
+      const teams = Object.values(liveState.teams).filter(function(team) {
+        return !visibleTeams || visibleTeams.has(team.name);
+      });
 
       if (teams.length === 0) {
         container.innerHTML = '<div class="empty-state">No active teams</div>';
@@ -1362,10 +1621,12 @@ function getHTML() {
 
     function renderMessages() {
       const container = document.getElementById('messages-feed');
+      const visibleTeams = getVisibleTeams();
       const allMessages = [];
 
       Object.entries(liveState.inboxes).forEach(([key, messages]) => {
         const [team, agent] = key.split('/');
+        if (visibleTeams && !visibleTeams.has(team)) return;
         messages.forEach(msg => {
           allMessages.push({ ...msg, toAgent: agent, team });
         });
@@ -1471,11 +1732,14 @@ function getHTML() {
     }
 
     function renderTaskBoard() {
+      const visibleTeams = getVisibleTeams();
       const pending = [];
       const progress = [];
       const completed = [];
 
-      Object.values(liveState.tasks).forEach(task => {
+      Object.entries(liveState.tasks).forEach(([key, task]) => {
+        var taskTeam = key.split('/')[0];
+        if (visibleTeams && !visibleTeams.has(taskTeam)) return;
         // Filter out system tasks (agent tracking)
         if (isSystemTask(task)) return;
 
@@ -1526,28 +1790,45 @@ function getHTML() {
             return;
           }
 
-          let html = '';
-          sessions.forEach(session => {
-            const startDate = new Date(session.started_at).toLocaleString();
-            const endDate = session.ended_at ? new Date(session.ended_at).toLocaleString() : 'Active';
+          // Group by project
+          var groups = {};
+          sessions.forEach(function(session) {
+            var parsed = parseTeamProjectClient(session.team_name);
+            var key = session.project || parsed.project || 'Ungrouped';
+            if (!groups[key]) groups[key] = [];
+            groups[key].push(session);
+          });
 
-            html += ${"`"}
-              <div class="session-card" onclick="loadSessionDetail(${'$'}{session.id})">
-                <button class="delete-btn" onclick="event.stopPropagation(); deleteSession(${'$'}{session.id})">Delete</button>
-                <div class="session-team">
-                  ${'$'}{session.team_name}
-                  ${'$'}{session.ended_at ? '<span class="ended-badge">Ended</span>' : ''}
-                </div>
-                <div class="session-stats">
-                  <span>${'$'}{session.agent_count} agents</span>
-                  <span>${'$'}{session.message_count} messages</span>
-                  <span>${'$'}{session.task_count} tasks</span>
-                </div>
-                <div class="session-dates">
-                  ${'$'}{startDate} → ${'$'}{endDate}
-                </div>
-              </div>
-            ${"`"};
+          var html = '';
+          var sortedKeys = Object.keys(groups).sort();
+
+          sortedKeys.forEach(function(key) {
+            html += '<div class="history-project-group" style="grid-column: 1 / -1;">';
+            html += '<div class="history-project-title">' + key + '</div>';
+            html += '<div class="history-grid">';
+
+            groups[key].forEach(function(session) {
+              var startDate = new Date(session.started_at).toLocaleString();
+              var endDate = session.ended_at ? new Date(session.ended_at).toLocaleString() : 'Active';
+
+              html += '<div class="session-card" onclick="loadSessionDetail(' + session.id + ')">';
+              html += '<button class="delete-btn" onclick="event.stopPropagation(); deleteSession(' + session.id + ')">Delete</button>';
+              html += '<div class="session-team">';
+              html += session.team_name;
+              html += session.ended_at ? '<span class="ended-badge">Ended</span>' : '';
+              html += '</div>';
+              html += '<div class="session-stats">';
+              html += '<span>' + session.agent_count + ' agents</span>';
+              html += '<span>' + session.message_count + ' messages</span>';
+              html += '<span>' + session.task_count + ' tasks</span>';
+              html += '</div>';
+              html += '<div class="session-dates">';
+              html += startDate + ' → ' + endDate;
+              html += '</div>';
+              html += '</div>';
+            });
+
+            html += '</div></div>';
           });
 
           container.innerHTML = html;
