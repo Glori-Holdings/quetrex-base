@@ -1,6 +1,6 @@
 # Team Orchestration Protocol
 
-**Version:** 1.0
+**Version:** 1.1
 **Owner:** Glen Barnhardt
 **Effective:** 2026-02-10
 **Referenced by:** Autonomous pipeline runner, /build-feature skill, CLAUDE.md
@@ -69,6 +69,32 @@ interface UserRow {
 
 The lead writes contracts into task descriptions. Agents implement to match.
 
+### 1.4 Cross-Cutting Concerns
+
+Bilateral contracts (Agent A ↔ Agent B interfaces) are necessary but not
+sufficient. Agents can implement matching TypeScript types but disagree on
+conventions that span the entire system.
+
+Before spawning any agent, the lead identifies and documents these team-wide
+conventions:
+
+- **URL conventions:** Trailing slashes, plural vs singular (`/api/users` vs
+  `/api/user`), query param naming (`camelCase` vs `snake_case`)
+- **Error response shape:** Standard envelope (e.g., `{ error: { code, message, details? } }`)
+- **Success response envelope:** Consistent wrapping (e.g., `{ data: T }` vs
+  raw `T` vs `{ [resourceName]: T }`)
+- **Streaming/SSE format:** Event names, payload shapes, heartbeat convention,
+  done signal (if applicable)
+- **Auth header expectations:** `Authorization: Bearer <token>`, cookie name,
+  or session lookup pattern
+- **Shared constants:** Status enums, role enums, pagination defaults
+
+Use the `/api-patterns` skill as the source for common patterns when the
+project doesn't already have established conventions.
+
+These conventions are included in every agent's spawn prompt (see Section 2.2)
+and verified during contract verification (see Section 4.1).
+
 ---
 
 ## Phase 2: Staggered Team Creation
@@ -106,6 +132,13 @@ Every agent spawn message MUST include:
 - tsconfig.json, biome.json, next.config.ts (HARD RULES)
 - [Any files owned by other agents]
 
+## Cross-Cutting Conventions (team-wide, do not deviate)
+[Paste the conventions from Section 1.4 — URL format, error shape,
+ response envelope, SSE format, auth headers, shared constants]
+
+## Domain Validation (run BEFORE quality gate)
+[Domain-specific checklist from Section 2.5 — selected by lead for this agent's role]
+
 ## Quality Gate
 Run before marking any task complete:
 npm run type-check && npm run lint
@@ -132,6 +165,34 @@ After spawning Wave N:
 3. Only spawn Wave N+1 agents after verifying Wave N contracts are correct
 4. If a contract is wrong, fix it with the Wave N agent before proceeding
 
+### 2.5 Domain-Specific Validation
+
+The universal quality gate (`npm run type-check && npm run lint`) catches syntax
+and style issues but not domain-specific failures. The lead selects the
+appropriate checklist for each agent and includes it in their spawn prompt.
+
+**DB / Schema agent:**
+- [ ] Schema applies without error (migration runs or `db:push` succeeds)
+- [ ] Basic queries compile against the schema (`select`, `insert`)
+- [ ] Foreign keys and indexes are present as planned
+
+**Backend / API agent:**
+- [ ] Dev server starts without crash (`npm run dev` or targeted route test)
+- [ ] Each endpoint responds to a test request (curl or node script)
+- [ ] Response shapes match the contract (spot-check JSON keys)
+
+**Frontend / UI agent:**
+- [ ] `npm run build` succeeds (no build-time errors)
+- [ ] Components render without console errors (check dev tools or test)
+- [ ] Data fetching hooks call the correct endpoints with correct params
+
+**Shared types / Library agent:**
+- [ ] All exported types compile
+- [ ] At least one consumer file imports without error
+
+Agents run their domain checklist BEFORE the universal quality gate. Failures
+in domain validation must be fixed before proceeding to `type-check` and `lint`.
+
 ---
 
 ## Phase 3: Coordination
@@ -143,6 +204,12 @@ When Agent A completes a contract-producing task:
 2. Lead verifies it matches the planned contract (types, exports, signatures)
 3. If correct: lead notifies Agent B that their dependency is met
 4. If incorrect: lead sends Agent A specific fix instructions, waits for fix
+
+**Final contract diff (recommended for 3+ contract boundaries):**
+After all implementation waves complete, the lead messages each agent:
+"List the exact contracts you exported (type names, function signatures, route
+paths)." Lead collects responses, diffs against the original plan and against
+each other. Any drift is corrected before the tester runs.
 
 ### 3.2 Progress Monitoring
 
@@ -169,6 +236,18 @@ After every teammate message:
 - Agents report completion by updating their tasks and messaging the lead.
 - Agents do NOT message each other directly. All coordination flows through the lead.
 
+### 3.5 Pre-Review Cross-Check (Optional)
+
+After all implementation agents complete but before the tester runs, each
+implementation agent reads the files they *consume* from other agents and
+confirms contracts match. The lead coordinates this by messaging each agent:
+"Read [file list] and confirm the types/endpoints match your expectations."
+
+- **Optional** for 2-developer teams (lead's contract relay is sufficient)
+- **Recommended** for 3-4 developer teams (catches subtle mismatches early)
+- Agents report "contracts match" or specific discrepancies to the lead
+- Lead resolves any discrepancies before proceeding to testing
+
 ---
 
 ## Phase 4: Validation
@@ -180,6 +259,42 @@ Before spawning the reviewer, the lead MUST:
 2. Verify that TypeScript interfaces match on both sides
 3. Verify that API request/response shapes are consistent
 4. Fix any mismatches by assigning correction tasks
+
+**HTTP-level verification (in addition to TypeScript types):**
+- [ ] Exact URL paths match between route file location and fetch/client calls
+      (e.g., `src/app/api/users/route.ts` → fetched as `/api/users`)
+- [ ] HTTP methods match (POST vs PUT vs PATCH) on both producer and consumer
+- [ ] Response JSON key names match between `NextResponse.json()` calls and
+      consumer destructuring (e.g., `{ users: [] }` vs `{ data: [] }`)
+- [ ] Status codes are consistent (201 for creation, 200 for retrieval, etc.)
+- [ ] SSE event names and payload shapes match between emitter and listener
+      (if applicable)
+- [ ] Error response shapes match the cross-cutting convention (Section 1.4)
+- [ ] Query parameters and request body keys match between sender and receiver
+
+### 4.1.5 Lead E2E Smoke Test
+
+After contract verification passes, the lead runs a quick behavioral smoke test
+to catch runtime issues that static verification misses (middleware ordering,
+environment config, runtime imports).
+
+**AUTONOMOUS mode:**
+1. Start the dev server (`npm run dev`) in background
+2. Wait for server ready signal
+3. Execute scripted requests against core happy path (curl or node script)
+4. Verify responses match expected shapes and status codes
+5. Kill the dev server
+
+**INTERACTIVE mode:**
+1. Start the dev server if not already running
+2. Use browser automation or the surveillance dashboard to test the happy path
+3. Verify key UI flows render correctly and API calls succeed
+
+If the smoke test fails:
+- Identify the failing integration point
+- Create a fix task and assign to the responsible developer
+- Re-run smoke test after fix
+- Do NOT proceed to reviewer until smoke test passes
 
 ### 4.2 Reviewer Gate
 
@@ -337,6 +452,18 @@ the quality gate checklist (type-check, lint, test) before creating the PR.
 12. **Agents messaging each other directly.**
     All coordination flows through the lead to prevent confusion.
 
+13. **Per-chunk storage in streaming.**
+    Store the accumulated/final result, not individual SSE chunks. Storing each
+    chunk creates data bloat and race conditions.
+
+14. **Hidden UI elements (opacity-0 on unfinished work).**
+    Invisible elements block browser automation and testing. If a component isn't
+    ready, don't render it at all — use conditional rendering, not CSS hiding.
+
+15. **Orphaned cross-cutting concerns.**
+    Defining conventions (Section 1.4) but never verifying compliance. The lead
+    must check cross-cutting conventions during contract verification (4.1).
+
 ---
 
 ## Quick Reference: Lead Checklist
@@ -345,7 +472,9 @@ the quality gate checklist (type-check, lint, test) before creating the PR.
 - [ ] All deliverables identified
 - [ ] File ownership map created (no overlaps)
 - [ ] Contracts defined (TypeScript types, API shapes)
+- [ ] Cross-cutting concerns documented (Section 1.4)
 - [ ] Tasks created with dependency chains
+- [ ] Domain validation checklists selected per agent (Section 2.5)
 - [ ] Mode determined (AUTONOMOUS or INTERACTIVE)
 - [ ] /agent-surveillance launched (INTERACTIVE only)
 
@@ -357,7 +486,8 @@ the quality gate checklist (type-check, lint, test) before creating the PR.
 - [ ] Blocked agents notified when unblocked
 
 ### Before PR
-- [ ] All contract boundaries verified (types match)
+- [ ] All contract boundaries verified (types + HTTP-level, Section 4.1)
+- [ ] E2E smoke test passed (Section 4.1.5)
 - [ ] Reviewer sent APPROVED
 - [ ] `npm run type-check` passes (zero errors, zero warnings)
 - [ ] `npm run lint` passes (zero errors, zero warnings)
@@ -375,4 +505,4 @@ the quality gate checklist (type-check, lint, test) before creating the PR.
 ---
 
 *This protocol is referenced by CLAUDE.md and enforced by team lead agents.
-Last updated: 2026-02-10.*
+Last updated: 2026-02-11.*
