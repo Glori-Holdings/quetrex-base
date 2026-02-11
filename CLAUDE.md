@@ -34,7 +34,7 @@ Launch agent-surveillance dashboard before every TeamCreate (interactive session
 - All work in git worktrees with feature branches (never on main)
 - PRs require human review — agents cannot merge
 - Use Context7 for latest documentation
-- Skills available: /agent-surveillance, /api-patterns, /build-feature,
+- Skills available: /agent-surveillance, /api-patterns,
   /close-issue, /create-issue, /define-architecture, /design,
   /drizzle-postgres, /framer-motion, /migrate-nextjs-16, /nextjs-16,
   /open-projects, /quetrex-init, /reactive-frontend, /shadcn-ui,
