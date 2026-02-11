@@ -77,29 +77,31 @@ Now that the dashboard is live, create your team. The dashboard will immediately
 
 ### Live Mode (Default)
 
-**3-panel layout:**
+**3-panel layout with project hierarchy:**
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Agent Dashboard          [Live] [History]  ☀ ● Live │
-├──────────┬──────────────────────────────────────────┤
-│  AGENT   │  MESSAGES                           (12) │
-│  ROSTER  │  ┌─────────────────────────────────┐     │
-│          │  │ researcher → team-lead    2m ago │     │
-│ ┌──────┐ │  │ Task completed: Research done    │     │
-│ │ R    │ │  └─────────────────────────────────┘     │
-│ │ resea│ │                                          │
-│ └──────┘ │  TASK BOARD                              │
-│ ┌──────┐ │  Pending (1)  │ In Progress (2) │ Done(3)│
-│ │ T    │ │  ┌──────────┐ │ ┌─────────────┐ │       │
-│ │ team-│ │  │ Task #4   │ │ │ Task #2     │ │       │
-│ └──────┘ │  └──────────┘ │ └─────────────┘ │       │
-└──────────┴──────────────────────────────────────────┘
+┌─ Agent Dashboard ───────── [Live] [History] ☀ ● ──┐
+├──────────┬─────────────────────────────────────────┤
+│ PROJECTS │  MESSAGES                          (12) │
+│          │  ┌────────────────────────────────┐     │
+│ ▶ aidio (2)│ researcher → team-lead    2m ago│     │
+│   APP-42 │  │ Task completed                 │     │
+│   APP-51 │  └────────────────────────────────┘     │
+│ ▶ dealerq│                                         │
+│   DQ-123 │  TASK BOARD                             │
+│ ▶ Ungrouped  Pending │ In Progress │ Completed     │
+│──────────│                                         │
+│ ROSTER   │                                         │
+│ ┌──────┐ │                                         │
+│ │ dev  │ │                                         │
+│ └──────┘ │                                         │
+└──────────┴─────────────────────────────────────────┘
 ```
 
 **Features:**
-- **Agent Roster (left)**: Colored avatar circles with agent names, model badges, and lead indicators
-- **Messages (top right)**: Chronological feed of all inter-agent messages with auto-scroll
+- **Project Tree (left, top)**: Teams grouped by project with collapsible hierarchy. Click a project to filter to its teams; click a specific team to filter further. "Clear filter" returns to the all-projects view.
+- **Agent Roster (left, bottom)**: Colored avatar circles with agent names, model badges, and lead indicators. Filtered by selected project/team.
+- **Messages (top right)**: Chronological feed of all inter-agent messages with auto-scroll. Filtered by selected project/team.
   - Protocol messages (task assignments, shutdown requests) rendered as styled cards
   - Plain text messages get markdown rendering (bold, italic, code blocks)
   - Click any message to open a thread modal showing full conversation between two agents
@@ -116,6 +118,7 @@ Now that the dashboard is live, create your team. The dashboard will immediately
 Click "History" in the header to view past sessions.
 
 **Session grid:**
+- Sessions grouped by project with section headers
 - Each card shows: team name, agent count, message count, task count, date range, ENDED badge
 - Hover to reveal Delete button (cascade delete through all related tables)
 - Click a card to load the full session into the same 3-panel layout
@@ -126,6 +129,25 @@ Click "History" in the header to view past sessions.
 - "Back to History" button to return to grid
 
 **Why this matters:** After a multi-agent team finishes its work, you can review the entire message history, see what tasks were completed, and understand the flow of work. This is invaluable for debugging failed workflows or learning from successful ones.
+
+### Project Hierarchy
+
+When the quetrex-runner processes issues from multiple projects simultaneously, the dashboard groups teams by project in a collapsible tree. This prevents interleaving of agents, messages, and tasks from different projects.
+
+**Grouping model:** Teams are grouped by parsing the team name with the regex `/^(.+)-([A-Z][A-Z0-9]*-[0-9]+)$/`. The first capture group is the project slug, the second is the issue identifier. Teams that don't match this pattern appear under "Ungrouped".
+
+**Examples:**
+- `aidio-APP-42` → project=`aidio`, identifier=`APP-42`
+- `dealerq-2026-DQ-123` → project=`dealerq-2026`, identifier=`DQ-123`
+- `random-team` → Ungrouped
+
+**Filtering:** Click a project name to filter the roster, messages, and task board to that project's teams only. Click a specific team identifier to narrow further. "Clear filter" returns to the all-projects view.
+
+### Team Naming Convention
+
+For the project hierarchy to work, the quetrex-runner injects a `project_slug` into the task prompt, instructing Claude to name teams as `{project_slug}-{identifier}` (e.g., `my-app-APP-42`). The `project_slug` is derived from `Path(repo_path).name` — the local directory name of the project.
+
+If you're using the dashboard outside the runner pipeline, manually name your teams following this convention to get automatic project grouping.
 
 ---
 
@@ -214,7 +236,8 @@ Uses `better-sqlite3` for synchronous, fast SQLite access. Wrapped in try/catch 
 GET  /                              → Serve the HTML page
 GET  /api/state                     → Full live state object
 GET  /api/events                    → SSE stream
-GET  /api/sessions                  → List historical sessions with counts
+GET  /api/projects                  → Teams grouped by project
+GET  /api/sessions                  → List historical sessions with counts and project
 GET  /api/sessions/:id              → Session detail with agents array
 GET  /api/sessions/:id/messages     → Paginated messages (?limit=N&offset=N)
 GET  /api/sessions/:id/tasks        → All tasks for a session
