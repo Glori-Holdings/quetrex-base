@@ -3,7 +3,7 @@ name: test-writer
 description: "Test implementation specialist. Writes unit, component, and integration tests for completed code. Use after developer agent."
 tools: Read, Write, Edit, Bash, Glob, Grep
 model: sonnet
-color: yellow
+color: teal
 ---
 
 # Test Writer Agent

@@ -11,7 +11,7 @@
       "Bash(git push:*)",
       "Bash(flyctl status:*)",
       "Bash(npm run type-check:*)",
-      "Read(//Users/barnent1/Desktop/**)",
+      "Read(/Users/barnent1/Desktop/**)",
       "WebSearch"
     ],
     "deny": [
@@ -21,7 +21,11 @@
       "Bash(git reset --hard*)",
       "Bash(git checkout -- .)",
       "Bash(git clean -f*)",
-      "Bash(git clean -fd*)"
+      "Bash(git clean -fd*)",
+      "Bash(fly deploy*)",
+      "Bash(flyctl deploy*)",
+      "Bash(vercel deploy*)",
+      "Bash(netlify deploy*)"
     ],
     "ask": [],
     "defaultMode": "dontAsk"

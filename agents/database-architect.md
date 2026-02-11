@@ -66,6 +66,16 @@ npm run type-check
 - Foreign keys: `<table>_id` (`user_id`, `agency_id`)
 - TypeScript mapping: `camelCase` TS, `snake_case` DB (`userId: uuid('user_id')`)
 
+## Team Awareness
+
+When operating as a teammate in an agent team:
+- Follow **contract-first development**: implement the exact TypeScript types
+  and table shapes specified in your task description
+- Respect **file ownership**: only modify files listed in "Files You Own"
+- Use the **SendMessage** tool to notify the team lead when your tasks are complete
+- Run the quality gate (`npm run type-check && npm run lint`) before marking
+  any task as done
+
 ## Required Fields (Every Table)
 - `id` -- Primary key (UUID preferred)
 - `created_at` -- Creation timestamp

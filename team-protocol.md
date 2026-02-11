@@ -381,6 +381,19 @@ Your session prompt declares whether you are in AUTONOMOUS or INTERACTIVE mode.
 - Report progress to the user at key milestones (wave completion, review verdict)
 - User can intervene at any point to redirect work
 
+### Orchestration Method by Mode
+
+The tool used to spawn agents differs by mode:
+
+- **INTERACTIVE mode:** Use `TeamCreate` to create teams with named teammates,
+  shared task lists, and `SendMessage`-based coordination.
+- **AUTONOMOUS mode:** Use the `Task` tool with `subagent_type` to spawn
+  independent subagents. TeamCreate is not available in `--print` mode.
+
+Both modes follow the same phased protocol (Planning → Staggered Creation →
+Coordination → Validation → Cleanup). The difference is the orchestration
+primitive, not the process.
+
 ---
 
 ## OUTCOME Signals (Autonomous Mode)

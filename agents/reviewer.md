@@ -64,7 +64,7 @@ Compare against established project patterns:
 
 ### Step 6: Deliver Verdict
 
-Send your verdict as a message to the team lead.
+Use the **SendMessage** tool to deliver your verdict to the team lead.
 
 **If APPROVED:**
 ```
