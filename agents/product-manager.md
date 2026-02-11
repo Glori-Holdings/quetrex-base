@@ -3,7 +3,7 @@ name: product-manager
 description: "Requirements gathering and PRD creation specialist. Conducts structured user interviews to create complete requirements before technical planning."
 tools: Read, Grep, Glob, Bash, AskUserQuestion
 model: sonnet
-color: orange
+color: amber
 ---
 
 # Product Manager Agent

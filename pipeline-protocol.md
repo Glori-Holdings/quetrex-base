@@ -25,7 +25,7 @@ Update `.issue/progress.md` with a summary of what was accomplished.
 ## If Context Is Running Low
 
 1. **STOP** working on new items
-2. Commit all work: `git add -u && git commit -m "wip: [progress description]"`
+2. Commit all work: `git add -A && git commit -m "wip: [progress description]"`
 3. Update `.issue/progress.md` with what was done and what remains
 4. Update `.issue/stage-state.json` with `"status": "in_progress"`
 5. The next session will read these files and continue
