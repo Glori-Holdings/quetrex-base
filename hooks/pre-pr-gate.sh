@@ -20,7 +20,8 @@ fi
 # Find the worktree root (where .issue/ lives)
 WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 if [ -z "$WORKTREE_ROOT" ]; then
-  echo '{"decision": "block", "reason": "Cannot determine git root. Are you in a worktree?"}'
+  # Not in a git repo — nothing to protect, let the command through
+  echo '{"decision": "undefined"}'
   exit 0
 fi
 
