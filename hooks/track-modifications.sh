@@ -15,7 +15,22 @@ SESSION_MARKER="/tmp/claude-modified-$PPID"
 # Track if Write or Edit tools were used
 if [[ "$TOOL_NAME" == "Write" ]] || [[ "$TOOL_NAME" == "Edit" ]]; then
   # Mark that code was modified this session
-  echo "$(date +%s)" > "$SESSION_MARKER"
+  date +%s > "$SESSION_MARKER"
+
+  # --- Receipt Invalidation ---
+  # When code is modified, invalidate quality gate receipts
+  # (forces re-verification before PR creation)
+  WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+  if [ -n "$WORKTREE_ROOT" ] && [ -d "$WORKTREE_ROOT/.issue/receipts" ]; then
+    for RECEIPT in type-check.json lint.json test.json coverage.json smoke-test.json; do
+      if [ -f "$WORKTREE_ROOT/.issue/receipts/$RECEIPT" ]; then
+        # Mark as stale rather than deleting (preserves history)
+        jq '.status = "stale" | .invalidated_at = now | .invalidated_reason = "code_modified"' \
+          "$WORKTREE_ROOT/.issue/receipts/$RECEIPT" > "$WORKTREE_ROOT/.issue/receipts/$RECEIPT.tmp" \
+          && mv "$WORKTREE_ROOT/.issue/receipts/$RECEIPT.tmp" "$WORKTREE_ROOT/.issue/receipts/$RECEIPT"
+      fi
+    done
+  fi
 
   # --- Loop Detection ---
   FILE_PATH=$(echo "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)

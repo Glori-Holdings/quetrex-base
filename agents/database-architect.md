@@ -54,6 +54,18 @@ model NewTable {
 - Drizzle: `npx drizzle-kit generate` then `npx drizzle-kit push`
 - Prisma: `npx prisma migrate dev --name <name>` then `npx prisma generate`
 
+### Step 5.5: Domain Validation Receipt (MANDATORY)
+
+You MUST verify the migration actually works and produce a receipt:
+
+```bash
+# Produce domain receipt
+bash ~/.claude/hooks/quality-gate.sh domain-db "npx drizzle-kit push"
+```
+
+If the migration fails, DO NOT proceed. Fix the schema and retry.
+The receipt at `.issue/receipts/domain-db.json` must show `"status": "pass"`.
+
 ### Step 6: Verify
 ```bash
 npm run type-check

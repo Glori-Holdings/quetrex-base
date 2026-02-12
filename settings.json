@@ -21,13 +21,14 @@
       "Bash(git reset --hard*)",
       "Bash(git checkout -- .)",
       "Bash(git clean -f*)",
-      "Bash(git clean -fd*)",
+      "Bash(git clean -fd*)"
+    ],
+    "ask": [
       "Bash(fly deploy*)",
       "Bash(flyctl deploy*)",
       "Bash(vercel deploy*)",
       "Bash(netlify deploy*)"
     ],
-    "ask": [],
     "defaultMode": "dontAsk"
   },
   "hooks": {
@@ -76,6 +77,11 @@
             "type": "command",
             "command": "bash /Users/barnent1/.claude/hooks/enforce-branch.sh",
             "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "bash /Users/barnent1/.claude/hooks/pre-pr-gate.sh",
+            "timeout": 10000
           }
         ]
       }

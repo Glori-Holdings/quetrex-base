@@ -343,6 +343,23 @@ Only after all quality gates pass:
 4. Create PR with summary of changes, test plan, and files modified
 5. PR requires human review before merge (HARD RULE)
 
+### 4.5.1 Receipt Validation (MANDATORY -- hook-enforced)
+
+The `pre-pr-gate.sh` hook blocks `gh pr create` unless ALL receipts are present
+and valid. The lead CANNOT bypass this. The following receipts are required:
+
+| Receipt | Producer | Condition |
+|---------|----------|-----------|
+| `type-check.json` | QA or developer | Always required |
+| `lint.json` | QA or developer | Always required |
+| `test.json` | QA or developer | Always required |
+| `reviewer.json` | reviewer | Always required (verdict=APPROVED) |
+| `smoke-test.json` | lead | Required if `.issue/smoke-test-required` exists |
+| `domain-*.json` | domain agent | Required if domain validation was assigned |
+
+If any receipt is missing, the hook will block the command with a message
+listing exactly which gates are unmet.
+
 ---
 
 ## Phase 5: Cleanup
@@ -405,6 +422,18 @@ Output exactly one OUTCOME line as the last substantive line before shutdown.
 | `OUTCOME:BLOCKED reason="<description>"` | Cannot proceed, requires human intervention |
 | `OUTCOME:BUDGET_EXCEEDED` | Token or cost budget reached before completion |
 | `OUTCOME:TESTS_FAILED` | Tests fail after maximum retry attempts |
+
+### OUTCOME Validation (Autonomous Mode)
+
+Before emitting `OUTCOME:PR_READY`, the lead MUST verify:
+1. A PR URL was returned by `gh pr create`
+2. All receipt files exist in `.issue/receipts/`
+3. All receipts show `"status": "pass"`
+
+The pipeline runner independently validates: after receiving `OUTCOME:PR_READY`,
+it runs `verify_worktree()` to check type-check, lint, test, and build. If
+verification fails, the runner re-classifies the outcome as
+`OUTCOME:BLOCKED reason="runner verification failed"`.
 
 ---
 
@@ -503,6 +532,9 @@ the quality gate checklist (type-check, lint, test) before creating the PR.
 - [ ] `npm run type-check` passes (zero errors, zero warnings)
 - [ ] `npm run lint` passes (zero errors, zero warnings)
 - [ ] `npm run test` passes (all tests green)
+- [ ] All quality gate receipts present in `.issue/receipts/` (Section 4.5.1)
+- [ ] All receipts show `"status": "pass"`
+- [ ] Reviewer receipt shows `"verdict": "APPROVED"`
 - [ ] Commit made with descriptive message
 - [ ] PR created with summary and test plan
 

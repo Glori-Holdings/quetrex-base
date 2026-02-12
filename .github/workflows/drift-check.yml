@@ -1,0 +1,109 @@
+name: Config Drift Check
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Run daily at 8am UTC
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+jobs:
+  drift-check:
+    runs-on: self-hosted  # Must run on the machine where ~/.claude exists
+    steps:
+      - name: Checkout quetrex-base
+        uses: actions/checkout@v4
+
+      - name: Check for drift
+        id: drift
+        run: |
+          DRIFT_FOUND=false
+          DRIFT_REPORT=""
+
+          # Files to check (same list as sync script)
+          FILES=(
+            "CLAUDE.md"
+            "HARD-RULES.md"
+            "hooks/config-guard.sh"
+            "hooks/test-guard.sh"
+            "hooks/require-approval.sh"
+            "hooks/enforce-branch.sh"
+            "hooks/track-modifications.sh"
+            "hooks/quality-gate.sh"
+            "hooks/pre-pr-gate.sh"
+            "settings.json"
+            "statusline-command.sh"
+            "team-protocol.md"
+            "pipeline-protocol.md"
+            "commands/add-project.md"
+            "commands/create-issue.md"
+            "commands/deploy-production.md"
+            "skills/agent-surveillance/SKILL.md"
+            "skills/agent-surveillance/package.json"
+            "skills/agent-surveillance/scripts/server.js"
+          )
+
+          for file in "${FILES[@]}"; do
+            REPO_FILE="./$file"
+            RUNNING_FILE="$HOME/.claude/$file"
+
+            if [ ! -f "$REPO_FILE" ]; then
+              continue  # Not in repo yet
+            fi
+
+            if [ ! -f "$RUNNING_FILE" ]; then
+              DRIFT_FOUND=true
+              DRIFT_REPORT+="MISSING in ~/.claude: $file\n"
+              continue
+            fi
+
+            if ! diff -q "$REPO_FILE" "$RUNNING_FILE" > /dev/null 2>&1; then
+              DRIFT_FOUND=true
+              DRIFT_REPORT+="DRIFTED: $file\n"
+              diff --unified=3 "$RUNNING_FILE" "$REPO_FILE" | head -20 >> /tmp/drift-details.txt
+              echo "---" >> /tmp/drift-details.txt
+            fi
+          done
+
+          # Check for untracked files in ~/.claude/commands/
+          for cmd_file in "$HOME/.claude/commands/"*.md; do
+            [ -f "$cmd_file" ] || continue
+            basename_file=$(basename "$cmd_file")
+            if [ ! -f "./commands/$basename_file" ]; then
+              DRIFT_FOUND=true
+              DRIFT_REPORT+="UNTRACKED: commands/$basename_file\n"
+            fi
+          done
+
+          if $DRIFT_FOUND; then
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+            echo -e "$DRIFT_REPORT"
+            echo "## Drift Details"
+            cat /tmp/drift-details.txt 2>/dev/null || true
+            exit 1
+          else
+            echo "drift=false" >> "$GITHUB_OUTPUT"
+            echo "No drift detected. All files in sync."
+          fi
+
+      - name: Create Issue on Drift
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'config-drift',
+              state: 'open'
+            });
+            if (existing.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'Config drift detected between quetrex-base and ~/.claude',
+                body: 'The drift-check CI job found differences. Run `./scripts/sync-to-claude.sh --dry-run` to review.',
+                labels: ['config-drift', 'priority:high']
+              });
+            }
