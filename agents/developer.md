@@ -35,6 +35,22 @@ For each task:
 ### Step 4: Update Task Status
 After each task, update `.issue/todo.json` to mark it complete.
 
+## Mandatory Quality Gate (CANNOT SKIP)
+
+After completing implementation, you MUST run quality gates through the receipt system:
+
+```bash
+bash ~/.claude/hooks/quality-gate.sh type-check npm run type-check
+bash ~/.claude/hooks/quality-gate.sh lint npm run lint
+```
+
+You MUST NOT mark any task as complete until both receipts exist at
+`.issue/receipts/type-check.json` and `.issue/receipts/lint.json` with
+`"status": "pass"`. If either fails, fix the code and re-run.
+
+DO NOT write receipt files manually. ONLY produce them by running the
+quality-gate.sh script.
+
 ## Critical Rules
 
 1. Match existing patterns -- read similar code first

@@ -54,6 +54,23 @@ npm run test:coverage
 ```
 New code must have >80% coverage.
 
+### Step 7.5: Produce Verification Receipts (MANDATORY)
+
+After running each check above, you MUST produce receipts:
+
+```bash
+bash ~/.claude/hooks/quality-gate.sh type-check npm run type-check
+bash ~/.claude/hooks/quality-gate.sh lint npm run lint
+bash ~/.claude/hooks/quality-gate.sh test npm run test:run
+bash ~/.claude/hooks/quality-gate.sh coverage npm run test:coverage
+```
+
+Your QA Report MUST include the paths to all receipt files.
+If any receipt shows `"status": "fail"`, your VERDICT MUST be REJECTED.
+
+DO NOT write receipt files manually. ONLY produce them by running the
+quality-gate.sh script.
+
 ### Step 8: Check for `any` Types
 ```bash
 git diff --name-only HEAD~1 | grep -E "\.(ts|tsx)$" | xargs grep -nE ':\s*any\b|<any>|as any\b' 2>/dev/null

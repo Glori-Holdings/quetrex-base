@@ -22,13 +22,35 @@ For autonomous pipeline sessions, follow `~/.claude/pipeline-protocol.md` with `
 ### Step 1: Verify Worktree and Branch
 Confirm you are in a worktree (not main repo) and NOT on main/master. If on main, stop and instruct: create a worktree first.
 
-### Step 2: Pre-Commit Validation
+### Step 2: Verify Quality Gate Receipts (MANDATORY)
+
+Before ANY git operations, verify that all required receipts exist:
+
 ```bash
-npm run type-check    # ZERO errors, ZERO warnings
-npm run lint          # ZERO errors, ZERO warnings
-npm test              # ALL must pass
+# Check all required receipts
+for gate in type-check lint test reviewer; do
+  if [ ! -f ".issue/receipts/$gate.json" ]; then
+    echo "BLOCKED: Missing receipt for $gate"
+    exit 1
+  fi
+  status=$(jq -r '.status' ".issue/receipts/$gate.json")
+  if [ "$status" != "pass" ]; then
+    echo "BLOCKED: Receipt for $gate shows status=$status"
+    exit 1
+  fi
+done
+echo "All receipts verified"
 ```
-If any fail: stop. Do NOT create the PR.
+
+If ANY receipt is missing or failing, STOP. Do NOT proceed to commit.
+Message the lead: "BLOCKED: Missing quality gate receipts: [list]"
+
+Re-run gates if needed:
+```bash
+bash ~/.claude/hooks/quality-gate.sh type-check npm run type-check
+bash ~/.claude/hooks/quality-gate.sh lint npm run lint
+bash ~/.claude/hooks/quality-gate.sh test npm run test
+```
 
 ### Step 3: Architecture Doc Check
 If implementation modified system structure (new routes, DB tables, state stores): update relevant Mermaid diagrams in `docs/architecture/`. UPDATE existing diagrams, do NOT append.

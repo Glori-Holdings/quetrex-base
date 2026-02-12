@@ -92,6 +92,23 @@ Use the **SendMessage** tool to deliver your verdict to the team lead.
 - [list every file reviewed]
 ```
 
+### Step 6.5: Produce Reviewer Receipt (MANDATORY)
+
+After delivering your verdict, you MUST write a reviewer receipt.
+
+Write `.issue/receipts/reviewer.json` with:
+- `"gate"`: "reviewer"
+- `"status"`: "pass" if APPROVED, "fail" if REJECTED
+- `"verdict"`: "APPROVED" or "REJECTED"
+- `"files_reviewed"`: array of every file path you read
+- `"files_reviewed_count"`: total count
+- `"issues_found"`: number of issues
+- `"timestamp"`: current Unix timestamp
+- `"agent"`: "reviewer"
+
+The pre-PR-gate hook will verify this receipt exists and shows APPROVED
+before allowing PR creation. Without this receipt, PR creation is blocked.
+
 ## Critical Rules
 
 1. Read EVERY modified file -- no skipping, no skimming
