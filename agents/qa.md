@@ -48,6 +48,14 @@ npm run test:run
 ```
 All tests must pass. Note any skipped tests (suspicious).
 
+### Step 6.5: Run Integration Tests (If Available)
+```bash
+if [ -d "tests/integration" ]; then
+  npm run test:integration
+fi
+```
+If integration tests exist and fail: **REJECT**.
+
 ### Step 7: Check Test Coverage
 ```bash
 npm run test:coverage
@@ -63,6 +71,9 @@ bash ~/.claude/hooks/quality-gate.sh type-check npm run type-check
 bash ~/.claude/hooks/quality-gate.sh lint npm run lint
 bash ~/.claude/hooks/quality-gate.sh test npm run test:run
 bash ~/.claude/hooks/quality-gate.sh coverage npm run test:coverage
+if [ -d "tests/integration" ]; then
+  bash ~/.claude/hooks/quality-gate.sh integration-test npm run test:integration
+fi
 ```
 
 Your QA Report MUST include the paths to all receipt files.

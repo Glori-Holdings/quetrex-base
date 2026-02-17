@@ -37,6 +37,28 @@ If `.issue/pre-existing-errors.json` exists (created manually or by a pipeline i
 - Map dependencies and data flow
 - Check for existing similar implementations
 
+### Step 4.5: Impact Analysis (Mandatory for Brownfield)
+
+When modifying existing code (not creating entirely new files), perform mandatory impact analysis:
+
+1. For each file to be modified, find all importers:
+   ```bash
+   grep -rl "from.*{module_name}" src/ --include="*.ts" --include="*.tsx"
+   ```
+2. Document the dependency chain in `.issue/architecture-decision.md` under a new section:
+   ```markdown
+   ## Impact Analysis
+
+   ### {filename}
+   - Direct consumers: [list files that import this module]
+   - Indirect consumers: [files that import the direct consumers]
+   - Test coverage: [test files that cover affected areas]
+   ```
+3. If a shared file (`lib/types`, `lib/db/schema`, `lib/shared`, `lib/utils`, `components/ui`) is being modified:
+   - List ALL consumers (not just a sample)
+   - Add a task in `todo.json` to verify each consumer still compiles after the change
+   - Require `npm run type-check` verification after each shared file modification
+
 ### Step 5: Create Deliverables
 
 Create `.issue/architecture-decision.md`:
@@ -50,6 +72,7 @@ Create `.issue/architecture-decision.md`:
 ## Patterns to Follow
 ## Files to Create
 ## Files to Modify
+## Impact Analysis
 ## Test Strategy (unit, component, API, integration, E2E)
 ## Sub-Agent Opportunities
 ## Considerations
