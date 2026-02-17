@@ -107,6 +107,34 @@ if [ -n "$WORKTREE_ROOT" ]; then
   fi
 fi
 
+# 8. Secrets scanning in changed files
+if [ -n "$WORKTREE_ROOT" ]; then
+  CHANGED_FILES=$(git -C "$WORKTREE_ROOT" diff --name-only main...HEAD 2>/dev/null || true)
+  if [ -n "$CHANGED_FILES" ]; then
+    SECRETS_FOUND=""
+    while IFS= read -r file; do
+      filepath="$WORKTREE_ROOT/$file"
+      [ -f "$filepath" ] || continue
+      # Check for common secret patterns
+      if grep -qEi '(AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |DSA )?PRIVATE KEY|sk_live_[0-9a-zA-Z]{24,}|ghp_[0-9a-zA-Z]{36}|xox[bpoas]-[0-9a-zA-Z-]+)' "$filepath" 2>/dev/null; then
+        SECRETS_FOUND="$SECRETS_FOUND $file"
+      fi
+    done <<< "$CHANGED_FILES"
+    if [ -n "$SECRETS_FOUND" ]; then
+      MISSING="$MISSING secrets-detected(files:$SECRETS_FOUND)"
+    fi
+  fi
+fi
+
+# 9. Team protocol validation (when team artifacts exist)
+if [ -n "$WORKTREE_ROOT" ] && [ -d "$WORKTREE_ROOT/.issue" ]; then
+  # Check if this was a team session (team config exists)
+  if ls "$WORKTREE_ROOT/.issue"/team-*.json >/dev/null 2>&1; then
+    # Team sessions require reviewer receipt
+    check_receipt "$RECEIPT_DIR/reviewer.json" "team-reviewer" "verdict" "APPROVED"
+  fi
+fi
+
 if [ -n "$MISSING" ]; then
   echo "{\"decision\": \"block\", \"reason\": \"PR BLOCKED: Missing or failing quality gate receipts:$MISSING. Run all gates and produce receipts before creating PR.\"}"
   exit 0

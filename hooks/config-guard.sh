@@ -30,6 +30,15 @@ case "$BASENAME" in
     ;;
 esac
 
+# Block edits to existing migration SQL files (only new migrations allowed)
+if [[ "$FILE_PATH" == */drizzle/*.sql ]]; then
+  if [ -f "$FILE_PATH" ]; then
+    echo '{"decision": "block", "reason": "HARD-RULE: Cannot modify existing migration files. Create a new migration instead."}'
+    exit 0
+  fi
+  # New migration file — allow
+fi
+
 # Not a protected file -- allow
 echo '{"decision": "undefined"}'
 exit 0
