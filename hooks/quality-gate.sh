@@ -54,8 +54,8 @@ GIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
 # Get agent name from environment (set by Claude Code agent framework)
 AGENT_NAME="${CLAUDE_AGENT_NAME:-unknown}"
 
-# Write receipt using jq
-jq -n \
+# Build receipt JSON
+RECEIPT=$(jq -n \
   --arg gate "$GATE_NAME" \
   --arg status "$STATUS" \
   --argjson timestamp "$END_TS" \
@@ -77,7 +77,25 @@ jq -n \
     exit_code: $exit_code,
     git_sha: $git_sha,
     duration_ms: $duration_ms
-  }' > "$RECEIPT_DIR/$GATE_NAME.json"
+  }')
+
+# Compute HMAC if secret is available
+# Reads from QUETREX_HMAC_SECRET env var, falls back to macOS Keychain
+HMAC_SECRET="${QUETREX_HMAC_SECRET:-}"
+if [ -z "$HMAC_SECRET" ]; then
+  HMAC_SECRET=$(security find-generic-password -s quetrex-hmac -w 2>/dev/null || true)
+fi
+
+if [ -n "$HMAC_SECRET" ]; then
+  # Canonical JSON must match Python's json.dumps(data, sort_keys=True, separators=(",", ":"))
+  # Exclude the "hmac" field itself from the canonical form
+  CANONICAL=$(printf '%s' "$RECEIPT" | jq -cS 'del(.hmac)')
+  HMAC_VALUE=$(printf '%s' "$CANONICAL" | openssl dgst -sha256 -hmac "$HMAC_SECRET" | sed 's/^.*= //')
+  echo "$RECEIPT" | jq --arg hmac "$HMAC_VALUE" '. + {hmac: $hmac}' > "$RECEIPT_DIR/$GATE_NAME.json"
+else
+  echo "WARNING: No HMAC secret available. Receipt written without HMAC signature." >&2
+  echo "$RECEIPT" | jq '.' > "$RECEIPT_DIR/$GATE_NAME.json"
+fi
 
 # Output the original command output for the agent to see
 echo "$OUTPUT"
