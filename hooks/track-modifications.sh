@@ -22,7 +22,7 @@ if [[ "$TOOL_NAME" == "Write" ]] || [[ "$TOOL_NAME" == "Edit" ]]; then
   # (forces re-verification before PR creation)
   WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
   if [ -n "$WORKTREE_ROOT" ] && [ -d "$WORKTREE_ROOT/.issue/receipts" ]; then
-    for RECEIPT in type-check.json lint.json test.json coverage.json smoke-test.json; do
+    for RECEIPT in type-check.json lint.json test.json coverage.json smoke-test.json reviewer.json; do
       if [ -f "$WORKTREE_ROOT/.issue/receipts/$RECEIPT" ]; then
         # Mark as stale rather than deleting (preserves history)
         jq '.status = "stale" | .invalidated_at = now | .invalidated_reason = "code_modified"' \
