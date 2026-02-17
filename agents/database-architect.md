@@ -56,7 +56,9 @@ model NewTable {
 
 ### Step 5.5: Domain Validation Receipt (MANDATORY)
 
-You MUST verify the migration actually works and produce a receipt:
+MANDATORY: You MUST verify the migration actually works and produce a receipt.
+The pre-PR gate will automatically detect schema changes and BLOCK the PR if this receipt is missing.
+This receipt proves the migration was tested against a real database.
 
 ```bash
 # Produce domain receipt

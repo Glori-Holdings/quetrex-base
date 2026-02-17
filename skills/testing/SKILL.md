@@ -731,6 +731,79 @@ test.describe('Contact Form', () => {
 })
 ```
 
+## Accessibility Testing
+
+### axe-core Integration
+
+```typescript
+// Install: npm install -D @axe-core/react vitest-axe
+import { axe, toHaveNoViolations } from 'vitest-axe'
+expect.extend(toHaveNoViolations)
+
+it('has no accessibility violations', async () => {
+  const { container } = render(<MyComponent />)
+  const results = await axe(container)
+  expect(results).toHaveNoViolations()
+})
+```
+
+### ARIA Testing
+
+```typescript
+it('has correct ARIA attributes', () => {
+  render(<Dialog open onClose={vi.fn()} />)
+  const dialog = screen.getByRole('dialog')
+  expect(dialog).toHaveAttribute('aria-modal', 'true')
+  expect(dialog).toHaveAttribute('aria-labelledby')
+})
+
+it('manages focus correctly', async () => {
+  render(<Dialog open onClose={vi.fn()} />)
+  expect(screen.getByRole('dialog')).toHaveFocus()
+})
+```
+
+### Keyboard Navigation
+
+```typescript
+it('supports keyboard navigation', async () => {
+  const user = userEvent.setup()
+  render(<DropdownMenu />)
+
+  await user.tab()
+  expect(screen.getByRole('button')).toHaveFocus()
+
+  await user.keyboard('{Enter}')
+  expect(screen.getByRole('menu')).toBeVisible()
+
+  await user.keyboard('{ArrowDown}')
+  expect(screen.getAllByRole('menuitem')[0]).toHaveFocus()
+
+  await user.keyboard('{Escape}')
+  expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+})
+```
+
+### Playwright Accessibility Audit
+
+```typescript
+import AxeBuilder from '@axe-core/playwright'
+
+test('page passes accessibility audit', async ({ page }) => {
+  await page.goto('/dashboard')
+  const results = await new AxeBuilder({ page }).analyze()
+  expect(results.violations).toEqual([])
+})
+
+test('page passes audit excluding known issues', async ({ page }) => {
+  await page.goto('/legacy-page')
+  const results = await new AxeBuilder({ page })
+    .exclude('.third-party-widget')
+    .analyze()
+  expect(results.violations).toEqual([])
+})
+```
+
 ## Best Practices
 
 1. **Arrange-Act-Assert** - Structure tests clearly

@@ -99,6 +99,14 @@ if [ -f "$RECEIPT_DIR/domain-validation-required.json" ]; then
   done
 fi
 
+# 7. Auto-detect schema changes requiring domain-db receipt
+if [ -n "$WORKTREE_ROOT" ]; then
+  SCHEMA_CHANGED=$(git -C "$WORKTREE_ROOT" diff --name-only main...HEAD 2>/dev/null | grep -E '(lib/db/schema|drizzle/|prisma/)' || true)
+  if [ -n "$SCHEMA_CHANGED" ]; then
+    check_receipt "$RECEIPT_DIR/domain-db.json" "domain-db"
+  fi
+fi
+
 if [ -n "$MISSING" ]; then
   echo "{\"decision\": \"block\", \"reason\": \"PR BLOCKED: Missing or failing quality gate receipts:$MISSING. Run all gates and produce receipts before creating PR.\"}"
   exit 0
