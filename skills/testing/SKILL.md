@@ -804,6 +804,141 @@ test('page passes audit excluding known issues', async ({ page }) => {
 })
 ```
 
+## Test Isolation
+
+### DB Transaction Rollback
+
+```typescript
+beforeEach(async () => {
+  await db.execute(sql`BEGIN`)
+})
+afterEach(async () => {
+  await db.execute(sql`ROLLBACK`)
+})
+```
+
+### MSW Server Reset
+
+```typescript
+afterEach(() => {
+  server.resetHandlers()
+})
+afterAll(() => {
+  server.close()
+})
+```
+
+### Zustand Store Reset
+
+```typescript
+const useStore = create<State>()((set) => ({ count: 0, increment: () => set((s) => ({ count: s.count + 1 })) }))
+beforeEach(() => {
+  useStore.setState({ count: 0 })
+})
+```
+
+### Environment Variable Restoration
+
+```typescript
+const originalEnv = process.env
+beforeEach(() => {
+  process.env = { ...originalEnv }
+})
+afterEach(() => {
+  process.env = originalEnv
+})
+```
+
+## API Contract Testing
+
+### Zod Schema Validation in Tests
+
+```typescript
+import { z } from 'zod'
+
+const UserSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(1),
+  email: z.string().email(),
+  createdAt: z.string().datetime(),
+})
+
+const UsersResponseSchema = z.array(UserSchema)
+
+it('GET /api/users returns valid schema', async () => {
+  const response = await GET(new NextRequest('http://localhost:3000/api/users'))
+  const data = await response.json()
+
+  const result = UsersResponseSchema.safeParse(data)
+  expect(result.success).toBe(true)
+})
+
+it('POST /api/users validates input schema', async () => {
+  const InvalidInput = z.object({ name: z.string() })
+  const input = { name: '' } // Empty name should fail
+
+  const validation = InvalidInput.safeParse(input)
+  expect(validation.success).toBe(false)
+})
+```
+
+### Response Shape Contracts
+
+```typescript
+it('API error responses follow standard shape', async () => {
+  const ErrorSchema = z.object({
+    error: z.string(),
+    code: z.string().optional(),
+    details: z.array(z.string()).optional(),
+  })
+
+  const response = await POST(new NextRequest('http://localhost:3000/api/users', {
+    method: 'POST',
+    body: JSON.stringify({ invalid: true }),
+  }))
+
+  expect(response.status).toBeGreaterThanOrEqual(400)
+  const data = await response.json()
+  expect(ErrorSchema.safeParse(data).success).toBe(true)
+})
+```
+
+## Snapshot Testing
+
+### When to Use Snapshots
+- Component render output verification
+- Complex object structure validation
+- Serialized data format checks
+
+### When NOT to Use Snapshots
+- Simple value assertions (use explicit expects)
+- Frequently changing output (leads to snapshot fatigue)
+- Dynamic content (timestamps, random IDs)
+
+### File Snapshots
+```typescript
+it('renders user card correctly', () => {
+  const { container } = render(<UserCard user={mockUser} />)
+  expect(container).toMatchSnapshot()
+})
+```
+
+### Inline Snapshots
+```typescript
+it('formats user display name', () => {
+  expect(formatDisplayName({ first: 'John', last: 'Doe' }))
+    .toMatchInlineSnapshot('"John Doe"')
+})
+```
+
+### Updating Snapshots
+```bash
+# Update all snapshots
+npm run test -- --update
+# Update specific test file snapshots
+npm run test -- --update path/to/test.test.ts
+```
+
 ## Best Practices
 
 1. **Arrange-Act-Assert** - Structure tests clearly

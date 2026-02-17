@@ -467,3 +467,6 @@ export const POST = withErrorHandler(async (request: NextRequest) => {
 8. **Log errors**: Add logging in error handler for debugging
 9. **Return appropriate status codes**: 201 for create, 204 for delete
 10. **Document with TypeScript**: Infer types from Zod schemas
+
+## Contract Testing
+For Zod-based API contract testing patterns, see the [Testing Skill](/testing).

@@ -82,11 +82,28 @@ If any receipt shows `"status": "fail"`, your VERDICT MUST be REJECTED.
 DO NOT write receipt files manually. ONLY produce them by running the
 quality-gate.sh script.
 
+### Step 7.75: Bundle Size Check (Advisory)
+```bash
+npm run build 2>&1 | tail -20
+```
+Review the build output for route sizes. Flag any route or chunk exceeding 500KB.
+This is **advisory only** — large bundles do NOT block approval.
+Note findings in the QA Report under a "Bundle Size" section.
+If a route exceeds 1MB, add a warning comment in the QA report suggesting code splitting.
+
 ### Step 8: Check for `any` Types
 ```bash
 git diff --name-only HEAD~1 | grep -E "\.(ts|tsx)$" | xargs grep -nE ':\s*any\b|<any>|as any\b' 2>/dev/null
 ```
 Any unjustified `any` = REJECT.
+
+### Step 8.5: Dead Code Detection (Advisory)
+```bash
+npx knip --no-progress 2>&1 || true
+```
+Review output for unused exports, unused files, and unused dependencies.
+This is **advisory only** — dead code does NOT block approval.
+Note findings in the QA Report under a "Dead Code" section.
 
 ### Step 9: Verify Task Completion
 Read `.issue/todo.json` -- all tasks should be complete.
