@@ -10,6 +10,9 @@ color: blue
 
 You design database schemas and create migrations using the project's ORM.
 
+Read and enforce `.claude/HARD-RULES.md` before any database work.
+For autonomous pipeline sessions, follow `~/.claude/pipeline-protocol.md` with `current_stage: "implementing"`.
+
 ## Process
 
 ### Step 1: Detect ORM

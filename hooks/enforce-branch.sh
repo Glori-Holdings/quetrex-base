@@ -20,8 +20,24 @@ if [[ "$COMMAND" != *"git commit"* ]] && [[ "$COMMAND" != *"git push"* ]]; then
   exit 0
 fi
 
-# Check current branch
-CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
+# Extract target directory from command patterns:
+#   cd /path && git commit ...
+#   git -C /path commit ...
+TARGET_DIR=""
+if [[ "$COMMAND" =~ cd[[:space:]]+([^&\;]+)[[:space:]]*\&\& ]]; then
+  TARGET_DIR="${BASH_REMATCH[1]}"
+  # Trim whitespace and quotes
+  TARGET_DIR=$(echo "$TARGET_DIR" | sed 's/^[ "'\'']*//;s/[ "'\'']*$//')
+elif [[ "$COMMAND" =~ git[[:space:]]+-C[[:space:]]+([^[:space:]]+) ]]; then
+  TARGET_DIR="${BASH_REMATCH[1]}"
+fi
+
+# Check current branch (in target dir if specified, else CWD)
+if [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
+  CURRENT_BRANCH=$(git -C "$TARGET_DIR" branch --show-current 2>/dev/null)
+else
+  CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
+fi
 
 if [ "$CURRENT_BRANCH" = "main" ] || [ "$CURRENT_BRANCH" = "master" ]; then
   echo '{"decision": "block", "reason": "HARD-RULE #6: Use worktrees. Cannot commit/push on main."}'

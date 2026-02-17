@@ -17,8 +17,23 @@ if [[ "$COMMAND" != *"gh pr create"* ]]; then
   exit 0
 fi
 
+# Extract target directory from command patterns:
+#   cd /path && gh pr create ...
+#   git -C /path ...
+TARGET_DIR=""
+if [[ "$COMMAND" =~ cd[[:space:]]+([^&\;]+)[[:space:]]*\&\& ]]; then
+  TARGET_DIR="${BASH_REMATCH[1]}"
+  TARGET_DIR=$(echo "$TARGET_DIR" | sed 's/^[ "'\'']*//;s/[ "'\'']*$//')
+elif [[ "$COMMAND" =~ git[[:space:]]+-C[[:space:]]+([^[:space:]]+) ]]; then
+  TARGET_DIR="${BASH_REMATCH[1]}"
+fi
+
 # Find the worktree root (where .issue/ lives)
-WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
+  WORKTREE_ROOT=$(git -C "$TARGET_DIR" rev-parse --show-toplevel 2>/dev/null)
+else
+  WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+fi
 if [ -z "$WORKTREE_ROOT" ]; then
   # Not in a git repo — nothing to protect, let the command through
   echo '{"decision": "undefined"}'
@@ -53,7 +68,7 @@ check_receipt() {
   receipt_sha=$(jq -r '.git_sha // empty' "$receipt_file" 2>/dev/null)
   if [ -n "$receipt_sha" ]; then
     local current_sha
-    current_sha=$(git rev-parse HEAD 2>/dev/null)
+    current_sha=$(git -C "$WORKTREE_ROOT" rev-parse HEAD 2>/dev/null)
     if [ "$receipt_sha" != "$current_sha" ]; then
       MISSING="$MISSING ${receipt_name}(stale:sha_mismatch)"
     fi
