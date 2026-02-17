@@ -32,6 +32,23 @@ if [[ "$TOOL_NAME" == "Write" ]] || [[ "$TOOL_NAME" == "Edit" ]]; then
     done
   fi
 
+  # --- Shared File Warning ---
+  FILE_PATH_HOOK=$(echo "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
+  if [ -n "$FILE_PATH_HOOK" ] && [ -n "$WORKTREE_ROOT" ]; then
+    SHARED_PATTERNS="lib/types|lib/db/schema|lib/shared|lib/utils|components/ui"
+    if echo "$FILE_PATH_HOOK" | grep -qE "$SHARED_PATTERNS"; then
+      echo "WARNING: Shared file modified: $FILE_PATH_HOOK. Other parts of the app may be affected." >&2
+      # Append to shared-file warnings log
+      WARNINGS_FILE="$WORKTREE_ROOT/.issue/shared-file-warnings.json"
+      if [ ! -f "$WARNINGS_FILE" ]; then
+        echo '[]' > "$WARNINGS_FILE"
+      fi
+      jq --arg file "$FILE_PATH_HOOK" --arg ts "$(date +%s)" \
+        '. + [{"file": $file, "modified_at": ($ts | tonumber), "warning": "Shared file modified — run impact analysis"}]' \
+        "$WARNINGS_FILE" > "$WARNINGS_FILE.tmp" && mv "$WARNINGS_FILE.tmp" "$WARNINGS_FILE"
+    fi
+  fi
+
   # --- Loop Detection ---
   FILE_PATH=$(echo "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
   if [ -n "$FILE_PATH" ]; then

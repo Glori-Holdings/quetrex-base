@@ -23,6 +23,23 @@ For autonomous pipeline sessions, follow `~/.claude/pipeline-protocol.md` with `
 ### Step 2: Read the Design System (For UI Work)
 - If `.issue/design-system.md` exists, read it completely and follow it exactly
 
+### Step 2.5: Shared File Pre-Check
+
+Before modifying any file in `lib/`, `shared/`, `components/ui/`, or `lib/db/schema/`:
+
+1. Search for all consumers of that file:
+   ```bash
+   grep -rl "from.*{module_name}" src/ --include="*.ts" --include="*.tsx"
+   ```
+2. Read the import statements in at least 3 top consumers to understand how the module is used
+3. After making changes to the shared file, immediately run:
+   ```bash
+   npm run type-check
+   ```
+   If type-check fails, fix ALL errors before proceeding -- do NOT leave broken consumers behind.
+
+**Why:** Changes to shared files are the #1 cause of regressions. By checking consumers BEFORE modifying and type-checking AFTER, we catch breakage immediately.
+
 ### Step 3: Implement Code
 For each task:
 1. Read existing files in the area you're modifying

@@ -30,54 +30,47 @@ RECEIPT_DIR="$WORKTREE_ROOT/.issue/receipts"
 # --- Required receipts ---
 MISSING=""
 
-# 1. Type check receipt
-if [ ! -f "$RECEIPT_DIR/type-check.json" ]; then
-  MISSING="$MISSING type-check"
-else
-  STATUS=$(jq -r '.status // "unknown"' "$RECEIPT_DIR/type-check.json" 2>/dev/null)
-  if [ "$STATUS" != "pass" ]; then
-    MISSING="$MISSING type-check(status=$STATUS)"
+check_receipt() {
+  local receipt_file="$1"
+  local receipt_name="$2"
+  local check_field="${3:-status}"
+  local pass_value="${4:-pass}"
+
+  if [ ! -f "$receipt_file" ]; then
+    MISSING="$MISSING $receipt_name"
+    return
   fi
-  # Check freshness: receipt must be newer than most recent code change
-  RECEIPT_TS=$(jq -r '.timestamp // 0' "$RECEIPT_DIR/type-check.json" 2>/dev/null)
-  LATEST_FILE=$(git diff --name-only HEAD 2>/dev/null | head -1)
-  if [ -n "$LATEST_FILE" ] && [ -f "$LATEST_FILE" ]; then
-    LATEST_EDIT=$(stat -f %m "$LATEST_FILE" 2>/dev/null || echo "0")
-    if [ "$RECEIPT_TS" -lt "$LATEST_EDIT" ] 2>/dev/null; then
-      MISSING="$MISSING type-check(stale)"
+
+  local field_val
+  field_val=$(jq -r ".${check_field} // \"unknown\"" "$receipt_file" 2>/dev/null)
+  if [ "$field_val" != "$pass_value" ]; then
+    MISSING="$MISSING ${receipt_name}(${check_field}=${field_val})"
+    return
+  fi
+
+  # SHA-based freshness: receipt git_sha must match current HEAD
+  local receipt_sha
+  receipt_sha=$(jq -r '.git_sha // empty' "$receipt_file" 2>/dev/null)
+  if [ -n "$receipt_sha" ]; then
+    local current_sha
+    current_sha=$(git rev-parse HEAD 2>/dev/null)
+    if [ "$receipt_sha" != "$current_sha" ]; then
+      MISSING="$MISSING ${receipt_name}(stale:sha_mismatch)"
     fi
   fi
-fi
+}
 
-# 2. Lint receipt
-if [ ! -f "$RECEIPT_DIR/lint.json" ]; then
-  MISSING="$MISSING lint"
-else
-  STATUS=$(jq -r '.status // "unknown"' "$RECEIPT_DIR/lint.json" 2>/dev/null)
-  if [ "$STATUS" != "pass" ]; then
-    MISSING="$MISSING lint(status=$STATUS)"
-  fi
-fi
+# 1. Type check
+check_receipt "$RECEIPT_DIR/type-check.json" "type-check"
 
-# 3. Test receipt
-if [ ! -f "$RECEIPT_DIR/test.json" ]; then
-  MISSING="$MISSING test"
-else
-  STATUS=$(jq -r '.status // "unknown"' "$RECEIPT_DIR/test.json" 2>/dev/null)
-  if [ "$STATUS" != "pass" ]; then
-    MISSING="$MISSING test(status=$STATUS)"
-  fi
-fi
+# 2. Lint
+check_receipt "$RECEIPT_DIR/lint.json" "lint"
 
-# 4. Reviewer receipt
-if [ ! -f "$RECEIPT_DIR/reviewer.json" ]; then
-  MISSING="$MISSING reviewer-approval"
-else
-  VERDICT=$(jq -r '.verdict // "unknown"' "$RECEIPT_DIR/reviewer.json" 2>/dev/null)
-  if [ "$VERDICT" != "APPROVED" ]; then
-    MISSING="$MISSING reviewer(verdict=$VERDICT)"
-  fi
-fi
+# 3. Test
+check_receipt "$RECEIPT_DIR/test.json" "test"
+
+# 4. Reviewer
+check_receipt "$RECEIPT_DIR/reviewer.json" "reviewer-approval" "verdict" "APPROVED"
 
 # 5. Smoke test receipt (if .issue/smoke-test-required marker exists)
 if [ -f "$WORKTREE_ROOT/.issue/smoke-test-required" ]; then
