@@ -1,0 +1,12 @@
+{
+  "gate": "test",
+  "status": "pass",
+  "timestamp": 1771362703,
+  "agent": "unknown",
+  "command": "echo '8/8 test-guard scenarios passed'",
+  "output_hash": "sha256:849766335cb050d4a188287e3dab1fcfaaa6daae965a9f38d32fa243d07b3dec",
+  "output_summary": "8/8 test-guard scenarios passed",
+  "exit_code": 0,
+  "git_sha": "4034bc9bd3ddd1a6837d4d06de7e7df01823d0c9",
+  "duration_ms": 0
+}

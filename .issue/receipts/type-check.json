@@ -1,0 +1,12 @@
+{
+  "gate": "type-check",
+  "status": "pass",
+  "timestamp": 1771362701,
+  "agent": "unknown",
+  "command": "bash -n hooks/*.sh",
+  "output_hash": "sha256:01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+  "output_summary": "",
+  "exit_code": 0,
+  "git_sha": "4034bc9bd3ddd1a6837d4d06de7e7df01823d0c9",
+  "duration_ms": 0
+}
