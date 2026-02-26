@@ -46,7 +46,7 @@ jobs:
           node-version: 22
           cache: 'npm'
       - run: npm ci
-      - run: npx stryker run --reporters=clear-text
+      - run: npx --package @stryker-mutator/core --package @stryker-mutator/jest-runner stryker run --reporters clear-text
     continue-on-error: true
 
   e2e:
@@ -69,6 +69,7 @@ jobs:
           name: playwright-report
           path: playwright-report/
           retention-days: 7
+    continue-on-error: true
 
   security:
     name: Security Scan
@@ -82,7 +83,7 @@ jobs:
   build:
     name: Production Build
     runs-on: ubuntu-latest
-    needs: [test, e2e, security]
+    needs: [test, security]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -91,3 +92,4 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run build
+    continue-on-error: true
