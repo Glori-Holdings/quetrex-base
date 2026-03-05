@@ -9,17 +9,75 @@ argument-hint: <ISSUE-ID e.g. SMA-40>
 
 Fetch the Linear issue: `$ARGUMENTS`
 
+### Rename Session
+
+Before doing anything else, rename this Claude Code session so it is easy to identify. Use `/rename` with the issue ID and today's short date (M-D format, no leading zeros):
+
+```
+/rename $ARGUMENTS-{M}-{D}
+```
+
+For example, if the issue is SMA-55 and today is March 4: `/rename SMA-55-3-4`
+
+### Step 0: Branch Setup (MANDATORY — DO THIS FIRST)
+
+**CRITICAL: You MUST create a feature branch before doing ANY other work. The project enforces feature branches — committing or pushing on `main` will be BLOCKED by hooks, wasting API calls. Do NOT skip this step.**
+
+1. If not already on `main`, switch to it:
+
+```bash
+git checkout main
+```
+
+2. Pull the latest changes:
+
+```bash
+git pull origin main
+```
+
+3. Create a feature branch for the PRD:
+
+```bash
+git checkout -b docs/prd-$ARGUMENTS
+```
+
+4. Verify you are on the new branch (NOT `main`):
+
+```bash
+git branch --show-current
+```
+
+The output MUST show `docs/prd-$ARGUMENTS`. Do NOT proceed until confirmed.
+
+If `git checkout main` fails because of uncommitted changes on another branch, run `git stash` first, then `git checkout main`. Do NOT force-checkout or discard work.
+
 ### Step 1: Fetch the Issue
 
-Use curl to read the issue from Linear:
+Linear's top-level `issues` query and `issueVcSearch` are unreliable with personal API keys. Always use team-scoped queries.
 
-!`curl -s -X POST https://api.linear.app/graphql -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" -d "{\"query\": \"{ issueVcSearch(filter: { identifier: { eq: \\\"$ARGUMENTS\\\" } }) { nodes { id identifier title description priority estimate state { name } labels { nodes { name } } project { name } team { name key } } } }\"}"`
+Parse the team key and issue number from `$ARGUMENTS` (e.g., "SMA-51" → team key "SMA", number 51).
 
-Parse and display the issue title, description, labels, priority, and project.
+**Step 1a** — Get the team ID:
 
-If the API call fails or returns no results, try the issues query instead:
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "{ teams(filter: { key: { eq: \"TEAM_KEY\" } }) { nodes { id key name } } }"}'
+```
 
-!`curl -s -X POST https://api.linear.app/graphql -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" -d "{\"query\": \"{ issues(filter: { identifier: { eq: \\\"$ARGUMENTS\\\" } }) { nodes { id identifier title description priority estimate state { name } labels { nodes { name } } project { name } team { name key } } } }\"}"`
+Replace `TEAM_KEY` with the parsed team key (e.g., "SMA").
+
+**Step 1b** — Fetch the issue using the team ID:
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "{ team(id: \"TEAM_UUID\") { issues(filter: { number: { eq: ISSUE_NUMBER } }) { nodes { id identifier title description priority estimate state { name } labels { nodes { name } } project { name } team { name key } } } }"}'
+```
+
+Replace `TEAM_UUID` with the id from Step 1a and `ISSUE_NUMBER` with the parsed number (e.g., 51).
 
 Display the fetched issue data clearly:
 - **ID**: {identifier}
@@ -144,22 +202,24 @@ As a {user type}, I want to {action}, so that {benefit}.
 - [ ] No TypeScript errors, no lint warnings
 ```
 
-### Step 5: Commit and Link
+### Step 5: Commit, Push, and Link
 
 After writing the PRD file:
 
-1. Commit the PRD to the current branch:
+1. Stage and commit the PRD:
 
 ```bash
 git add .claude/prds/$ARGUMENTS.md
 git commit -m "docs: add PRD for $ARGUMENTS"
 ```
 
-2. Push to origin:
+2. Push the branch to origin (with upstream tracking):
 
 ```bash
-git push
+git push -u origin docs/prd-$ARGUMENTS
 ```
+
+**IMPORTANT**: Do NOT use bare `git push` — you must specify the upstream since this is a new branch.
 
 3. Get the issue UUID from the Step 1 API response (the `id` field, not `identifier`), then add a comment to the Linear issue linking to the PRD:
 
@@ -172,9 +232,36 @@ curl -s -X POST https://api.linear.app/graphql \
 
 Replace `ISSUE_UUID` with the actual UUID from the Step 1 response.
 
-4. Ask the user: "Would you like to set the issue status to 'Queued' to trigger the runner?"
+4. Add the "ai" label to the issue so it gets picked up by the runner. First, find the label ID for "ai" in the workspace:
 
-If yes, get the state ID for "Queued" from the team's workflow states and update the issue:
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "{ issueLabels(filter: { name: { eqCaseInsensitive: \"ai\" } }) { nodes { id name } } }"}'
+```
+
+Then add the label to the issue:
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "mutation { issueAddLabel(id: \"ISSUE_UUID\", labelId: \"AI_LABEL_ID\") { success } }"}'
+```
+
+Replace `ISSUE_UUID` with the issue UUID and `AI_LABEL_ID` with the label ID from the query above. If the "ai" label doesn't exist yet, inform the user and skip this step.
+
+5. **Automatically** set the issue status to "Queued" so the runner picks it up. First, get the state ID for "Queued" from the team's workflow states:
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "{ team(id: \"TEAM_UUID\") { states(filter: { name: { eq: \"Queued\" } }) { nodes { id name } } } }"}'
+```
+
+Then update the issue status:
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
@@ -183,8 +270,49 @@ curl -s -X POST https://api.linear.app/graphql \
   -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"QUEUED_STATE_ID\" }) { success issue { id state { name } } } }"}'
 ```
 
+Replace `TEAM_UUID` with the team UUID from Step 1a, `ISSUE_UUID` with the issue UUID, and `QUEUED_STATE_ID` with the state ID from the query above. Confirm to the user that the status was set to "Queued".
+
+### Step 6: Cleanup (MANDATORY — DO THIS LAST)
+
+**CRITICAL: You MUST clean up the branch and return to `main`. Leaving stale branches causes problems for subsequent `/issue-prd` runs. Do NOT skip this step.**
+
+1. Switch back to `main`:
+
+```bash
+git checkout main
+```
+
+2. Delete the local PRD branch (it has already been pushed to remote):
+
+```bash
+git branch -D docs/prd-$ARGUMENTS
+```
+
+3. Verify you are on `main`:
+
+```bash
+git branch --show-current
+```
+
+The output MUST show `main`. If it does not, something went wrong — do NOT proceed, inform the user.
+
+## HARD STOP
+
+After Step 6 completes and you have verified you are on `main`, say EXACTLY:
+
+> "PRD created for $ARGUMENTS, ai label set. You may begin working on the next issue."
+
+Then STOP. Do not:
+- Summarize the PRD contents
+- Offer to implement the fix
+- Suggest next steps for this issue
+- Ask if the user wants to proceed with implementation
+
+The agent runner picks up issues with the "ai" label and implements from the PRD autonomously. Your job is done.
+
 ## Notes
 
+- **Step 0 and Step 6 are non-negotiable** — skipping them wastes API calls and leaves dirty state
 - The dialog in Step 3 is the most important part — do not skip or rush it
 - The PRD must include testing requirements — this is non-negotiable
 - Reference real files and patterns from the codebase discovered in Step 2

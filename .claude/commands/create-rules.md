@@ -176,7 +176,7 @@ jobs:
           node-version: 22
           cache: 'npm'
       - run: npm ci
-      - run: npx --package @stryker-mutator/core --package @stryker-mutator/jest-runner stryker run --reporters clear-text
+      - run: npx stryker run --reporters=clear-text
     continue-on-error: true
 
   e2e:
@@ -199,7 +199,6 @@ jobs:
           name: playwright-report
           path: playwright-report/
           retention-days: 7
-    continue-on-error: true
 
   security:
     name: Security Scan
@@ -213,7 +212,7 @@ jobs:
   build:
     name: Production Build
     runs-on: ubuntu-latest
-    needs: [test, security]
+    needs: [test, e2e, security]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -222,7 +221,6 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run build
-    continue-on-error: true
 ```
 
 If `.github/workflows/quality-gate.yml` already exists, skip this step and note it in the output.
@@ -237,11 +235,12 @@ Check if `stryker.config.mjs` exists at the project root. If it does NOT exist, 
 /** @type {import('@stryker-mutator/api/core').PartialStrykerOptions} */
 export default {
   mutate: ['src/**/*.ts', '!src/**/*.test.ts', '!src/**/*.spec.ts'],
-  testRunner: 'jest',
+  testRunner: 'vitest',
   reporters: ['clear-text', 'html'],
+  checkers: ['typescript'],
   tsconfigFile: 'tsconfig.json',
-  jest: {
-    configFile: 'jest.config.js',
+  vitest: {
+    configFile: 'vitest.config.ts',
   },
   thresholds: {
     high: 80,
@@ -264,9 +263,8 @@ Check if `knip.json` exists at the project root. If it does NOT exist, create it
   "$schema": "https://unpkg.com/knip@latest/schema.json",
   "entry": ["src/app/**/*.{ts,tsx}", "src/app/**/route.ts"],
   "project": ["src/**/*.{ts,tsx}"],
-  "ignore": ["**/*.test.ts", "**/*.spec.ts", ".github/**"],
-  "ignoreDependencies": ["@types/*"],
-  "github-actions": false
+  "ignore": ["**/*.test.ts", "**/*.spec.ts"],
+  "ignoreDependencies": ["@types/*"]
 }
 ```
 
