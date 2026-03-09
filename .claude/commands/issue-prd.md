@@ -232,27 +232,7 @@ curl -s -X POST https://api.linear.app/graphql \
 
 Replace `ISSUE_UUID` with the actual UUID from the Step 1 response.
 
-4. Add the "ai" label to the issue so it gets picked up by the runner. First, find the label ID for "ai" in the workspace:
-
-```bash
-curl -s -X POST https://api.linear.app/graphql \
-  -H "Authorization: $LINEAR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "{ issueLabels(filter: { name: { eqCaseInsensitive: \"ai\" } }) { nodes { id name } } }"}'
-```
-
-Then add the label to the issue:
-
-```bash
-curl -s -X POST https://api.linear.app/graphql \
-  -H "Authorization: $LINEAR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "mutation { issueAddLabel(id: \"ISSUE_UUID\", labelId: \"AI_LABEL_ID\") { success } }"}'
-```
-
-Replace `ISSUE_UUID` with the issue UUID and `AI_LABEL_ID` with the label ID from the query above. If the "ai" label doesn't exist yet, inform the user and skip this step.
-
-5. **Automatically** set the issue status to "Queued" so the runner picks it up. First, get the state ID for "Queued" from the team's workflow states:
+4. **Set the issue status to "Queued"** so the runner knows it's ready. First, get the state ID for "Queued" from the team's workflow states:
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
@@ -271,6 +251,28 @@ curl -s -X POST https://api.linear.app/graphql \
 ```
 
 Replace `TEAM_UUID` with the team UUID from Step 1a, `ISSUE_UUID` with the issue UUID, and `QUEUED_STATE_ID` with the state ID from the query above. Confirm to the user that the status was set to "Queued".
+
+5. **AFTER status is confirmed "Queued", THEN add the "ai" label.** The label triggers the runner to pick up the issue — it MUST be added last to avoid a race condition where the runner transitions to "In Progress" and then the status-set overwrites it back to "Queued". Do NOT run this in parallel with step 4.
+
+First, find the label ID for "ai" in the workspace:
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "{ issueLabels(filter: { name: { eq: \"ai\" } }) { nodes { id name } } }"}'
+```
+
+Then add the label to the issue:
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "mutation { issueAddLabel(id: \"ISSUE_UUID\", labelId: \"AI_LABEL_ID\") { success } }"}'
+```
+
+Replace `ISSUE_UUID` with the issue UUID and `AI_LABEL_ID` with the label ID from the query above. If the "ai" label doesn't exist yet, inform the user and skip this step.
 
 ### Step 6: Cleanup (MANDATORY — DO THIS LAST)
 
