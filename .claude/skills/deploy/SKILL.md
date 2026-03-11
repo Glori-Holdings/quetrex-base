@@ -1,6 +1,6 @@
 ---
 name: deploy
-description: Deploy the project to staging or production on Fly.io. Creates a git rollback tag before every deploy. Run /deploy rollback to instantly revert to the previous release.
+description: Deploy dealerQ to Fly.io staging (dealerq-staging) or production (goautosocial). Creates a git rollback tag before every deploy. Run /deploy rollback to instantly revert to the previous release.
 argument-hint: <staging|production> | rollback <staging|production>
 disable-model-invocation: true
 allowed-tools: Bash
@@ -8,15 +8,14 @@ allowed-tools: Bash
 
 # Deploy to Fly.io
 
-> **Setup**: Copy this skill to `~/.claude/skills/deploy/SKILL.md` and update the app names below for your project.
-> Skills in `~/.claude/skills/` are globally available across all projects.
+Deploy dealerQ to staging or production, with automatic rollback support.
 
 ## Apps
 
 | Environment | Fly.io App | URL |
 |---|---|---|
-| staging | `{staging-app-name}` | https://{staging-app-name}.fly.dev |
-| production | `{production-app-name}` | https://{production-app-name}.fly.dev |
+| staging | `dealerq-staging` | https://dealerq-staging.fly.dev |
+| production | `goautosocial` | https://goautosocial.fly.dev |
 
 ---
 
@@ -40,8 +39,8 @@ Read the command arguments:
 Set variables:
 ```
 ENVIRONMENT = staging | production
-APP = {staging-app-name} (staging) | {production-app-name} (production)
-URL = https://{staging-app-name}.fly.dev | https://{production-app-name}.fly.dev
+APP = dealerq-staging (staging) | goautosocial (production)
+URL = https://dealerq-staging.fly.dev | https://goautosocial.fly.dev
 ```
 
 If arguments are missing or invalid, print usage and stop.
@@ -49,6 +48,8 @@ If arguments are missing or invalid, print usage and stop.
 ---
 
 ## Step 2: Pre-Flight Checks
+
+Run these checks before doing anything:
 
 ```bash
 # Verify fly CLI is authenticated
@@ -62,18 +63,35 @@ git branch --show-current
 git status --porcelain
 ```
 
-For **production deploys only**: if the working tree is dirty or not on main, stop and warn the user.
+For **production deploys only**: if the working tree is dirty or not on main, stop and warn the user. Staging is more permissive — deploy whatever is on main.
 
 ---
 
 ## Step 3: Create Rollback Tag (deploy only, not rollback)
 
+Before every deploy, tag the current state of main so we can always get back:
+
 ```bash
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 TAG="deploy/$ENVIRONMENT/$TIMESTAMP"
+
 git tag $TAG
 git push origin $TAG
+
 echo "Rollback tag created: $TAG"
+echo "To roll back: /deploy rollback $ENVIRONMENT"
+```
+
+Also capture the current Fly.io release image for rollback:
+
+```bash
+CURRENT_IMAGE=$(fly releases --app $APP --json | python3 -c "
+import json, sys
+releases = json.load(sys.stdin)
+if len(releases) > 0:
+    print(releases[0].get('imageRef', ''))
+" 2>/dev/null)
+echo "Current image: $CURRENT_IMAGE"
 ```
 
 ---
@@ -85,20 +103,29 @@ echo "Deploying to $ENVIRONMENT ($APP)..."
 fly deploy --app $APP --strategy rolling
 ```
 
-Fly.io's rolling strategy starts new instances alongside old ones and only cuts over when health checks pass.
+Fly.io's rolling strategy:
+- Starts new instances alongside old ones
+- Only cuts over when health checks pass
+- Automatically aborts if health checks fail
+
+Wait for deploy to complete. If `fly deploy` exits non-zero, stop and report failure.
 
 ---
 
 ## Step 4B: Rollback
 
+Get the previous release image and redeploy it:
+
 ```bash
 echo "Rolling back $ENVIRONMENT ($APP)..."
 
-RELEASES=$(fly releases list --app $APP --json 2>/dev/null)
+# Get the two most recent releases
+RELEASES=$(fly releases --app $APP --json 2>/dev/null)
 
 PREVIOUS_IMAGE=$(python3 -c "
 import json, sys
 releases = json.loads('$RELEASES')
+# Index 0 = current (failed), index 1 = previous (good)
 if len(releases) > 1:
     print(releases[1].get('imageRef', ''))
 else:
@@ -118,38 +145,135 @@ fly deploy --app $APP --image $PREVIOUS_IMAGE
 
 ## Step 5: Smoke Test
 
+After a successful deploy OR rollback, run a smoke test to verify the app is responding correctly:
+
 ```bash
 echo "Running smoke tests against $URL..."
-SMOKE_FAILED=0
 
+# Test 1: Root responds with redirect or 200
 ROOT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL")
-[[ "$ROOT_STATUS" != "200" && "$ROOT_STATUS" != "302" && "$ROOT_STATUS" != "307" ]] && echo "FAIL: Root returned $ROOT_STATUS" && SMOKE_FAILED=1
+if [[ "$ROOT_STATUS" != "200" && "$ROOT_STATUS" != "302" && "$ROOT_STATUS" != "307" ]]; then
+  echo "FAIL: Root returned $ROOT_STATUS (expected 200/302/307)"
+  SMOKE_FAILED=1
+fi
 
+# Test 2: Login page is reachable
 LOGIN_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL/login")
-[[ "$LOGIN_STATUS" != "200" ]] && echo "FAIL: /login returned $LOGIN_STATUS" && SMOKE_FAILED=1
+if [[ "$LOGIN_STATUS" != "200" ]]; then
+  echo "FAIL: /login returned $LOGIN_STATUS (expected 200)"
+  SMOKE_FAILED=1
+fi
 
+# Test 3: API health check
 API_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$URL/api/auth/providers")
-[[ "$API_STATUS" != "200" ]] && echo "FAIL: /api/auth/providers returned $API_STATUS" && SMOKE_FAILED=1
+if [[ "$API_STATUS" != "200" ]]; then
+  echo "FAIL: /api/auth/providers returned $API_STATUS (expected 200)"
+  SMOKE_FAILED=1
+fi
 
-[ $SMOKE_FAILED -eq 0 ] && echo "All smoke tests passed." || echo "WARNING: Smoke tests failed. Check: fly logs --app $APP"
+if [ -z "$SMOKE_FAILED" ]; then
+  echo "All smoke tests passed."
+else
+  echo "WARNING: Some smoke tests failed. App may be partially degraded."
+  echo "Check logs: fly logs --app $APP"
+fi
 ```
 
 ---
 
-## Step 6: Report
+## Step 5B: Label Linear Issues (staging deploys only, not rollback)
+
+After smoke tests pass on a **staging deploy**, find all Linear issues referenced in commits since the last deploy and add the "staged" label.
+
+**Skip this step entirely if:**
+- This is a rollback
+- This is a production deploy
+- Smoke tests failed
+
+```bash
+# Find the previous deploy tag for staging
+PREV_TAG=$(git tag -l "deploy/staging/*" --sort=-version:refname | sed -n '2p')
+
+if [ -z "$PREV_TAG" ]; then
+  echo "No previous staging deploy tag found — skipping Linear labeling (first deploy)."
+else
+  # Extract unique SMA issue numbers from commits between tags
+  ISSUES=$(git log --oneline "$PREV_TAG"..HEAD | grep -oiE 'sma-[0-9]+' | tr '[:upper:]' '[:lower:]' | sort -u)
+
+  if [ -z "$ISSUES" ]; then
+    echo "No SMA issues found in commits since $PREV_TAG — skipping Linear labeling."
+  else
+    echo "Found issues to label as staged: $ISSUES"
+    LABELED_ISSUES=""
+
+    for ISSUE in $ISSUES; do
+      # Extract the number from sma-N
+      ISSUE_NUM=$(echo "$ISSUE" | sed 's/sma-//')
+
+      # Query Linear for the issue UUID (team-scoped)
+      ISSUE_ID=$(curl -s -X POST https://api.linear.app/graphql \
+        -H "Content-Type: application/json" \
+        -H "Authorization: lin_api_cAIeO7edgbe03NRQsaxmRQMXVWdmUF7JMeddW7C0" \
+        -d "{\"query\": \"{ team(id: \\\"55e6dc25-090c-4731-82c2-44549801a709\\\") { issues(filter: { number: { eq: $ISSUE_NUM } }) { nodes { id identifier } } } }\"}" \
+        | python3 -c "import json,sys; nodes=json.load(sys.stdin)['data']['team']['issues']['nodes']; print(nodes[0]['id'] if nodes else '')" 2>/dev/null)
+
+      if [ -n "$ISSUE_ID" ]; then
+        # Add "staged" label to the issue
+        curl -s -X POST https://api.linear.app/graphql \
+          -H "Content-Type: application/json" \
+          -H "Authorization: lin_api_cAIeO7edgbe03NRQsaxmRQMXVWdmUF7JMeddW7C0" \
+          -d "{\"query\": \"mutation { issueAddLabel(id: \\\"$ISSUE_ID\\\", labelId: \\\"04d4184e-8f95-4a03-aadc-759bb216d9ed\\\") { success } }\"}" \
+          > /dev/null 2>&1
+        LABELED_ISSUES="$LABELED_ISSUES $(echo $ISSUE | tr '[:lower:]' '[:upper:]')"
+        echo "  Labeled $ISSUE as staged"
+      else
+        echo "  Could not find Linear issue for $ISSUE — skipping"
+      fi
+    done
+
+    if [ -n "$LABELED_ISSUES" ]; then
+      echo "Labeled issues:$LABELED_ISSUES"
+    fi
+  fi
+fi
+```
+
+Store the `LABELED_ISSUES` value for the deploy report in Step 7.
+
+---
+
+## Step 7: Report
+
+Print a clear summary:
 
 ```
 =====================================================
  Deploy Complete
 =====================================================
- Environment : $ENVIRONMENT
- App         : $APP
+ Environment : staging | production
+ App         : dealerq-staging | goautosocial
  Action      : deployed | rolled back
- Rollback tag: $TAG  (deploy only)
- Smoke tests : passed | WARNING
+ Rollback tag: deploy/staging/20260226-143022  (deploy only)
+ Smoke tests : passed | WARNING: N checks failed
+ Staged issues: SMA-40 SMA-48 ...  (staging only, if any)
  Logs        : fly logs --app $APP
  Dashboard   : https://fly.io/apps/$APP
 =====================================================
 ```
 
-If production smoke tests failed: remind the user to run `/deploy rollback production`.
+If this was a **production deploy** and smoke tests failed, remind the user:
+```
+To roll back immediately: /deploy rollback production
+```
+
+---
+
+## Notes
+
+- **Staging** is for validating features before production. Always deploy to staging first.
+- **Production** is `goautosocial` — the live app. Treat it carefully.
+- Rollback tags are permanent git tags — they let you restore the exact code state if Fly.io image rollback isn't enough.
+- `fly deploy` handles zero-downtime automatically via rolling strategy.
+- To inspect recent releases: `fly releases --app goautosocial`
+- To tail live logs: `fly logs --app goautosocial`
+- The NODE_VERSION in fly.toml is `20` — note this differs from the `>=24` requirement in package.json. Flag this for a future update.
