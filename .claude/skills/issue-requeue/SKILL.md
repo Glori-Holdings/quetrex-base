@@ -81,6 +81,21 @@ Check the response:
 - If the issue does **not** have the "ai" label, warn: "**Warning:** $ARGUMENTS does not have the 'ai' label. The runner filters by this label and will not pick it up."
 - If both are correct, say: "Linear status confirmed: Queued with 'ai' label."
 
+## Step 3.5: Clean Up Worktree
+
+If the task has a `worktree_path` in state.json, clean it up to prevent stale git worktree refs from blocking re-creation:
+
+1. Remove the worktree directory if it exists:
+   ```bash
+   /usr/bin/git -C {repo_path} worktree remove {worktree_path} --force 2>/dev/null; true
+   ```
+2. Prune stale worktree references:
+   ```bash
+   /usr/bin/git -C {repo_path} worktree prune
+   ```
+
+Use the `repo_path` from the task entry in state.json. This prevents the "missing but already registered worktree" error.
+
 ## Step 4: Restart the Runner
 
 The runner loads state into memory at startup and never re-reads state.json. We must restart it:
