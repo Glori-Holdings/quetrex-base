@@ -263,21 +263,7 @@ curl -s -X POST https://api.linear.app/graphql \
 
 **Do NOT re-add the "ai" label** — these issues already have it from the original `/issue-prd` run. Adding it again triggers the runner webhook and causes a bounce. Check the labels from Step 1b to confirm. If for some reason the "ai" label is missing, then add it.
 
-### Step 8: Restart the Runner
-
-```bash
-launchctl kickstart -k gui/$(id -u)/com.quetrex.claude-runner
-```
-
-Wait 5 seconds, then check:
-
-```bash
-sleep 5 && tail -30 ~/.claude-runner/logs/launchd-stdout.log
-```
-
-Look for startup messages confirming the runner restarted.
-
-### Step 9: Cleanup (MANDATORY — DO THIS LAST)
+### Step 8: Cleanup (MANDATORY — DO THIS LAST)
 
 1. Switch back to `main`:
 
@@ -299,9 +285,9 @@ git branch --show-current
 
 ## HARD STOP
 
-After Step 9 completes and you have verified you are on `main`, say EXACTLY:
+After Step 8 completes and you have verified you are on `main`, say EXACTLY:
 
-> "Rework document created for $ARGUMENTS, runner restarted. It will be picked up on next poll (~60s)."
+> "Rework document created for $ARGUMENTS. The runner will pick it up on next poll (~60s)."
 
 Then STOP. Do not:
 - Summarize the rework document contents
