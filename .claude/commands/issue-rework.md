@@ -200,6 +200,8 @@ git commit -m "docs: add rework document for $ARGUMENTS"
 git push -u origin docs/rework-$ARGUMENTS
 ```
 
+Note: The runner's `read_prd()` will automatically fetch this rework file from the remote `docs/rework-*` branch — no need to merge to main.
+
 3. Add a comment to the Linear issue:
 
 ```bash
@@ -213,33 +215,26 @@ Replace `ISSUE_UUID` with the UUID from Step 1, and `{REWORK_FILENAME}` with the
 
 ### Step 6: Clean Runner State
 
+**CRITICAL**: The runner's scheduler does NOT re-select tasks already sitting at `status="pending"` in its state file — it only picks up tasks via fresh Linear polling or orphan recovery. Resetting the entry to `pending` (the old approach) leaves the rework stuck indefinitely. **Delete the entry instead** so the next Linear poll treats it as new.
+
 Read `~/.claude-runner/state.json`. Find the task entry where `identifier` matches `$ARGUMENTS`.
 
 If found:
-1. Record the task's UUID (the key in the `tasks` object)
-2. In `failure_counts`, set the value for this UUID to `0`
-3. In the task object:
-   - Set `"status"` to `"pending"`
-   - Set `"attempt"` to `0`
-   - Set `"started_at"` to `""`
-   - Set `"completed_at"` to `""`
-   - Set `"exit_code"` to `null`
-   - Set `"outcome"` to `null`
-   - Set `"error"` to `null`
-   - Set `"last_failure_summary"` to `""`
-   - Set `"next_retry_after"` to `""`
-   - Set `"continuation_count"` to `0`
+1. Record the task's UUID (the key in the `tasks` object) and its `worktree_path` + `repo_path` if present.
+2. **Delete the entire entry** from the `tasks` object (the `"<uuid>": { ... }` block).
+3. **Delete the matching entry** from the `failure_counts` object (the `"<uuid>": <number>` line).
+4. Validate the JSON is still well-formed: `python3 -c "import json; json.load(open('/Users/barnent1/.claude-runner/state.json'))"` — must print no error.
 
-If the task has a `worktree_path`, clean it up:
+If the task had a `worktree_path`, clean it up:
 
 ```bash
 /usr/bin/git -C {repo_path} worktree remove {worktree_path} --force 2>/dev/null; true
 /usr/bin/git -C {repo_path} worktree prune
 ```
 
-If NOT found in state.json, that's fine — the runner will create a fresh entry.
+If NOT found in state.json, that's fine — the runner will create a fresh entry on the next poll.
 
-After editing, read state.json again to verify.
+After editing, validate JSON and confirm the entry is gone.
 
 ### Step 7: Set Linear Status to Queued
 
@@ -277,7 +272,7 @@ git checkout main
 git branch -D docs/rework-$ARGUMENTS
 ```
 
-3. Verify you are on `main`:
+2. Verify you are on `main`:
 
 ```bash
 git branch --show-current
