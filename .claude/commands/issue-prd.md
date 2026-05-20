@@ -252,9 +252,9 @@ curl -s -X POST https://api.linear.app/graphql \
 
 Replace `TEAM_UUID` with the team UUID from Step 1a, `ISSUE_UUID` with the issue UUID, and `QUEUED_STATE_ID` with the state ID from the query above. Confirm to the user that the status was set to "Queued".
 
-5. **AFTER status is confirmed "Queued", THEN add the "ai" label.** The label triggers the runner to pick up the issue — it MUST be added last to avoid a race condition where the runner transitions to "In Progress" and then the status-set overwrites it back to "Queued". Do NOT run this in parallel with step 4.
+5. **AFTER status is confirmed "Queued", THEN add the "ai" label — but ONLY if the issue does not already have it.** Check the labels returned in the Step 1b response. If the issue already has a label named "ai", **skip this entire step** and inform the user: "Issue already has the 'ai' label — skipping to avoid webhook race condition." Adding the label redundantly triggers the runner webhook again and causes a bounce (In Progress → Queued → In Progress).
 
-First, find the label ID for "ai" in the workspace:
+If the issue does NOT have the "ai" label, first find the label ID:
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
@@ -272,7 +272,7 @@ curl -s -X POST https://api.linear.app/graphql \
   -d '{"query": "mutation { issueAddLabel(id: \"ISSUE_UUID\", labelId: \"AI_LABEL_ID\") { success } }"}'
 ```
 
-Replace `ISSUE_UUID` with the issue UUID and `AI_LABEL_ID` with the label ID from the query above. If the "ai" label doesn't exist yet, inform the user and skip this step.
+Replace `ISSUE_UUID` with the issue UUID and `AI_LABEL_ID` with the label ID from the query above. If the "ai" label doesn't exist in the workspace, inform the user and skip this step.
 
 ### Step 6: Cleanup (MANDATORY — DO THIS LAST)
 

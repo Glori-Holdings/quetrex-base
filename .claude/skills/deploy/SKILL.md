@@ -65,6 +65,21 @@ git status --porcelain
 
 For **production deploys only**: if the working tree is dirty or not on main, stop and warn the user. Staging is more permissive — deploy whatever is on main.
 
+**For ALL deploys (staging and production)**: Check for open PRs:
+
+```bash
+OPEN_PRS=$(gh pr list --repo Barnhardt-Enterprises-Inc/dealerq-2026 --state open --json number,title --jq '.[] | "#\(.number): \(.title)"')
+if [ -n "$OPEN_PRS" ]; then
+  echo "DEPLOY BLOCKED: You have unmerged PRs:"
+  echo "$OPEN_PRS"
+  echo ""
+  echo "Merge or close all PRs before deploying."
+  # STOP — do not proceed with deploy
+fi
+```
+
+If there are open PRs, **STOP the deploy** and show the user the list. Do not proceed until all PRs are merged or closed.
+
 ---
 
 ## Step 3: Create Rollback Tag (deploy only, not rollback)
@@ -140,6 +155,76 @@ fi
 echo "Rolling back to image: $PREVIOUS_IMAGE"
 fly deploy --app $APP --image $PREVIOUS_IMAGE
 ```
+
+---
+
+## Step 4C: Database Schema Migration (deploy only, not rollback)
+
+**CRITICAL: Fly.io deploys do NOT run database migrations. Schema changes in merged PRs must be applied manually. This step automates that.**
+
+After a successful `fly deploy`, check whether any commits since the last deploy touched `lib/db/schema.ts`. If so, apply the missing schema changes to the target database.
+
+### How it works
+
+1. **Detect schema changes** — Compare `lib/db/schema.ts` between the previous deploy tag and HEAD:
+
+```bash
+PREV_TAG=$(git tag -l "deploy/$ENVIRONMENT/*" --sort=-version:refname | sed -n '2p')
+SCHEMA_CHANGED=$(git diff "$PREV_TAG"..HEAD --name-only | grep -c 'lib/db/schema.ts' || true)
+```
+
+If `SCHEMA_CHANGED` is 0, print "No schema changes detected — skipping migration." and move to Step 5.
+
+2. **Determine the target database URL** — Based on the environment:
+   - **staging**: Use `DATABASE_URL` from `.env.local`
+   - **production**: Use `PRODUCTION_DATABASE_URL` from `.env.local`
+
+3. **Identify what's missing** — Read the current `lib/db/schema.ts` to find all tables and columns defined in Drizzle. Then query `information_schema.columns` and `information_schema.tables` on the target database to find what exists. The difference is what needs to be migrated.
+
+   Focus on these change types (in order):
+   - **New tables** (`pgTable` definitions not present in DB) → `CREATE TABLE IF NOT EXISTS`
+   - **New columns** on existing tables → `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+   - **New indexes** → `CREATE INDEX IF NOT EXISTS`
+
+4. **Generate and run migration SQL** — For each missing item, generate the appropriate DDL:
+   - Use `IF NOT EXISTS` / `IF NOT EXISTS` on everything to make migrations idempotent
+   - Match column types from the Drizzle schema:
+     - `uuid()` → `uuid`
+     - `varchar('name', { length: N })` → `varchar(N)`
+     - `text('name')` → `text`
+     - `boolean('name')` → `boolean`
+     - `integer('name')` → `integer`
+     - `timestamp('name')` → `timestamp` (add `with time zone` if `{ withTimezone: true }`)
+     - `jsonb('name')` → `jsonb`
+   - Preserve `.default()` values, `.notNull()` constraints, and `.references()` foreign keys
+   - Run each statement via `npx tsx --env-file=.env.local` using `@neondatabase/serverless`
+
+5. **Verify** — After migration, re-query `information_schema` to confirm all expected tables and columns now exist. Print a summary table showing what was added.
+
+### Important rules
+
+- **ALWAYS use `IF NOT EXISTS`** — migrations must be safe to re-run
+- **NEVER drop tables, columns, or indexes** — only additive changes. If schema.ts removed something, ignore it (manual cleanup)
+- **Check `information_schema.columns` BEFORE running ALTER TABLE** — never guess column names
+- **Run staging first, verify, then production** — even within a single deploy, if both need changes
+- **Wrap in async IIFE** — `npx tsx` requires `(async () => { ... })();` pattern for top-level await
+- **Use neon() serverless driver** — `const { neon } = require('@neondatabase/serverless');`
+- Print each DDL statement as it runs so the user can see progress
+- If any statement fails, report the error but continue with remaining statements (don't abort the whole migration)
+
+### Report format
+
+After migration, print:
+
+```
+=== Schema Migration: $ENVIRONMENT ===
++ table_name.column_name (type)
++ new_table_name (CREATE TABLE)
++ index_name (CREATE INDEX)
+= N changes applied, M already existed
+```
+
+If nothing needed migration: "No schema changes needed — database is in sync."
 
 ---
 
@@ -254,6 +339,7 @@ Print a clear summary:
  App         : dealerq-staging | goautosocial
  Action      : deployed | rolled back
  Rollback tag: deploy/staging/20260226-143022  (deploy only)
+ Schema sync : N changes applied | No changes needed | Skipped (rollback)
  Smoke tests : passed | WARNING: N checks failed
  Staged issues: SMA-40 SMA-48 ...  (staging only, if any)
  Logs        : fly logs --app $APP
@@ -277,3 +363,6 @@ To roll back immediately: /deploy rollback production
 - To inspect recent releases: `fly releases --app goautosocial`
 - To tail live logs: `fly logs --app goautosocial`
 - The NODE_VERSION in fly.toml is `20` — note this differs from the `>=24` requirement in package.json. Flag this for a future update.
+- **Fly.io does NOT run database migrations.** Step 4C handles this by diffing schema.ts against the live database and applying missing DDL. Only additive changes (new tables, columns, indexes) are applied — never drops.
+- Database URLs: staging = `DATABASE_URL`, production = `PRODUCTION_DATABASE_URL` (both in `.env.local`)
+- Use `npx tsx --env-file=.env.local` for all database scripts — never bare `npx tsx`.

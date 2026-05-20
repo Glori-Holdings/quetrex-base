@@ -71,5 +71,8 @@
     "type": "command",
     "command": "bash ~/.claude/statusline-command.sh"
   },
-  "skipDangerousModePermissionPrompt": true
+  "skipDangerousModePermissionPrompt": true,
+  "voiceEnabled": true,
+  "teammateMode": "auto",
+  "remoteControlAtStartup": false
 }
