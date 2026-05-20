@@ -353,3 +353,4 @@ Report: "Project rules created. QA and developer agents will now read `.claude/C
 - The Conventions section drives the developer agent — be specific about type safety rules
 - Run `/create-rules` again any time the stack changes significantly
 - Partners on the same project get these rules automatically via git clone
+- To disable the Glori Builder welcome message for this project, add `quetrex_welcome: false` anywhere in this file
