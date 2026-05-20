@@ -67,3 +67,5 @@ When appending to `.claude/decisions.md`:
 ## Output Contract
 
 `.issue/architecture-decision.md` committed before reporting complete. Memory and decisions updated if anything new was learned.
+
+**Do not ask the orchestrator to review the plan.** Produce it, commit it, report complete. The pipeline continues immediately.
