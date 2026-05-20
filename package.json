@@ -1,5 +1,5 @@
 {
-  "name": "@quetrex/base",
+  "name": "glori-builder",
   "version": "1.0.0",
   "description": "Glori Builder — Claude Code base configuration for development teams. Agents, skills, and commands for a complete AI-powered development pipeline.",
   "scripts": {
