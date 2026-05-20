@@ -1,0 +1,11 @@
+# Internal files — not needed by partners
+.claude/docs/
+.claude/prompts/
+.claude/prds/
+.claude/CLAUDE-template.md
+.claude/skills/deploy/
+
+# Repo internals
+.git/
+docs/
+*.tgz
