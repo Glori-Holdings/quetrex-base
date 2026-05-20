@@ -80,9 +80,27 @@ git branch --show-current
 
 Confirm you are on the feature branch before continuing.
 
-### Step 4: Comment on Linear Issue
+### Step 4: Set Linear Status to In Progress
 
-Add a comment to the Linear issue to mark it as in progress:
+First, get the "In Progress" state ID for this team:
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "{ team(id: \"TEAM_UUID\") { states { nodes { id name type } } } }"}'
+```
+
+Find the state with `type: "started"` (this is the In Progress state). Then update the issue:
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"IN_PROGRESS_STATE_ID\" }) { success issue { state { name } } } }"}'
+```
+
+Then add a comment:
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
@@ -91,7 +109,7 @@ curl -s -X POST https://api.linear.app/graphql \
   -d '{"query": "mutation { commentCreate(input: { issueId: \"ISSUE_UUID\", body: \"Pipeline started — architect building implementation plan.\" }) { success } }"}'
 ```
 
-Replace `ISSUE_UUID` with the `id` field (UUID) from the Step 1b response.
+Replace `TEAM_UUID`, `ISSUE_UUID`, and `IN_PROGRESS_STATE_ID` with the values from Steps 1a and 1b.
 
 ### Step 5: Hand Off and Run to Completion
 
