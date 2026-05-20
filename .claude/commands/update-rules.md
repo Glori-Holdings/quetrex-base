@@ -103,13 +103,41 @@ Wait for confirmation.
 
 ---
 
-## Step 6: Apply Updates
+## Step 6: Check `.claude/decisions.md`
+
+```bash
+[ -f .claude/decisions.md ] && echo "exists" || echo "missing"
+```
+
+If missing, create it:
+
+```bash
+cat > .claude/decisions.md << 'EOF'
+# Project Decisions
+
+Architectural decisions that affect how this project is built.
+The architect agent updates this file. All agents read it.
+
+<!-- Format for new entries:
+## YYYY-MM-DD — Short title
+**Decision**: what was decided
+**Reason**: why
+**Impact**: what it affects going forward
+-->
+EOF
+```
+
+Add to the audit report: "decisions.md: {created / already existed}"
+
+---
+
+## Step 7: Apply Updates
 
 Make only the targeted changes — add missing sections, fix outdated content, correct broken commands. Do not remove content that is already correct and project-specific.
 
 ```bash
-git add .claude/CLAUDE.md
+git add .claude/CLAUDE.md .claude/decisions.md
 git commit -m "chore: update project rules — {one-line summary of what changed}"
 ```
 
-Report: "Rules updated. [N] issues fixed. `.claude/CLAUDE.md` is quetrex-ready."
+Report: "Rules updated. [N] issues fixed. `.claude/CLAUDE.md` and `.claude/decisions.md` are quetrex-ready."

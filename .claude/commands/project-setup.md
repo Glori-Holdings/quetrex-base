@@ -89,7 +89,7 @@ gh api repos/{owner}/{repo}/branches/main/protection \
 
 If this fails (e.g. free GitHub account), warn the user and continue — it's not fatal.
 
-## Step 3: Project CLAUDE.md
+## Step 3: Project CLAUDE.md and Decisions Log
 
 Check if `.claude/CLAUDE.md` already exists:
 
@@ -119,6 +119,24 @@ grep -q "## Verification" .claude/CLAUDE.md && echo "has verification" || echo "
 ```
 
 If the Verification section is missing, note it in the summary — the user should run `/update-rules` after setup.
+
+Also create `.claude/decisions.md` if it doesn't exist:
+
+```bash
+[ -f .claude/decisions.md ] || cat > .claude/decisions.md << 'EOF'
+# Project Decisions
+
+Architectural decisions that affect how this project is built.
+The architect agent updates this file. All agents read it.
+
+<!-- Format for new entries:
+## YYYY-MM-DD — Short title
+**Decision**: what was decided
+**Reason**: why
+**Impact**: what it affects going forward
+-->
+EOF
+```
 
 ## Step 4: direnv .envrc
 
