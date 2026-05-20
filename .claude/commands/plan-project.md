@@ -137,24 +137,18 @@ Ask: "Here are the {N} tasks I will create in Linear. Want to review or adjust a
 
 ## Phase 4: Linear Integration
 
-### Step 1: Get API Key from Keychain
+### Step 1: Verify API Key
 
 ```bash
-LINEAR_API_KEY=$(security find-generic-password -s "linear-api-key" -a "$(whoami)" -w 2>/dev/null)
+echo "${LINEAR_API_KEY:+set}"
 ```
 
-If not found:
-
-> "No Linear API key found in your keychain. Add one with:
-> `security add-generic-password -s 'linear-api-key' -a '$(whoami)' -w 'YOUR_LINEAR_API_KEY'`
-> Then run this command again."
-
-Stop if no key is found.
+If `$LINEAR_API_KEY` is not set, stop and tell the user:
+> "LINEAR_API_KEY is not set. Run /quetrex-setup to configure it, or run `/secrets add LINEAR_API_KEY` if you have already run setup."
 
 ### Step 2: Fetch and Select Team
 
 ```bash
-LINEAR_API_KEY=$(security find-generic-password -s "linear-api-key" -a "$(whoami)" -w 2>/dev/null)
 curl -s -X POST https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_API_KEY" \
   -H "Content-Type: application/json" \
