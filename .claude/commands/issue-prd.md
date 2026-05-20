@@ -93,16 +93,28 @@ curl -s -X POST https://api.linear.app/graphql \
 
 Replace `ISSUE_UUID` with the `id` field (UUID) from the Step 1b response.
 
-### Step 5: Hand Off
+### Step 5: Hand Off and Run to Completion
 
-Tell the orchestrator:
+**PIPELINE MODE: do not stop between stages.** Once this step begins, run the full pipeline without asking for confirmation, review, or approval at any intermediate point. The only valid reasons to stop are:
+- A genuine question only the user can answer (no assumptions possible)
+- QA failing 3 times in a row
+- Reviewer flagging a Critical security issue
 
-> "Issue $ARGUMENTS is ready. Branch: {branch-name}. Starting pipeline: architect → developer(s) → QA → reviewer → git-workflow."
+Tell the orchestrator the pipeline is starting, then immediately invoke each agent in sequence:
 
-Then invoke the architect agent to create the implementation plan for this issue, passing it the issue title, description, and any clarifications from Step 2.
+1. **Architect** — implementation plan, file ownership map, acceptance criteria
+2. **Designer** (if architect flagged `designer_required: true`) — design spec
+3. **Developer(s)** — parallel implementation in separate worktrees
+4. **Merge sub-branches** into feature branch
+5. **QA** — prove green with exit codes (up to 3 retries, fix and rerun on failure)
+6. **Reviewer** — semantic review of full diff (fix and re-QA on rejection)
+7. **git-workflow** — commit, push, squash PR to main
+
+Report when PR is created. That is the end of this issue's pipeline.
 
 ## Notes
 - LINEAR_API_KEY must be set as an environment variable
 - The architect creates the implementation PRD — this skill does not
 - If the issue is already In Progress or Done, warn the user and stop
+- Never stop mid-pipeline to ask "does this look right?" — produce output and continue
 - Never set the issue to "Queued" — that was the old runner pattern

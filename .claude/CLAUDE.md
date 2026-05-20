@@ -47,6 +47,17 @@ Skip this if:
 - PRs require human approval before merge
 - Max 3 QA failures on an issue before escalating to the user — do not loop forever
 
+## Pipeline Mode — No Stops
+
+Once `/issue-prd` starts the pipeline, run every stage to completion without asking for confirmation, plan review, or approval at any intermediate point. Never ask "does this look right?", "should I proceed?", or "want to review before continuing?"
+
+The only valid reasons to pause:
+- A question only the user can answer (no assumption is reasonable)
+- QA fails 3 times
+- Reviewer flags a Critical security issue
+
+The user should be able to `/issue-prd QUE-123` and immediately start another issue in a parallel session.
+
 ## Stack and Verification
 
 Stack and verification commands live in the **project** `.claude/CLAUDE.md`.
