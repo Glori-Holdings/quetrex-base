@@ -91,21 +91,34 @@ If this fails (e.g. free GitHub account), warn the user and continue — it's no
 
 ## Step 3: Project CLAUDE.md
 
-If `.claude/CLAUDE.md` does not exist, create it:
+Check if `.claude/CLAUDE.md` already exists:
 
-```markdown
+```bash
+[ -f .claude/CLAUDE.md ] && echo "exists" || echo "missing"
+```
+
+**If missing:** Create a minimal placeholder:
+```bash
+mkdir -p .claude
+cat > .claude/CLAUDE.md << 'EOF'
 # Project: {repo-name}
 
 ## Stack
-[Ask user: "What's the tech stack for this project? I'll add it to the project rules." Then write what they tell you.]
+Run /create-rules to generate the full stack configuration.
 
-## Key Conventions
+## Workflow
 - All work on feature branches — never commit to main
 - PRs require CI to pass before merge
 - Use /issue-prd {ISSUE-ID} to start work on a Linear issue
+EOF
 ```
 
-If it already exists, skip this step.
+**If exists:** Check if it has a `## Verification` section:
+```bash
+grep -q "## Verification" .claude/CLAUDE.md && echo "has verification" || echo "missing verification"
+```
+
+If the Verification section is missing, note it in the summary — the user should run `/update-rules` after setup.
 
 ## Step 4: direnv .envrc
 
@@ -141,8 +154,10 @@ Report:
 > "Project setup complete.
 > - CI: .github/workflows/quality-gate.yml created
 > - Branch protection: main requires Lint & Type Check, Unit & Integration Tests, Production Build
-> - CLAUDE.md: {created/already existed}
+> - CLAUDE.md: {created with placeholder / already existed}
 > - direnv: {.envrc created / already existed / direnv not installed — run /quetrex-setup}
+>
+> Next: run /create-rules to set up your stack configuration and verification commands."
 >
 > Partners can clone and start working immediately after: npm install -g @quetrex/base"
 

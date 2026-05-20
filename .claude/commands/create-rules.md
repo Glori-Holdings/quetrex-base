@@ -1,320 +1,355 @@
 ---
-description: Create global rules (CLAUDE.md) from codebase analysis
+description: Generate the project .claude/CLAUDE.md with stack, verification commands, and conventions. Choose from predefined templates (Next.js, Python, Rust, Rails, iOS, Go, Node.js) and customize. QA and developer agents read this file.
 ---
 
-# Create Global Rules
+# Create Project Rules
 
-Generate a CLAUDE.md file by analyzing the codebase and extracting patterns. Also sets up CI, mutation testing, and dead-code detection tooling.
+Generates `.claude/CLAUDE.md` for this project. The QA agent reads the Verification section to know which commands to run. The developer agent reads Conventions for code quality rules.
 
----
-
-## Objective
-
-Create project-specific global rules that give Claude context about:
-- What this project is
-- Technologies used
-- How the code is organized
-- Patterns and conventions to follow
-- How to build, test, and validate
+Run once per project, after `/project-setup`.
 
 ---
 
-## Phase 1: DISCOVER
+## Step 1: Choose Your Stack
 
-### Identify Project Type
-
-First, determine what kind of project this is:
-
-| Type | Indicators |
-|------|------------|
-| Web App (Full-stack) | Separate client/server dirs, API routes |
-| Web App (Frontend) | React/Vue/Svelte, no server code |
-| API/Backend | Express/Fastify/etc, no frontend |
-| Library/Package | `main`/`exports` in package.json, publishable |
-| CLI Tool | `bin` in package.json, command-line interface |
-| Monorepo | Multiple packages, workspaces config |
-| Script/Automation | Standalone scripts, task-focused |
-
-### Analyze Configuration
-
-Look at root configuration files:
+Present these options:
 
 ```
-package.json       → dependencies, scripts, type
-tsconfig.json      → TypeScript settings
-vite.config.*      → Build tool
-*.config.js/ts     → Various tool configs
+Which stack best describes this project?
+
+1. Next.js      — TypeScript, App Router, Vitest, Biome
+2. Python       — FastAPI / Django / Flask, pytest, ruff, mypy
+3. Rust         — Axum / Actix / bare, cargo test, clippy
+4. Ruby on Rails — Rails 7, RSpec, RuboCop
+5. iOS          — Swift, SwiftUI, XCTest, SwiftLint
+6. Go           — net/http / Gin / Echo, go test, golangci-lint
+7. Node.js      — TypeScript, Express / Fastify, Vitest, Biome
+8. Custom       — I'll ask you about your stack
 ```
 
-### Map Directory Structure
-
-Explore the codebase to understand organization:
-- Where does source code live?
-- Where are tests?
-- Any shared code?
-- Configuration locations?
+Wait for the user's choice.
 
 ---
 
-## Phase 2: ANALYZE
+## Step 2: Auto-Detect Details
 
-### Extract Tech Stack
+Scan existing files to fill in specifics before asking anything:
 
-From package.json and config files, identify:
-- Runtime/Language (Node, Bun, Deno, browser)
-- Framework(s)
-- Database (if any)
-- Testing tools
-- Build tools
-- Linting/formatting
+```bash
+# Node-based projects
+cat package.json 2>/dev/null
 
-### Identify Patterns
+# Python projects
+cat pyproject.toml 2>/dev/null
+cat requirements.txt 2>/dev/null
 
-Study existing code for:
-- **Naming**: How are files, functions, classes named?
-- **Structure**: How is code organized within files?
-- **Errors**: How are errors created and handled?
-- **Types**: How are types/interfaces defined?
-- **Tests**: How are tests structured?
+# Rust
+cat Cargo.toml 2>/dev/null
 
-### Find Key Files
+# Ruby
+cat Gemfile 2>/dev/null
 
-Identify files that are important to understand:
-- Entry points
-- Configuration
-- Core business logic
-- Shared utilities
-- Type definitions
+# Go
+cat go.mod 2>/dev/null
+
+# iOS
+ls *.xcodeproj *.xcworkspace 2>/dev/null | head -3
+```
+
+Report what was detected. Use this to fill in template variables (ORM, framework variant, project name, etc.).
 
 ---
 
-## Phase 3: GENERATE
+## Step 3: Customize
 
-### Create CLAUDE.md
+Ask: "Anything to adjust? (ORM, framework variant, test runner, specific conventions, additional tools)"
 
-Use the template at `.claude/CLAUDE-template.md` as a starting point.
-
-**Output path**: `CLAUDE.md` (project root)
-
-**Adapt to the project:**
-- Remove sections that don't apply
-- Add sections specific to this project type
-- Keep it concise - focus on what's useful
-
-**Key sections to include:**
-
-1. **Project Overview** - What is this and what does it do?
-2. **Tech Stack** - What technologies are used?
-3. **Commands** - How to dev, build, test, lint?
-4. **Structure** - How is the code organized?
-5. **Patterns** - What conventions should be followed?
-6. **Key Files** - What files are important to know?
-
-**Optional sections (add if relevant):**
-- Architecture (for complex apps)
-- API endpoints (for backends)
-- Component patterns (for frontends)
-- Database patterns (if using a DB)
-- On-demand context references
+If no adjustments needed, proceed. Apply any changes to the template.
 
 ---
 
-## Phase 4: SETUP TOOLING
+## Step 4: Write `.claude/CLAUDE.md`
 
-### GitHub Actions Quality Gate
-
-Check if `.github/workflows/quality-gate.yml` exists. If it does NOT exist, create it:
-
-**Output path**: `.github/workflows/quality-gate.yml`
-
-```yaml
-name: Quality Gate
-on:
-  pull_request:
-    branches: [main]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  quality:
-    name: Lint & Type Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: 'npm'
-      - run: npm ci
-      - run: npm run type-check
-      - run: npm run lint
-      - run: npx knip
-
-  test:
-    name: Unit & Integration Tests
-    runs-on: ubuntu-latest
-    needs: quality
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: 'npm'
-      - run: npm ci
-      - run: npm run test -- --coverage
-
-  mutation:
-    name: Mutation Testing
-    runs-on: ubuntu-latest
-    needs: quality
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: 'npm'
-      - run: npm ci
-      - run: npx stryker run --reporters=clear-text
-    continue-on-error: true
-
-  e2e:
-    name: E2E Tests
-    runs-on: ubuntu-latest
-    needs: quality
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: 'npm'
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - run: npm run build
-      - run: npx playwright test
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: playwright-report
-          path: playwright-report/
-          retention-days: 7
-
-  security:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: returntocorp/semgrep-action@v1
-        with:
-          config: p/typescript
-
-  build:
-    name: Production Build
-    runs-on: ubuntu-latest
-    needs: [test, e2e, security]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: 'npm'
-      - run: npm ci
-      - run: npm run build
-```
-
-If `.github/workflows/quality-gate.yml` already exists, skip this step and note it in the output.
-
-### Stryker Mutation Testing Config
-
-Check if `stryker.config.mjs` exists at the project root. If it does NOT exist, create it:
-
-**Output path**: `stryker.config.mjs`
-
-```javascript
-/** @type {import('@stryker-mutator/api/core').PartialStrykerOptions} */
-export default {
-  mutate: ['src/**/*.ts', '!src/**/*.test.ts', '!src/**/*.spec.ts'],
-  testRunner: 'vitest',
-  reporters: ['clear-text', 'html'],
-  checkers: ['typescript'],
-  tsconfigFile: 'tsconfig.json',
-  vitest: {
-    configFile: 'vitest.config.ts',
-  },
-  thresholds: {
-    high: 80,
-    low: 60,
-    break: 50,
-  },
-};
-```
-
-If `stryker.config.mjs` already exists, skip and note it.
-
-### Knip Dead-Code Detection Config
-
-Check if `knip.json` exists at the project root. If it does NOT exist, create it:
-
-**Output path**: `knip.json`
-
-```json
-{
-  "$schema": "https://unpkg.com/knip@latest/schema.json",
-  "entry": ["src/app/**/*.{ts,tsx}", "src/app/**/route.ts"],
-  "project": ["src/**/*.{ts,tsx}"],
-  "ignore": ["**/*.test.ts", "**/*.spec.ts"],
-  "ignoreDependencies": ["@types/*"]
-}
-```
-
-Adapt the `entry` and `project` globs to match the actual source structure if it differs from the Next.js App Router layout. If `knip.json` already exists, skip and note it.
+Apply the matching template below. Replace all `{variables}` with detected or provided values.
 
 ---
 
-## Phase 5: OUTPUT
+### Template: Next.js
 
 ```markdown
-## Global Rules Created
+# Project: {project-name}
 
-**File**: `CLAUDE.md`
+## Stack
+- Language: TypeScript (strict)
+- Framework: Next.js {version} (App Router, React 19, Turbopack)
+- UI: {ShadCN + Tailwind CSS / other}
+- ORM: {Drizzle / Prisma} + PostgreSQL
+- State: TanStack Query v5 + Zustand
+- Testing: Vitest + React Testing Library
+- Linting: Biome
 
-### Project Type
+## Verification
+Run in this order — all must pass before any PR:
+1. `npx biome check --write .`
+2. `npm run type-check`
+3. `npm run test`
+4. `npm run build`
 
-{Detected project type}
+## Conventions
+- No `any` types — use proper TypeScript throughout
+- No `@ts-ignore` — fix the root cause
+- `snake_case` for database columns, `camelCase` for TypeScript
+- Server components by default — `"use client"` only when required
+- API routes in `app/api/`, server actions in `app/actions/`
+- Components in `components/`, hooks in `hooks/`, utilities in `lib/`
 
-### Tech Stack Summary
-
-{Key technologies detected}
-
-### Structure
-
-{Brief structure overview}
-
-### Tooling Created
-
-- CLAUDE.md: {created / already existed}
-- .github/workflows/quality-gate.yml: {created / already existed}
-- stryker.config.mjs: {created / already existed}
-- knip.json: {created / already existed}
-
-### Next Steps
-
-1. Review the generated `CLAUDE.md`
-2. Add any project-specific notes
-3. Remove any sections that don't apply
-4. Run `npx knip` to check for unused exports and dependencies
-5. Run `npx stryker run` to measure mutation test coverage
-6. Push a PR to verify the GitHub Actions quality gate runs
-7. Optionally create reference docs in `.agents/reference/`
+## Key Commands
+- Dev server: `npm run dev`
+- DB push: `npx drizzle-kit push` / `npx prisma db push`
+- DB studio: `npx drizzle-kit studio` / `npx prisma studio`
+- Install: `npm install`
 ```
 
 ---
 
-## Tips
+### Template: Python
 
-- Keep CLAUDE.md focused and scannable
-- Don't duplicate information that's in other docs (link instead)
-- Focus on patterns and conventions, not exhaustive documentation
-- Update it as the project evolves
-- The GitHub Actions workflow assumes `npm run type-check` and `npm run lint` exist — add these scripts to package.json if they are missing
+```markdown
+# Project: {project-name}
+
+## Stack
+- Language: Python {version}
+- Framework: {FastAPI / Django / Flask}
+- ORM: {SQLAlchemy / Django ORM / Tortoise / SQLModel}
+- Testing: pytest{+ pytest-asyncio if async}
+- Linting: ruff + mypy
+- Package manager: {uv / pip / poetry}
+
+## Verification
+Run in this order — all must pass before any PR:
+1. `ruff check --fix .`
+2. `mypy .`
+3. `pytest`
+
+## Conventions
+- Type hints on all functions and return values — no untyped code
+- Pydantic models for all request/response schemas
+- `snake_case` everywhere
+- Tests mirror the module structure in `tests/`
+- Raise specific exceptions, not bare `Exception`
+
+## Key Commands
+- Dev server: `{uvicorn main:app --reload / python manage.py runserver}`
+- Install: `{uv sync / pip install -r requirements.txt}`
+- DB migrate: `{alembic upgrade head / python manage.py migrate}`
+```
+
+---
+
+### Template: Rust
+
+```markdown
+# Project: {project-name}
+
+## Stack
+- Language: Rust ({edition} edition)
+- Framework: {Axum / Actix-web / bare}
+- Testing: cargo test
+- Linting: clippy + rustfmt
+- DB: {sqlx / Diesel / SeaORM / none}
+
+## Verification
+Run in this order — all must pass before any PR:
+1. `cargo fmt --check`
+2. `cargo clippy -- -D warnings`
+3. `cargo test`
+4. `cargo build --release`
+
+## Conventions
+- No `unwrap()` or `expect()` in production paths — use `?` or handle errors explicitly
+- All public items documented with `///`
+- `snake_case` for functions/variables, `PascalCase` for types/traits/enums
+- Prefer `impl Trait` in function signatures over generics where possible
+- Error types implement `std::error::Error`
+
+## Key Commands
+- Run: `cargo run`
+- Check (fast): `cargo check`
+- Watch: `cargo watch -x run`
+```
+
+---
+
+### Template: Ruby on Rails
+
+```markdown
+# Project: {project-name}
+
+## Stack
+- Language: Ruby {version}
+- Framework: Rails {version}
+- Testing: RSpec + FactoryBot + Capybara
+- Linting: RuboCop + StandardRB
+- DB: PostgreSQL + Active Record
+
+## Verification
+Run in this order — all must pass before any PR:
+1. `bundle exec rubocop --autocorrect`
+2. `bundle exec rspec`
+
+## Conventions
+- Follow Rails conventions — convention over configuration
+- Thin controllers, fat models (service objects for complex logic)
+- `snake_case` for Ruby, Rails naming for files and classes
+- Use concerns for shared behaviour across models/controllers
+- Prefer scopes over class methods for queries
+
+## Key Commands
+- Dev: `bin/rails server`
+- Console: `bin/rails console`
+- Migrate: `bin/rails db:migrate`
+- Routes: `bin/rails routes`
+- Generate: `bin/rails generate ...`
+```
+
+---
+
+### Template: iOS
+
+```markdown
+# Project: {project-name}
+
+## Stack
+- Language: Swift {version}+
+- UI: SwiftUI
+- Architecture: MVVM
+- Testing: XCTest + Swift Testing
+- Linting: SwiftLint
+- Package manager: Swift Package Manager
+
+## Verification
+Run in this order — all must pass before any PR:
+1. `swiftlint lint --strict`
+2. `xcodebuild test -scheme {scheme-name} -destination 'platform=iOS Simulator,name=iPhone 16'`
+
+## Conventions
+- `PascalCase` for types, `camelCase` for variables and functions
+- `@State` and `@StateObject` only in Views — all business logic in ViewModels
+- `async`/`await` for all async operations — no completion handlers in new code
+- No force unwrap (`!`) in production code — use `guard let` or `if let`
+- Separate concerns: Views (UI only), ViewModels (logic), Services (data/network)
+
+## Key Commands
+- Build: `xcodebuild build -scheme {scheme-name}`
+- Open project: `open {project-name}.xcodeproj`
+- SPM resolve: `swift package resolve`
+```
+
+---
+
+### Template: Go
+
+```markdown
+# Project: {project-name}
+
+## Stack
+- Language: Go {version}
+- Framework: {net/http / Gin / Echo / Chi}
+- Testing: go test
+- Linting: golangci-lint
+- DB: {pgx / GORM / sqlx / none}
+
+## Verification
+Run in this order — all must pass before any PR:
+1. `golangci-lint run`
+2. `go vet ./...`
+3. `go test ./...`
+4. `go build ./...`
+
+## Conventions
+- Always check errors — never ignore with `_`
+- Package names: short, lowercase, no underscores
+- Interfaces defined at the consumer (not the producer)
+- `context.Context` as first argument for all I/O operations
+- Table-driven tests for pure functions
+
+## Key Commands
+- Run: `go run .`
+- Module tidy: `go mod tidy`
+- Format: `gofmt -w .`
+```
+
+---
+
+### Template: Node.js
+
+```markdown
+# Project: {project-name}
+
+## Stack
+- Language: TypeScript
+- Runtime: Node.js {version}
+- Framework: {Express / Fastify / Hono / Koa}
+- Testing: Vitest
+- Linting: Biome
+- DB: {Drizzle / Prisma / none}
+
+## Verification
+Run in this order — all must pass before any PR:
+1. `npx biome check --write .`
+2. `npm run type-check`
+3. `npm run test`
+4. `npm run build`
+
+## Conventions
+- No `any` types — use proper TypeScript
+- `async`/`await` — no raw callbacks
+- `snake_case` for database columns, `camelCase` for TypeScript
+- Centralised error handling middleware
+- Route handlers thin — business logic in service layer
+
+## Key Commands
+- Dev: `npm run dev`
+- Build: `npm run build`
+- Install: `npm install`
+```
+
+---
+
+### Template: Custom
+
+Ask the user these questions one at a time:
+
+1. "What language and version?"
+2. "What framework or runtime (if any)?"
+3. "What test runner?"
+4. "What linter / formatter?"
+5. "What are the exact verification commands to run before every PR?"
+6. "Any key naming or structural conventions to enforce?"
+
+Generate a CLAUDE.md in the same structure as the templates above.
+
+---
+
+## Step 5: Confirm
+
+Show the generated content and ask: "Does this look right? Anything to adjust?"
+
+Apply any corrections, then write the file.
+
+```bash
+mkdir -p .claude
+git add .claude/CLAUDE.md
+git commit -m "chore: add project rules for {stack}"
+```
+
+Report: "Project rules created. QA and developer agents will now read `.claude/CLAUDE.md` for stack conventions and verification commands."
+
+---
+
+## Notes
+
+- The Verification section drives the QA agent — get these commands right
+- The Conventions section drives the developer agent — be specific about type safety rules
+- Run `/create-rules` again any time the stack changes significantly
+- Partners on the same project get these rules automatically via git clone
