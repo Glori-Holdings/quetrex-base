@@ -50,7 +50,7 @@ Display clearly:
 - **Description**:
   {description}
 
-If the issue state is "In Progress" or "Done", warn the user: "This issue is already {state.name}. Stopping to avoid duplicate work." Then stop.
+If the issue state type is `started` or `completed` (i.e. already in progress or finished), warn the user: "This issue is already {state.name}. Stopping to avoid duplicate work." Then stop.
 
 ### Step 2: Evaluate and Clarify
 
@@ -133,6 +133,6 @@ Report when PR is created. That is the end of this issue's pipeline.
 ## Notes
 - LINEAR_API_KEY must be set as an environment variable
 - The architect creates the implementation PRD — this skill does not
-- If the issue is already In Progress or Done, warn the user and stop
+- If the issue state type is `started` or `completed`, warn the user and stop — check type not name so it works for any workspace ("Complete", "Done", etc.)
 - Never stop mid-pipeline to ask "does this look right?" — produce output and continue
 - Never set the issue to "Queued" — that was the old runner pattern

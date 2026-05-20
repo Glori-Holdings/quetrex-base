@@ -167,7 +167,8 @@ If CI fails after 2 minutes: treat as QA failure, increment retry counter.
 ### Step 2f: Update status
 
 On **success**:
-- Update Linear issue to Done
+- Find the completed state: query `team.states` and find the state with `type: "completed"` — this is whatever your workspace calls it ("Complete", "Done", etc.)
+- Update Linear issue to that state
 - Update state file: `"status": "complete", "pr": PR_NUMBER`
 - Add Linear comment: "Completed by Glori Builder auto-pilot."
 
