@@ -45,9 +45,15 @@ For existing projects with an existing CLAUDE.md:
 /issue-prd → architect → developer(s) → QA → reviewer → git-workflow → /merge-issue
 ```
 
-**Greenfield (new project):**
+**Greenfield — manual:**
 ```
-/plan-project → Linear project + issues created → work issues with /issue-prd
+/plan-project → Linear project + issues created → /issue-prd QUE-1 (work one at a time)
+```
+
+**Greenfield — auto-pilot (walk away):**
+```
+/plan-project → Linear project + issues created → /auto-pilot PROJECT-ID
+             → works every issue through full pipeline → auto-merges → done
 ```
 
 **Brownfield (existing issue):**
@@ -71,6 +77,7 @@ For existing projects with an existing CLAUDE.md:
 | `/issue-prd QUE-123` | Fetch Linear issue, evaluate, create feature branch, start pipeline |
 | `/issue-rework QUE-123` | Create rework document from tester feedback, restart pipeline |
 | `/merge-issue QUE-123` | Merge PR, update Linear status to Human Review |
+| `/auto-pilot PROJECT-ID` | Work entire Linear project backlog autonomously — walk away mode |
 
 ### Planning
 

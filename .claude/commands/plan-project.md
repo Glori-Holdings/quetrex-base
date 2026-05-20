@@ -416,8 +416,8 @@ Parallel execution batches:
   Batch 3 (after Batch 2 completes):     {identifiers}
 
 To start implementation:
-  Run /issue-prd {FIRST-ISSUE-IDENTIFIER} to work the first issue through the full pipeline.
-  Work issues in batch order. Issues within the same batch can run in parallel.
+  Manual: /issue-prd {FIRST-ISSUE-IDENTIFIER} — work issues one at a time
+  Auto-pilot: /auto-pilot {LINEAR-PROJECT-ID} — walk away and let Glori Builder finish everything
 ```
 
 Show batches as groups of tasks with no mutual dependencies. This tells you exactly which issues can be worked simultaneously and which must wait.
