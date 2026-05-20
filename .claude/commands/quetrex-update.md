@@ -1,5 +1,5 @@
 ---
-description: Check for and apply updates to quetrex-base. Shows current vs latest version and updates if behind.
+description: Check for and apply updates to Glori Builder. Shows current vs latest version and updates if behind.
 ---
 
 # Quetrex Update
@@ -7,30 +7,30 @@ description: Check for and apply updates to quetrex-base. Shows current vs lates
 ## Step 1: Check Installed Version
 
 ```bash
-npm list -g @quetrex/base --depth=0 --json 2>/dev/null
+npm list -g glori-builder --depth=0 --json 2>/dev/null
 ```
 
 Extract the installed version from the JSON output.
 
-If `@quetrex/base` is not found in the output, tell the user: "quetrex-base does not appear to be installed globally. Install it with: `npm install -g @quetrex/base`" and stop.
+If `glori-builder` is not found in the output, tell the user: "Glori Builder does not appear to be installed globally. Install it with: `npm install -g glori-builder`" and stop.
 
 ## Step 2: Check Latest Version
 
 ```bash
-npm show @quetrex/base version 2>/dev/null
+npm show glori-builder version 2>/dev/null
 ```
 
 ## Step 3: Compare
 
 If installed == latest:
-> "You're on the latest version of quetrex-base (v{version}). Nothing to do."
+> "You're on the latest version of Glori Builder (v{version}). Nothing to do."
 
 Clear the flag file if it exists: `rm -f ~/.claude/.quetrex-update-available`
 
 Stop.
 
 If installed != latest, display:
-> "quetrex-base update available
+> "Glori Builder update available
 > Installed: v{installed}
 > Latest:    v{latest}
 >
@@ -43,7 +43,7 @@ Wait for confirmation before proceeding.
 ## Step 4: Apply Update
 
 ```bash
-npm install -g @quetrex/base@latest
+npm install -g glori-builder@latest
 ```
 
 The postinstall script runs automatically and copies all updated files to `~/.claude/`.
@@ -52,7 +52,7 @@ The postinstall script runs automatically and copies all updated files to `~/.cl
 
 ```bash
 rm -f ~/.claude/.quetrex-update-available
-npm list -g @quetrex/base --depth=0
+npm list -g glori-builder --depth=0
 ```
 
 Report:
