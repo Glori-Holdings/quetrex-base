@@ -200,8 +200,6 @@ git commit -m "docs: add rework document for $ARGUMENTS"
 git push -u origin docs/rework-$ARGUMENTS
 ```
 
-Note: The runner's `read_prd()` will automatically fetch this rework file from the remote `docs/rework-*` branch — no need to merge to main.
-
 3. Add a comment to the Linear issue:
 
 ```bash
@@ -213,38 +211,15 @@ curl -s -X POST https://api.linear.app/graphql \
 
 Replace `ISSUE_UUID` with the UUID from Step 1, and `{REWORK_FILENAME}` with the actual filename used.
 
-### Step 6: Clean Runner State
+### Step 6: Set Linear Status to Todo
 
-**CRITICAL**: The runner's scheduler does NOT re-select tasks already sitting at `status="pending"` in its state file — it only picks up tasks via fresh Linear polling or orphan recovery. Resetting the entry to `pending` (the old approach) leaves the rework stuck indefinitely. **Delete the entry instead** so the next Linear poll treats it as new.
-
-Read `~/.claude-runner/state.json`. Find the task entry where `identifier` matches `$ARGUMENTS`.
-
-If found:
-1. Record the task's UUID (the key in the `tasks` object) and its `worktree_path` + `repo_path` if present.
-2. **Delete the entire entry** from the `tasks` object (the `"<uuid>": { ... }` block).
-3. **Delete the matching entry** from the `failure_counts` object (the `"<uuid>": <number>` line).
-4. Validate the JSON is still well-formed: `python3 -c "import json; json.load(open('/Users/barnent1/.claude-runner/state.json'))"` — must print no error.
-
-If the task had a `worktree_path`, clean it up:
-
-```bash
-/usr/bin/git -C {repo_path} worktree remove {worktree_path} --force 2>/dev/null; true
-/usr/bin/git -C {repo_path} worktree prune
-```
-
-If NOT found in state.json, that's fine — the runner will create a fresh entry on the next poll.
-
-After editing, validate JSON and confirm the entry is gone.
-
-### Step 7: Set Linear Status to Queued
-
-Get the "Queued" state ID:
+Get the "Todo" state ID:
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"query": "{ team(id: \"TEAM_UUID\") { states(filter: { name: { eq: \"Queued\" } }) { nodes { id name } } } }"}'
+  -d '{"query": "{ team(id: \"TEAM_UUID\") { states(filter: { name: { eq: \"Todo\" } }) { nodes { id name } } } }"}'
 ```
 
 Update the issue status:
@@ -253,12 +228,10 @@ Update the issue status:
 curl -s -X POST https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"QUEUED_STATE_ID\" }) { success issue { id state { name } } } }"}'
+  -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"TODO_STATE_ID\" }) { success issue { id state { name } } } }"}'
 ```
 
-**Do NOT re-add the "ai" label** — these issues already have it from the original `/issue-prd` run. Adding it again triggers the runner webhook and causes a bounce. Check the labels from Step 1b to confirm. If for some reason the "ai" label is missing, then add it.
-
-### Step 8: Cleanup (MANDATORY — DO THIS LAST)
+### Step 7: Cleanup (MANDATORY — DO THIS LAST)
 
 1. Switch back to `main`:
 
@@ -272,7 +245,7 @@ git checkout main
 git branch -D docs/rework-$ARGUMENTS
 ```
 
-2. Verify you are on `main`:
+3. Verify you are on `main`:
 
 ```bash
 git branch --show-current
@@ -280,9 +253,9 @@ git branch --show-current
 
 ## HARD STOP
 
-After Step 8 completes and you have verified you are on `main`, say EXACTLY:
+After Step 7 completes and you have verified you are on `main`, say EXACTLY:
 
-> "Rework document created for $ARGUMENTS. The runner will pick it up on next poll (~60s)."
+> "Rework document created for $ARGUMENTS. Run /issue-prd $ARGUMENTS to kick off the implementation pipeline."
 
 Then STOP. Do not:
 - Summarize the rework document contents
@@ -290,13 +263,10 @@ Then STOP. Do not:
 - Suggest next steps for this issue
 - Ask if the user wants to proceed with implementation
 
-The runner picks up the issue and implements from the rework document autonomously. Your job is done.
-
 ## Notes
 
-- Step 0 and Step 9 are non-negotiable — skipping them wastes API calls and leaves dirty state
+- Step 0 and Step 7 are non-negotiable — skipping them wastes API calls and leaves dirty state
 - The dialog in Step 3 should be FAST — the tester's comment is the spec, not a starting point for a new PRD
-- The rework document must be self-contained enough that the runner agent can implement without asking questions
+- The rework document must be self-contained enough that an agent can implement without asking questions
 - Always reference the original PRD for context but do NOT copy its full content into the rework doc
 - If the issue has been reworked before, reference previous rework docs so the agent knows the history
-- The runner's `read_prd()` prefers rework files over the original PRD — the latest rework doc will be used automatically

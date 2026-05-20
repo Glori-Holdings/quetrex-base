@@ -1,6 +1,6 @@
 ---
 name: e2e-test
-description: Comprehensive end-to-end testing command. Launches parallel sub-agents to research the codebase (structure, database schema, potential bugs), then uses the Vercel Agent Browser CLI to test every user journey — taking screenshots, validating UI/UX, and querying the database to verify records. Run after implementation to validate everything before code review.
+description: Comprehensive end-to-end testing command. Launches parallel sub-agents to research the codebase (structure, database schema, potential bugs), then uses Claude's native MCP browser tools to test every user journey — taking screenshots, validating UI/UX, and querying the database to verify records. Run after implementation to validate everything before code review.
 disable-model-invocation: true
 ---
 
@@ -10,14 +10,14 @@ disable-model-invocation: true
 
 ### 1. Platform Check
 
-agent-browser requires **Linux, WSL, or macOS**. Check the platform:
+MCP browser tools require **Linux, WSL, or macOS**. Check the platform:
 ```bash
 uname -s
 ```
 - `Linux` or `Darwin` → proceed
 - Anything else (e.g., `MINGW`, `CYGWIN`, or native Windows) → stop with:
 
-> "agent-browser only supports Linux, WSL, and macOS. It cannot run on native Windows. Please run this command from WSL or a Linux/macOS environment."
+> "MCP browser tools only support Linux, WSL, and macOS. Please run this command from WSL or a Linux/macOS environment."
 
 Stop execution if the platform is unsupported.
 
@@ -33,32 +33,18 @@ If no frontend is detected:
 
 Stop execution if no frontend is found.
 
-### 3. agent-browser Installation
+### 3. MCP Browser Tools Setup
 
-Check if agent-browser is installed:
-```bash
-agent-browser --version
+Load the browser tools with ToolSearch before starting:
+
+```
+select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__find,mcp__claude-in-chrome__browser_batch,mcp__claude-in-chrome__read_page,mcp__claude-in-chrome__read_console_messages,mcp__claude-in-chrome__resize_window,mcp__claude-in-chrome__tabs_close_mcp
 ```
 
-If the command is not found, install it automatically:
-```bash
-npm install -g agent-browser
-```
+Requires Chrome with the Claude Code extension installed.
 
-After installation (or if it was already installed), ensure the browser engine is set up:
-```bash
-agent-browser install --with-deps
-```
-
-The `--with-deps` flag installs system-level Chromium dependencies on Linux/WSL. On macOS it is harmless.
-
-Verify installation succeeded:
-```bash
-agent-browser --version
-```
-
-If installation fails, stop with:
-> "Failed to install agent-browser. Please install it manually with `npm install -g agent-browser && agent-browser install --with-deps`, then re-run this command."
+If the MCP tools are not available, stop with:
+> "MCP browser tools are not available. Ensure Chrome is running with the Claude Code extension installed, then re-run this command."
 
 ## Phase 1: Parallel Research
 
@@ -105,8 +91,8 @@ Using Sub-agent 1's startup instructions:
 1. Install dependencies if needed
 2. Start the dev server **in the background** (e.g., `npm run dev &`)
 3. Wait for the server to be ready
-4. Open the app with `agent-browser open <url>` and confirm it loads
-5. Take an initial screenshot: `agent-browser screenshot e2e-screenshots/00-initial-load.png`
+4. Create a new browser tab using `mcp__claude-in-chrome__tabs_create_mcp`
+5. Navigate to the app URL using `mcp__claude-in-chrome__navigate` and confirm it loaded using `mcp__claude-in-chrome__read_page`
 
 ## Phase 3: Create Task List
 
@@ -124,38 +110,30 @@ For each task, mark it `in_progress` with TaskUpdate and execute the following.
 
 ### 4a. Browser Testing
 
-Use the Vercel Agent Browser CLI for all browser interaction:
+Use the Claude MCP browser tools for all browser interaction:
 
-```
-agent-browser open <url>              # Navigate to a page
-agent-browser snapshot -i             # Get interactive elements with refs (@e1, @e2...)
-agent-browser click @eN               # Click element by ref
-agent-browser fill @eN "text"         # Clear field and type
-agent-browser select @eN "option"     # Select dropdown option
-agent-browser press Enter             # Press a key
-agent-browser screenshot <path>       # Save screenshot
-agent-browser screenshot --annotate   # Screenshot with numbered element labels
-agent-browser set viewport W H        # Set viewport (e.g., 375 812 for mobile)
-agent-browser wait --load networkidle # Wait for page to settle
-agent-browser console                 # Check for JS errors
-agent-browser errors                  # Check for uncaught exceptions
-agent-browser get text @eN            # Get element text
-agent-browser get url                 # Get current URL
-agent-browser close                   # End session
-```
-
-**Refs become invalid after navigation or DOM changes.** Always re-snapshot after page navigation, form submissions, or dynamic content updates (modals, tabs, theme changes).
+| Action | Tool |
+|---|---|
+| Navigate to page | `mcp__claude-in-chrome__navigate` |
+| Find interactive elements | `mcp__claude-in-chrome__find` |
+| Click element | `mcp__claude-in-chrome__browser_batch` with click action |
+| Fill form field | `mcp__claude-in-chrome__form_input` |
+| Take screenshot | `mcp__claude-in-chrome__computer` (screenshot action) — save description of what you see |
+| Wait for page to settle | `mcp__claude-in-chrome__read_page` |
+| Check console errors | `mcp__claude-in-chrome__read_console_messages` with pattern for errors |
+| Get page text | `mcp__claude-in-chrome__get_page_text` |
+| Set viewport | `mcp__claude-in-chrome__resize_window` |
 
 For each step in a user journey:
 
-1. Snapshot to get current refs
-2. Perform the interaction
-3. Wait for the page to settle
-4. **Take a screenshot** — save to a descriptive path under `e2e-screenshots/` organized by journey (e.g., `e2e-screenshots/profile-creation/03-form-submitted.png`)
-5. **Analyze the screenshot** — use the Read tool to view the screenshot image. Check for visual correctness, UX issues, broken layouts, missing content, error states
-6. Check `agent-browser console` and `agent-browser errors` periodically for JavaScript issues
+1. Use `mcp__claude-in-chrome__find` to locate current interactive elements
+2. Perform the interaction via the appropriate MCP tool
+3. Wait for the page to settle using `mcp__claude-in-chrome__read_page`
+4. **Take a screenshot** using `mcp__claude-in-chrome__computer` — record a description of what you see, organized by journey (e.g., "profile-creation step 3: form submitted successfully, showing confirmation banner")
+5. **Analyze the screenshot** — check for visual correctness, UX issues, broken layouts, missing content, error states
+6. Check `mcp__claude-in-chrome__read_console_messages` periodically for JavaScript errors
 
-Be thorough. Go through EVERY interaction, EVERY form field, EVERY button. The goal is that by the time this finishes, every part of the UI has been exercised and screenshotted.
+Be thorough. Go through EVERY interaction, EVERY form field, EVERY button. The goal is that by the time this finishes, every part of the UI has been exercised.
 
 ### 4b. Database Validation
 
@@ -175,18 +153,18 @@ After any interaction that should modify data (form submits, deletions, updates)
 
 When an issue is found (UI bug, database mismatch, JS error):
 
-1. **Document it:** what was expected vs what happened, screenshot path, relevant DB query results
+1. **Document it:** what was expected vs what happened, screenshot description, relevant DB query results
 2. **Fix the code** — make the correction directly
 3. **Re-run the failing step** to verify the fix worked
 4. **Take a new screenshot** confirming the fix
 
 ### 4d. Responsive Testing
 
-For the responsive testing task, revisit key pages at these viewports:
+For the responsive testing task, revisit key pages at these viewports using `mcp__claude-in-chrome__resize_window`:
 
-- **Mobile:** `agent-browser set viewport 375 812`
-- **Tablet:** `agent-browser set viewport 768 1024`
-- **Desktop:** `agent-browser set viewport 1440 900`
+- **Mobile:** width 375, height 812
+- **Tablet:** width 768, height 1024
+- **Desktop:** width 1440, height 900
 
 At each viewport, screenshot every major page. Analyze for layout issues, overflow, broken alignment, and touch target sizes on mobile.
 
@@ -196,7 +174,7 @@ After completing each journey, mark its task as `completed` with TaskUpdate.
 
 After all testing is complete:
 1. Stop the dev server background process
-2. Close the browser session: `agent-browser close`
+2. Close the browser tab using `mcp__claude-in-chrome__tabs_close_mcp`
 
 ## Phase 6: Report
 
@@ -219,20 +197,17 @@ Present a concise summary:
 
 ### Bug Hunt Findings (from code analysis)
 - [Description] — [severity] — [file:line]
-
-### Screenshots
-All saved to: `e2e-screenshots/`
 ```
 
 ### Markdown Export (ask first)
 
 After the text summary, ask the user:
 
-> "Would you like me to export the full testing report to a markdown file? It includes per-journey breakdowns, all screenshot references, database validation results, and detailed findings — useful as context for follow-up fixes or GitHub issues."
+> "Would you like me to export the full testing report to a markdown file? It includes per-journey breakdowns, screenshot descriptions, database validation results, and detailed findings — useful as context for follow-up fixes or GitHub issues."
 
 If yes, write a detailed report to `e2e-test-report.md` in the project root containing:
 - Full summary with stats
-- Per-journey breakdown: steps taken, screenshots, database checks, issues found
+- Per-journey breakdown: steps taken, screenshot descriptions, database checks, issues found
 - All issues with full details, fix status, and file references
 - Bug hunt findings from the code analysis sub-agent
 - Recommendations for any unresolved issues
