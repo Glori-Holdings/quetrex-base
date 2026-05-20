@@ -1,0 +1,18 @@
+{
+  "name": "@quetrex/base",
+  "version": "1.0.0",
+  "description": "Claude Code base configuration for development teams — agents, skills, and commands for the quetrex pipeline",
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": ["claude-code", "ai", "agents", "developer-tools"],
+  "license": "MIT",
+  "files": [
+    ".claude/",
+    "install.js",
+    "README.md"
+  ]
+}
