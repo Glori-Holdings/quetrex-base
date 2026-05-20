@@ -201,13 +201,24 @@ quetrex-base/
 
 | Command | Purpose | When to use |
 |---------|---------|-------------|
-| `/issue-prd <ID>` | Fetch Linear issue, run 5-question dialog, generate PRD | Before any automated work |
-| `/create-prd` | Create PRD from conversation (no Linear) | Ad-hoc feature planning |
-| `/prime` | Load codebase context, check health, list PRDs | Start of every session |
-| `/create-rules` | Generate CLAUDE.md + CI workflow + Stryker + Knip | New project setup |
-| `/plan-feature` | Deep codebase analysis, create implementation plan | Complex features |
-| `/execute <plan>` | Execute a plan step by step | After /plan-feature |
-| `/commit` | Stage, commit with proper message | After implementation |
+| `/issue-prd <ID>` | Fetch Linear issue, run 5-question dialog, generate PRD | You have a Linear issue and want the AI runner to implement it autonomously. This is the entry point for hands-off development. |
+| `/create-prd` | Create PRD from conversation (no Linear) | You're exploring an idea in conversation and want to capture it as a formal PRD without a Linear issue yet. |
+| `/plan-project` | Interactive interview, generate PRD, create all Linear issues | You're starting a brand-new project from scratch and need to go from idea to a full backlog of tasks in Linear. |
+| `/prime` | Load codebase context, check health, list PRDs | Beginning of every Claude Code session. Run this first so Claude understands the project before you ask it to do anything. |
+| `/create-rules` | Generate CLAUDE.md + CI workflow + Stryker + Knip | You just created a new repo (or cloned quetrex-base into one) and need to bootstrap project-specific configuration. Run once per project. |
+| `/plan-feature` | Deep codebase analysis, create implementation plan | You have a complex feature that needs careful planning before coding. The output plan is detailed enough for an agent to implement in one pass. |
+| `/execute <plan>` | Execute a plan step by step | You've already run `/plan-feature` and have a plan file. This implements it task by task with validation after each step. |
+| `/commit` | Stage, commit with proper message | You've finished a unit of work and want to create a clean, conventional commit (`feat:`, `fix:`, `docs:`, etc.). |
+
+**Skills reference:**
+
+| Skill | Purpose | When to use |
+|-------|---------|-------------|
+| `/e2e-test` | Parallel research + browser-based testing of every user journey | After implementation is complete and you want to validate the entire app end-to-end before code review. |
+| `/deploy <env>` | Deploy to Fly.io with rollback tags and smoke tests | You're ready to ship to staging or production, or need to roll back a bad deploy. |
+| `/tab-control` | Set WezTerm tab name and color | You want to visually distinguish this project's terminal tab from others. |
+| `/issue-requeue <ID>` | Reset a failed runner issue so it gets retried | The AI runner failed on an issue (status "AI: Blocked") and you want to give it another shot after fixing the root cause. |
+| `/merge-issue <ID>` | Merge PR + update Linear to "Human: Review" | You've reviewed a PR and it's ready to merge. This handles the merge, branch cleanup, and Linear status update in one step. |
 
 ### 3. Automation Runner (quetrex-runner)
 
