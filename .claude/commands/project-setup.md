@@ -107,11 +107,31 @@ If `.claude/CLAUDE.md` does not exist, create it:
 
 If it already exists, skip this step.
 
-## Step 4: Commit and Push
+## Step 4: direnv .envrc
+
+Check if direnv is installed:
+
+```bash
+which direnv 2>/dev/null && echo "installed" || echo "missing"
+```
+
+If installed and `.envrc` does not already exist:
+
+```bash
+echo 'dotenv' > .envrc
+direnv allow .
+```
+
+This tells direnv to load the project's `.env` file automatically when anyone enters the directory — database URLs, project API tokens, and other credentials become available to all commands (including Claude's) without manual sourcing.
+
+If `.envrc` already exists, skip. If direnv is not installed, skip and note it in the summary.
+
+## Step 5: Commit and Push
 
 ```bash
 git add .github/workflows/quality-gate.yml .claude/CLAUDE.md
-git commit -m "chore: project setup — CI, branch protection, CLAUDE.md"
+[ -f .envrc ] && git add .envrc
+git commit -m "chore: project setup — CI, branch protection, CLAUDE.md, direnv"
 git push origin main
 ```
 
@@ -122,11 +142,13 @@ Report:
 > - CI: .github/workflows/quality-gate.yml created
 > - Branch protection: main requires Lint & Type Check, Unit & Integration Tests, Production Build
 > - CLAUDE.md: {created/already existed}
+> - direnv: {.envrc created / already existed / direnv not installed — run /quetrex-setup}
 >
-> Partners can clone and start working immediately after running: npm install -g @quetrex/base"
+> Partners can clone and start working immediately after: npm install -g @quetrex/base"
 
 ## Notes
 - Run from the project root
 - Only the repo owner needs to run this — collaborators who clone get everything automatically
 - Branch protection requires a paid GitHub account for private repos
+- direnv loads project .env automatically — without it, database and service credentials must be manually exported before each session
 - Customize quality-gate.yml for your stack (e.g. add Playwright if you have E2E tests)

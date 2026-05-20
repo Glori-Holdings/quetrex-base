@@ -102,14 +102,49 @@ If not found in any profile, show the user exactly what to add and where:
 
 If already sourced, confirm and skip.
 
-## Step 6: Confirm
+## Step 6: direnv (recommended)
+
+direnv automatically loads a project's `.env` file when you enter its directory. This means database URLs, project API keys, and other credentials are available to Claude's commands without any manual setup or per-command sourcing.
+
+Check if direnv is installed:
+
+```bash
+which direnv 2>/dev/null && direnv version || echo "not installed"
+```
+
+If not installed, recommend it:
+
+> "direnv is not installed. It's strongly recommended — without it, database commands and other project-specific credentials may fail silently.
+>
+> Install:
+> - macOS: `brew install direnv`
+> - Linux / Windows WSL: `sudo apt install direnv` or `curl -sfL https://direnv.net/install.sh | bash`
+>
+> After installing, add the hook to your shell profile:
+> - zsh: `echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc`
+> - bash: `echo 'eval "$(direnv hook bash)"' >> ~/.bashrc`
+>
+> Then: `source ~/.zshrc` and run /quetrex-setup again."
+
+If installed, check if the hook is in the shell profile:
+
+```bash
+grep -l "direnv hook" ~/.zshrc ~/.bashrc ~/.bash_profile 2>/dev/null | head -1
+```
+
+If the hook is missing, show the user the command to add it. If already configured, confirm and continue.
+
+**How direnv works with projects:** When a project has a `.env` file and an `.envrc` file containing `dotenv`, direnv auto-exports those vars whenever you `cd` into the directory. Claude's bash commands inherit them — no manual sourcing needed. The `/project-setup` command creates the `.envrc` file.
+
+## Step 7: Confirm
 
 ```bash
 source ~/.claude/secrets.env 2>/dev/null
-echo "LINEAR_API_KEY: ${LINEAR_API_KEY:+set (${#LINEAR_API_KEY} chars)}"
-echo "gh: $(gh auth status --active 2>&1 | head -1)"
-echo "git name: $(git config --global user.name)"
-echo "git email: $(git config --global user.email)"
+echo "LINEAR_API_KEY : ${LINEAR_API_KEY:+set (${#LINEAR_API_KEY} chars)}"
+echo "gh auth        : $(gh auth status --active 2>&1 | head -1)"
+echo "git name       : $(git config --global user.name)"
+echo "git email      : $(git config --global user.email)"
+echo "direnv         : $(which direnv 2>/dev/null && direnv version || echo 'not installed')"
 ```
 
 Report clearly what is set and what is missing. If everything is green:
