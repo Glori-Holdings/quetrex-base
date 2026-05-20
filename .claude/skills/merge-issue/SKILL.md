@@ -40,7 +40,7 @@ Display:
 gh pr checks {PR_NUMBER}
 ```
 
-If any required check is failing, warn the user and ask whether to proceed. Mutation Testing and E2E Tests may be skipped/`continue-on-error` — those do not block.
+If any required check is failing, warn the user and ask whether to proceed.
 
 ## Step 3: Merge the PR
 
@@ -54,9 +54,20 @@ If merge fails, report the error and STOP.
 
 **MANDATORY — this is the entire reason this skill exists. NEVER skip.**
 
-Read the LINEAR_API_KEY from the environment. If not set, read it from `.env.local`.
+Read the `LINEAR_API_KEY` from the environment.
 
-First, get the issue UUID. Use the SMA team UUID `55e6dc25-090c-4731-82c2-44549801a709` for SMA issues. For other team keys, look up the team UUID dynamically.
+**Step 4a** — Look up the team UUID dynamically using the team key parsed from `$ARGUMENTS`:
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -d '{"query": "{ teams(filter: { key: { eq: \"TEAM_KEY\" } }) { nodes { id key name } } }"}'
+```
+
+Replace `TEAM_KEY` with the parsed team key (e.g., "SMA"). Extract the `id` field — this is the team UUID.
+
+**Step 4b** — Get the issue UUID:
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
@@ -65,13 +76,24 @@ curl -s -X POST https://api.linear.app/graphql \
   -d '{"query": "{ team(id: \"TEAM_UUID\") { issues(filter: { number: { eq: ISSUE_NUMBER } }) { nodes { id identifier title state { name } } } } }"}'
 ```
 
-Then set status to "Human: Review" (state ID: `57e4fe98-bd23-425a-9493-bd651d621a90`):
+**Step 4c** — Find the "Human: Review" state by name. Query the team's workflow states and find the one whose name contains "review" or "human review" (case-insensitive):
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
   -H "Content-Type: application/json" \
   -H "Authorization: $LINEAR_API_KEY" \
-  -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"57e4fe98-bd23-425a-9493-bd651d621a90\" }) { success issue { identifier title state { name } } } }"}'
+  -d '{"query": "{ team(id: \"TEAM_UUID\") { states { nodes { id name } } } }"}'
+```
+
+From the results, select the state whose name matches (case-insensitive) "human: review", "human review", or contains both "human" and "review". If multiple states match and you cannot determine which is correct, list them to the user and ask which to use before proceeding.
+
+**Step 4d** — Set the issue status:
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"REVIEW_STATE_ID\" }) { success issue { identifier title state { name } } } }"}'
 ```
 
 **Verify** the mutation returned `success: true`. If it failed, report the error.
@@ -100,5 +122,5 @@ Then STOP.
 
 - NEVER set an issue to "Complete" — only the human does that
 - NEVER skip the Linear status update
+- NEVER hardcode team UUIDs or state IDs — always look them up dynamically
 - If any step fails, report clearly what failed and what state things are in
-- For non-SMA team keys, look up the team UUID dynamically via the teams query
