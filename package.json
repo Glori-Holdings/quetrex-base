@@ -1,17 +1,33 @@
 {
   "name": "@quetrex/base",
   "version": "1.0.0",
-  "description": "Claude Code base configuration for development teams — agents, skills, and commands for the quetrex pipeline",
+  "description": "Glori Builder — Claude Code base configuration for development teams. Agents, skills, and commands for a complete AI-powered development pipeline.",
   "scripts": {
     "postinstall": "node install.js"
   },
   "engines": {
     "node": ">=18"
   },
-  "keywords": ["claude-code", "ai", "agents", "developer-tools"],
+  "keywords": ["claude-code", "glori-builder", "ai", "agents", "developer-tools", "linear"],
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
-    ".claude/",
+    ".claude/agents/",
+    ".claude/commands/",
+    ".claude/hooks/",
+    ".claude/skills/agent-browser/",
+    ".claude/skills/domain-capture/",
+    ".claude/skills/e2e-test/",
+    ".claude/skills/merge-issue/",
+    ".claude/skills/qa-verify/",
+    ".claude/skills/story-builder/",
+    ".claude/skills/tab-control/",
+    ".claude/CLAUDE.md",
+    ".claude/settings.json",
+    ".claude/statusline-command.sh",
+    ".claude/team-protocol.md",
     "install.js",
     "README.md"
   ]
