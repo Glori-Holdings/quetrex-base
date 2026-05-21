@@ -28,7 +28,7 @@ Read the `## Linear States` section in the project `.claude/CLAUDE.md`. You need
 for `deployed` and `complete`.
 
 If there is no `## Linear States` section, stop and tell the user:
-"No Linear state map found. Run `/map-task-columns` first so I know which columns mean
+"No Linear state map found. Run `/map-states` first so I know which columns mean
 'deployed' and 'complete'."
 
 ---

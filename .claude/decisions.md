@@ -7,7 +7,7 @@ A running log of non-obvious decisions in Glori Builder. Newest first.
 ## 2026-05-21 — Linear state map + manual deploy gates
 
 **Decision:** Pipeline state is driven by a per-project map of canonical keys → real Linear
-column names, configured once with `/map-task-columns` and stored in the project
+column names, configured once with `/map-states` and stored in the project
 `.claude/CLAUDE.md`. Single source of truth: `.claude/docs/linear-states.md`.
 
 **Canonical keys:** `backlog, queued, in_progress, needs_help, rework, ready, merged, deployed,
@@ -34,6 +34,6 @@ by-name "Human: Review" lookup.
 `deployed` issues in a chosen project to `complete`, per-project only, behind an explicit
 "are you sure?" confirmation.
 
-**Files touched:** new `.claude/docs/linear-states.md`, `.claude/commands/map-task-columns.md`,
+**Files touched:** new `.claude/docs/linear-states.md`, `.claude/commands/map-states.md`,
 `.claude/commands/complete.md`; wired `issue-prd`, `git-workflow`, `auto-pilot`, `issue-rework`,
 `merge-issue`, `deploy-setup`, `plan-project`, `create-rules`, `quetrex-docs`.

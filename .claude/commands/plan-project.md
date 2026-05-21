@@ -173,7 +173,7 @@ Identify the **queued** state — freshly planned issues are approved and ready 
 pick up. Resolve the `queued` column from the project's `## Linear States` map if it exists (see
 `.claude/docs/linear-states.md`). For a brand-new project with no map yet, fall back in this order:
 a state literally named "Queued", else the Backlog state (type: `backlog`). Note to the user that
-running `/map-task-columns` will make this exact.
+running `/map-states` will make this exact.
 
 Check if an "ai" label exists. If not, create it:
 

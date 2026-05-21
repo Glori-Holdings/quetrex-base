@@ -90,7 +90,7 @@ curl -s -X POST https://api.linear.app/graphql \
   -d '{"query": "{ team(id: \"TEAM_UUID\") { states { nodes { id name type } } } }"}'
 ```
 
-Select the state whose `name` exactly equals the `merged` column (e.g. "Merged"). If the project has no `## Linear States` map, stop and tell the user to run `/map-task-columns` — there is no reliable type-based fallback for `merged` (it usually shares `type: "started"` with several other columns).
+Select the state whose `name` exactly equals the `merged` column (e.g. "Merged"). If the project has no `## Linear States` map, stop and tell the user to run `/map-states` — there is no reliable type-based fallback for `merged` (it usually shares `type: "started"` with several other columns).
 
 **Step 4d** — Set the issue status:
 

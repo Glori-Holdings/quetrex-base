@@ -40,7 +40,7 @@ curl -s -X POST https://api.linear.app/graphql \
   -d '{"query": "{ issues(filter: { project: { id: { eq: \"PROJECT_ID\" } }, state: { name: { eq: \"QUEUED_COLUMN_NAME\" } } }, orderBy: sortOrder) { nodes { id identifier title sortOrder state { name type } relations { nodes { type relatedIssue { id identifier state { name type } } } } } } }"}'
 ```
 
-If no map exists, fall back to `state: { type: { in: ["unstarted", "backlog"] } }` and suggest running `/map-task-columns`.
+If no map exists, fall back to `state: { type: { in: ["unstarted", "backlog"] } }` and suggest running `/map-states`.
 
 ### Step 1b: Build execution order
 

@@ -91,7 +91,7 @@ curl -s -X POST https://api.linear.app/graphql \
   -d '{"query": "{ team(id: \"TEAM_UUID\") { states { nodes { id name type } } } }"}'
 ```
 
-Find the state whose `name` exactly equals the `in_progress` column from the map (e.g. "AI: In Progress"). If no map exists, fall back to the state with `type: "started"` and suggest the user run `/map-task-columns`. Then update the issue:
+Find the state whose `name` exactly equals the `in_progress` column from the map (e.g. "AI: In Progress"). If no map exists, fall back to the state with `type: "started"` and suggest the user run `/map-states`. Then update the issue:
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \

@@ -29,7 +29,7 @@ Quetrex-base is a Claude Code workflow system for software development teams. It
 ```
 /project-setup       GitHub Actions CI, branch protection, direnv .envrc
 /create-rules        Generate .claude/CLAUDE.md with stack and verification commands
-/map-task-columns    Map your Linear columns to the pipeline's canonical states
+/map-states          Map your Linear columns to the pipeline's canonical states
 /deploy-setup        Generate a project-specific /deploy skill
 ```
 
@@ -82,7 +82,7 @@ Auto-pilot is the one exception that bypasses the manual gates.
 ## Linear States
 
 The pipeline drives issues through canonical state keys. Each project maps its real Linear column
-names to these keys once with `/map-task-columns` (stored in `.claude/CLAUDE.md`). Full reference:
+names to these keys once with `/map-states` (stored in `.claude/CLAUDE.md`). Full reference:
 `.claude/docs/linear-states.md`.
 
 ```
@@ -137,7 +137,7 @@ Never hardcode column names — resolve through the map. Several columns often s
 | `/project-setup` | One-time project setup (CI, branch protection, .envrc) |
 | `/create-rules` | Generate project .claude/CLAUDE.md from stack templates |
 | `/update-rules` | Audit and update existing project .claude/CLAUDE.md |
-| `/map-task-columns` | Map Linear columns to the pipeline's canonical states |
+| `/map-states` | Map Linear columns to the pipeline's canonical states |
 | `/deploy-setup` | Generate project-specific deploy skill (Fly.io, Vercel, etc.) |
 
 ### Keys and Secrets

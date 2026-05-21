@@ -135,7 +135,7 @@ Wait for explicit confirmation before running:
 After a successful **production** deploy, move the project's merged issues to the `deployed`
 column. Resolve `merged` and `deployed` from the `## Linear States` map in the project
 `.claude/CLAUDE.md` (see .claude/docs/linear-states.md). If there is no map, skip this and tell
-the user to run /map-task-columns.
+the user to run /map-states.
 
 Ask which Linear project this deploy covers (or default to the one the merged issues belong to),
 then find all issues in the `merged` column for that project and move each to `deployed`:
