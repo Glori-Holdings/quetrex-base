@@ -1,6 +1,6 @@
 {
   "name": "glori-builder",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Glori Builder — Claude Code base configuration for development teams. Agents, skills, and commands for a complete AI-powered development pipeline.",
   "scripts": {
     "postinstall": "node install.js"
@@ -23,6 +23,8 @@
   "files": [
     ".claude/agents/",
     ".claude/commands/",
+    ".claude/docs/linear-states.md",
+    ".claude/docs/runner.md",
     ".claude/hooks/",
     ".claude/skills/agent-browser/",
     ".claude/skills/domain-capture/",
