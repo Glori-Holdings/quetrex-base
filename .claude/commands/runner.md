@@ -90,9 +90,29 @@ MERGED_STATE_ID       MERGED_STATE_NAME
 
 Also resolve any states at or after `merged` (typically `merged`, `deployed`, `complete`) — these satisfy the `merged = unblocked` readiness check.
 
-### Step 0d: Initialize state file
+### Step 0d: Single-runner-per-project guard
 
-Create `.claude/runner-{PROJECT_SHORT_ID}.json` (short = first 8 chars of project UUID):
+Before creating or loading any state, check for an existing runner state file for this project:
+
+```bash
+STATE_FILE=".claude/runner-${PROJECT_SHORT_ID}.json"
+```
+
+If the file exists, read its `heartbeat` field. If the heartbeat timestamp is less than `2 × pollIntervalSec` (default: 240 s) old, **refuse to start**:
+
+```
+A runner is already active for project {projectName}
+(heartbeat {N} seconds ago). Stop it first with /runner stop,
+or use /runner --resume to take over the state file.
+```
+
+If the heartbeat is older than 2 poll intervals (stale — the runner crashed or the tab was closed), proceed: load the state file and run Phase 1 auto-recovery.
+
+This guard enforces the **one runner per project** invariant. Running two independent runners against the same project is unsupported and actively prevented here — the Linear state-flip alone does NOT provide a reliable lock for duplicate dispatchers (both would flip the issue to the same `in_progress` value and both succeed; the re-read cannot distinguish winner from loser). The heartbeat guard eliminates the race at the source.
+
+### Step 0e: Initialize or load state file
+
+If no state file exists, create `.claude/runner-{PROJECT_SHORT_ID}.json`:
 
 ```json
 {
@@ -100,6 +120,7 @@ Create `.claude/runner-{PROJECT_SHORT_ID}.json` (short = first 8 chars of projec
   "projectName": "PROJECT_NAME",
   "teamId": "TEAM_UUID",
   "startedAt": "ISO_TIMESTAMP",
+  "heartbeat": "ISO_TIMESTAMP",
   "pollIntervalSec": 120,
   "concurrency": 3,
   "draining": false,
@@ -108,7 +129,7 @@ Create `.claude/runner-{PROJECT_SHORT_ID}.json` (short = first 8 chars of projec
 }
 ```
 
-If a state file already exists for this project ID (from a prior run), load it and proceed to Phase 1 — do not overwrite it.
+If a state file exists but has a stale heartbeat (from Step 0d), load it and proceed to Phase 1 — do not overwrite it.
 
 Report to the user:
 
@@ -141,17 +162,19 @@ curl -s -X POST https://api.linear.app/graphql \
 An issue has **live progress** if either of these is true:
 
 ```bash
-# Check for open PR whose branch contains the issue identifier (lowercase)
+# Check for open PR whose branch matches the issue identifier (lowercase) followed by a dash.
+# Anchor the identifier with a trailing dash to prevent glo-5 from matching glo-51 or glo-57.
+IDENTIFIER_LOWER="glo-57"   # example — use the actual lowercase identifier
 gh pr list --state open --json number,headRefName | \
-  python3 -c "import json,sys; prs=json.load(sys.stdin); print(any('IDENTIFIER_LOWER' in p['headRefName'].lower() for p in prs))"
+  python3 -c "import json,sys; prs=json.load(sys.stdin); print(any('${IDENTIFIER_LOWER}-' in p['headRefName'].lower() for p in prs))"
 
-# Check for pushed remote branch
-git ls-remote --heads origin "*IDENTIFIER_LOWER*"
+# Check for pushed remote branch — anchor with trailing dash
+git ls-remote --heads origin "*${IDENTIFIER_LOWER}-*"
 ```
 
-Replace `IDENTIFIER_LOWER` with the lowercase issue identifier (e.g. `glo-57`).
+Replace `IDENTIFIER_LOWER` with the lowercase issue identifier (e.g. `glo-57`). The trailing `-` anchor prevents `glo-5` from matching `glo-51` or `glo-57`.
 
-- **Live progress found** → Leave the issue in `in_progress`. If it matches a slot in the state file, keep the slot as `in_flight`. If it has no slot entry (orphaned from a prior dispatcher session), create a slot entry with `status: "in_flight"` and `agentRef: "recovered"`.
+- **Live progress found (open PR or pushed branch)** → The agent that was driving this issue died with the previous session. A recovered slot must not sit idle — **re-dispatch**: spawn a fresh background worktree agent (isolation: "worktree") that resumes from the existing branch and drives the issue to `ready`. Record the slot with the new `agentRef` and `status: "in_flight"`. See `.claude/docs/runner.md` §6 for the re-dispatch rationale.
 - **No live progress** → Reset the issue: move it back to the `queued` column:
 
 ```bash
@@ -175,8 +198,8 @@ Report the reconciliation results:
 
 ```
 Auto-recover: checked {N} in_progress issues
-  Kept in flight: {list of identifiers with live progress}
-  Reset to queued: {list of identifiers with no branch/PR}
+  Re-dispatched (live branch/PR, fresh agent spawned): {list of identifiers}
+  Reset to queued (no branch/PR found): {list of identifiers}
   Slot freed (finished while down): {list}
 ```
 
@@ -231,15 +254,15 @@ curl -s -X POST https://api.linear.app/graphql \
 
 **Apply the readiness rule (merged = unblocked):**
 
-For each candidate issue, check its `relations` for any relation of `type: "blocks"` pointing at this issue (meaning "this issue is blocked by that one"). For each blocker, check whether the blocker's current state name matches `MERGED_STATE_NAME` or any state that comes after (deployed, complete). Look these up by name from the resolved state list, not by hardcoded string.
+For each candidate issue, examine its `relations` list. A relation with `type: "blocks"` on issue X means X is blocked by `relatedIssue`. Concretely: if the query returns `{ type: "blocks", relatedIssue: { identifier: "GLO-50", state: { name: "..." } } }` on issue X, then GLO-50 is a blocker of X. Check each such `relatedIssue`'s state name against the `MERGED_STATE_NAME` and any column that comes after it (deployed, complete — resolved from the map by name, never hardcoded). If every blocker is in `merged` or a later column, the issue is ready to run. If the issue has no `blocks`-type relations, it has no blockers and is ready.
 
-An issue is **ready to run** if ALL of its blockers are in `merged` or a later column. If it has no blockers, it is ready.
+Also skip any issue whose UUID is already present as a key in the state file's `slots` table (intra-runner dedup — prevents re-claiming an issue the dispatcher already owns).
 
-Pick the first ready issue in `sortOrder`. If none are ready, break (all candidates are blocked — try again next tick).
+Pick the first ready issue in `sortOrder`. If none are ready, break (all candidates are blocked or already claimed — try again next tick).
 
-**Claim it (the lock):**
+**Claim it:**
 
-Flip the issue `queued → in_progress`:
+Flip the issue `queued → in_progress` and immediately record the slot. The lock is the enforced single-runner-per-project invariant (heartbeat guard, Phase 0d) plus the slot-table dedup above — NOT the idempotent Linear state flip (two callers setting the same value both succeed; a re-read cannot distinguish them). With only one active runner per project, the only real race is a mid-tick restart, which Phase 1 already handles.
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
@@ -248,28 +271,15 @@ curl -s -X POST https://api.linear.app/graphql \
   -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"IN_PROGRESS_STATE_ID\" }) { success issue { id state { name } } } }"}'
 ```
 
-**Race guard:** immediately re-read the issue's state after the flip:
+**Record the slot before spawning:**
 
-```bash
-curl -s -X POST https://api.linear.app/graphql \
-  -H "Authorization: $LINEAR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "{ issue(id: \"ISSUE_UUID\") { state { name } } }"}'
-```
-
-If the state is not `IN_PROGRESS_STATE_NAME` (another session claimed it first), discard this issue and pick the next candidate. The Linear state transition is the lock — only issues still in the queued column can be claimed.
-
-**Spawn a background worktree agent:**
-
-Each claimed issue gets one background agent with `isolation: "worktree"`. Pass the issue ID, identifier, title, team UUID, and the resolved state IDs for `in_progress`, `ready`, and `needs_help`. The agent runs the full pipeline to `ready` and stops (see "Spawned Pipeline Agent" below).
-
-Record the slot immediately:
+Write the slot to the state file immediately after the `issueUpdate` succeeds — before the agent is spawned. The slot entry is the intra-runner dedup fence; it must exist before the next refill iteration can run:
 
 ```json
 "ISSUE_UUID": {
   "identifier": "GLO-57",
   "branch": "feature/glo-57-...",
-  "agentRef": "<harness background task ref>",
+  "agentRef": "pending",
   "status": "in_flight",
   "retries": 0,
   "claimedAt": "ISO_TIMESTAMP",
@@ -277,7 +287,13 @@ Record the slot immediately:
 }
 ```
 
-Rewrite the state file. Continue the refill loop.
+**Spawn a background worktree agent:**
+
+Each claimed issue gets one background agent with `isolation: "worktree"`. Pass the issue ID, identifier, title, team UUID, and the resolved state IDs for `in_progress`, `ready`, and `needs_help`. The agent runs the full pipeline to `ready` and stops (see "Spawned Pipeline Agent" below).
+
+Update `agentRef` in the slot entry with the harness task reference returned by the spawn call. Rewrite the state file. Continue the refill loop.
+
+**Write the heartbeat.** At the end of every tick — after all slot changes and state-file writes — update the `heartbeat` field in the state file to the current UTC timestamp. This is what the single-runner guard (Phase 0d) reads on the next launch to know whether this runner is still active.
 
 ### Tick step 3: Idle handling
 
@@ -383,7 +399,7 @@ If the runner's tab is closed or the session ends unexpectedly:
 /runner --resume
 ```
 
-This loads the most recent `.claude/runner-*.json` state file, runs Phase 1 auto-recovery (reconciles any orphaned `in_progress` issues — live branch/PR means keep it; no branch/PR means reset to `queued`), and continues Phase 2.
+This loads the most recent `.claude/runner-*.json` state file, runs Phase 1 auto-recovery (reconciles any orphaned `in_progress` issues — live branch/PR means re-dispatch a fresh agent; no branch/PR means reset to `queued`), and continues Phase 2.
 
 ---
 
@@ -393,5 +409,5 @@ This loads the most recent `.claude/runner-*.json` state file, runs Phase 1 auto
 - Resolve all states through the project `## Linear States` map. See `.claude/docs/linear-states.md`. Never hardcode column names.
 - The runner requires a complete map — run `/map-states` if it is missing. Type-fallback is not available for `in_progress`, `ready`, or `merged` (all commonly `type: "started"`).
 - The concurrency cap is 3 in-flight issues. This is not configurable from the command line in v1; edit the state file's `concurrency` field to change it.
-- One runner per project per tab. Running two runners for the same project will result in both trying to claim the same issues — the Linear state-flip is the lock, so one will win and the other will skip, but it wastes slots.
+- One runner per project is enforced by the heartbeat guard (Phase 0d). Running two independent runners against the same project is unsupported — the Linear state-flip does NOT prevent double-claiming (both callers set the same `in_progress` value; both succeed; the re-read returns `in_progress` for both). The heartbeat guard is the actual lock.
 - See `.claude/docs/runner.md` for the full design rationale, state-file schema details, and edge-case handling.

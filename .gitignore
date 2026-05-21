@@ -9,3 +9,7 @@ node_modules/
 .env
 .env.*
 !.env.example
+
+# Runner and auto-pilot run-state files — local only, never commit
+.claude/runner-*.json
+.claude/autopilot-*.json

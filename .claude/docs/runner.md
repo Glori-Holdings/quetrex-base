@@ -52,6 +52,11 @@ column that comes after it** (typically `deployed`, `complete`). All of these co
 "unblocked." This list is built by resolving the canonical keys `merged`, `deployed`, and
 `complete` from the map and collecting their state names; never hardcoded.
 
+**Important:** `merged = unblocked` trusts the Linear `merged` column, which `/merge-issue`
+sets when it squash-merges the PR. A raw GitHub merge that bypasses `/merge-issue` will not
+advance the Linear state, so blockers merged that way will still appear unresolved to the
+runner and downstream issues will stall. Always use `/merge-issue` to close the gate.
+
 ---
 
 ## 2. Dispatcher loop algorithm
@@ -61,27 +66,32 @@ on every tick (default 120 s):
   1. FREE COMPLETED SLOTS
      for each in_flight slot:
        query the issue's current Linear state
-       if state == ready     → move slot to history (outcome: ready),
-                               add Linear comment "Reached PR Ready — awaiting manual /merge-issue."
+       if state == ready      → move slot to history (outcome: ready),
+                                add Linear comment "Reached PR Ready — awaiting manual /merge-issue."
        if state == needs_help → move slot to history (outcome: needs_help)
        if state == in_progress → leave slot occupied
-       else (human moved it) → move slot to history (outcome: human_moved)
+       else (human moved it)  → move slot to history (outcome: human_moved)
 
   2. REFILL (skip if draining)
      while in_flight_count < concurrency_cap (3):
        query queued column, ordered by sortOrder, include relations
-       find first issue where all blockers are in merged-or-later (readiness rule)
+       skip any issue whose UUID is already in the slot table (intra-runner dedup)
+       find first issue where all blockers are in merged-or-later:
+         blocker = any relation where { type: "blocks", relatedIssue: Y }
+                   on the queued issue's own `relations` list
+                   (Y is the blocker; "blocks" on issue X means X is blocked by Y)
+         satisfied when Y's state name is in { MERGED_STATE_NAME, DEPLOYED_STATE_NAME, COMPLETE_STATE_NAME }
+                   (resolved from map, never hardcoded)
        if no ready issue found: break
 
-       # CLAIM (the lock)
+       # CLAIM
        flip issue queued → in_progress via issueUpdate
-       re-read the issue state immediately
-       if state != in_progress: lost the race → discard, try next candidate
-       record slot: { identifier, branch, agentRef, status: "in_flight", claimedAt, ... }
-       rewrite state file
+       record slot: { identifier, branch, agentRef: pending, status: "in_flight", claimedAt, ... }
+       rewrite state file immediately (before spawn — slot is the dedup fence)
 
        # SPAWN
        background agent, isolation: "worktree"
+       update slot.agentRef with returned task reference
        runs full pipeline: architect → [designer] → developer(s) → QA (≤3) → reviewer → git-workflow
        STOPS at ready — never merges, deploys, or completes
 
@@ -90,7 +100,11 @@ on every tick (default 120 s):
        log idle heartbeat (at most once per 10 ticks)
        stay alive — runner is continuous
 
-  4. CONTEXT GUARD
+  4. WRITE HEARTBEAT
+     update state file: heartbeat = current UTC timestamp
+     (the single-runner guard on next launch reads this)
+
+  5. CONTEXT GUARD
      if context usage ≥ 70%: run /compact before next tick
 ```
 
@@ -109,6 +123,7 @@ short and unambiguous even if multiple projects are running in separate tabs.
   "projectName": "Glori Builder",
   "teamId": "TEAM_UUID",
   "startedAt": "ISO_TIMESTAMP",
+  "heartbeat": "ISO_TIMESTAMP",
   "pollIntervalSec": 120,
   "concurrency": 3,
   "draining": false,
@@ -136,45 +151,61 @@ short and unambiguous even if multiple projects are running in separate tabs.
 
 ### Field notes
 
+- `heartbeat`: updated to current UTC on every tick. The single-runner guard on launch reads
+  this; a heartbeat newer than 2 × `pollIntervalSec` means a runner is active and refuses to
+  start a second one. A stale heartbeat (older than 2 poll intervals) means the runner crashed
+  or the tab was closed — Phase 1 auto-recovery takes over.
 - `slots`: holds only currently-tracked issues. In-flight count = number of entries with
   `status: "in_flight"`. When a slot finishes, its entry moves to `history` and the slot frees.
+  The slot table is also the intra-runner dedup fence: the dispatcher never claims an issue
+  whose UUID is already a key here.
 - `history`: append-only log of completed/failed issues. Never truncated (grow-only in v1).
 - `draining`: when `true`, the refill step is skipped. The loop continues until all in-flight
   slots reach `ready` or `needs_help`, then the runner exits.
-- `agentRef`: the harness background task reference returned when the agent was spawned. Used to
-  check agent completion status. On recovery, set to `"recovered"` for slots reconstructed from
-  Linear state without a live agent reference.
+- `agentRef`: the harness background task reference returned when the agent was spawned. Set to
+  `"pending"` between the claim write and the spawn call; updated to the real task ref once the
+  agent starts. On Phase 1 recovery, re-dispatched slots get a new `agentRef` from the
+  freshly spawned agent.
 - `retries`: not used by the dispatcher directly (the background pipeline tracks its own QA
   retries), but recorded for audit. The pipeline sets `needs_help` on 3 failures; the dispatcher
   reads that from Linear state.
-- The file is rewritten after every slot change (claim, free, drain flag). A fresh dispatcher
-  always trusts **Linear over the stale file**: Phase 1 reconciliation wins on every launch.
+- The file is rewritten after every slot change (claim, free, drain flag, heartbeat). A fresh
+  dispatcher always trusts **Linear over the stale file**: Phase 1 reconciliation wins on every
+  launch.
 
 ---
 
 ## 4. Claim-lock protocol
 
-The dispatcher must not start the same issue twice — whether from a re-poll within the same
-session or from two runners running in parallel tabs for the same project.
+The dispatcher must not start the same issue twice — whether within a single session or across
+two independent runner sessions for the same project.
 
-**The Linear `queued → in_progress` state transition IS the lock.** Here is why it works:
+**Why the Linear state flip alone is not a lock.**
 
-1. The dispatcher queries issues in the `queued` column.
-2. It calls `issueUpdate` to flip the chosen issue to `in_progress`.
-3. It immediately re-reads the issue's state from Linear.
-4. If the state is not `in_progress` (because another session won the race), the dispatcher
-   discards the issue and picks the next candidate.
+Both a claim and a duplicate claim flip the issue to the same target state (`in_progress`). Both
+`issueUpdate` mutations succeed. A re-read after the flip returns `in_progress` for both callers
+— there is no loser. The idempotent write provides no mutual exclusion. A design that relied on
+this would silently double-claim issues and spawn two pipeline agents for each.
 
-Because Linear processes `issueUpdate` mutations serially, exactly one caller wins. The loser
-sees a state that is not `queued` anymore (it is `in_progress` from the winner's flip) and moves
-on. No external lock or distributed coordination is needed — the source-of-truth board state
-provides the lock for free.
+**The actual lock is two-layer:**
 
-**Implication for parallel runners:** Running two runners for the same project is harmless but
-wasteful. Each will race for the same queued issues; one will always win and the other will
-silently skip. The concurrency cap (3) applies per-runner, not globally — two runners on the
-same project could in theory start 6 issues. This is not a recommended configuration; document
-it in the command's notes section.
+1. **Single-runner-per-project guard (Phase 0d).** On every launch, the dispatcher checks the
+   state file's `heartbeat` timestamp. A heartbeat newer than 2 × `pollIntervalSec` means
+   another runner is alive — the new launch refuses to start. The heartbeat is updated every tick
+   so an active runner continuously renews its claim to the project. This eliminates the
+   two-independent-runners race entirely.
+
+2. **Slot-table dedup (intra-runner).** Within a single dispatcher session, ticks are
+   sequential. Before claiming an issue, the dispatcher checks whether its UUID is already in the
+   `slots` table. If it is, the issue is skipped. The slot is written to the state file
+   **before** the agent is spawned, so even a mid-tick crash (where the agent never starts) is
+   recovered by Phase 1 reconciliation: the issue is in `in_progress` in Linear with no live
+   branch/PR, so Phase 1 resets it to `queued` and removes the stale slot.
+
+**Running two runners for the same project is unsupported and actively blocked** by the
+heartbeat guard. It is not a "wasteful but harmless" configuration — without the guard, it is
+the expected failure mode (both runners claim the same issues). The guard makes it a hard error
+at launch time.
 
 ---
 
@@ -190,7 +221,7 @@ completely restarting) the dispatcher session does not interrupt or cancel any r
 
 The state file is the source of truth. After compaction or restart, Phase 1 auto-recovery
 reconstructs the slot table:
-- Issues in `in_progress` with a live branch or open PR: reconstruct as `in_flight`.
+- Issues in `in_progress` with a live branch or open PR: re-dispatch with a fresh agent.
 - Issues in `in_progress` with no branch or PR: reset to `queued`.
 - Issues already at `ready` or `needs_help`: free the slot, log to history.
 
@@ -209,34 +240,39 @@ state file is a local cache and must yield to it.
 
 1. Query all issues in the project's `in_progress` column.
 2. For each:
-   a. Does an open PR exist whose branch name contains the lowercase issue identifier?
-      (`gh pr list --state open --json number,headRefName`)
-   b. Does a pushed remote branch exist matching the identifier?
-      (`git ls-remote --heads origin "*<identifier-lower>*"`)
-   - YES to either → live progress. Leave `in_progress`. Ensure slot entry exists.
+   a. Does an open PR exist whose branch name contains the lowercase identifier followed by `-`?
+      Use `gh pr list --state open --json number,headRefName` and check for `<identifier>-` in
+      the branch name (anchored to prevent `glo-5` matching `glo-51` or `glo-57`).
+   b. Does a pushed remote branch exist with an anchored match?
+      `git ls-remote --heads origin "*<identifier-lower>-*"` (trailing `-` anchors the prefix).
+   - YES to either → live progress exists, but the agent that was driving it is dead. **Re-dispatch:**
+     spawn a fresh background worktree agent (isolation: "worktree") that resumes from the
+     existing branch and drives the issue to `ready`. Update the slot entry with the new
+     `agentRef` and keep `status: "in_flight"`. A recovered slot MUST have a live agent; passive
+     "keep" with no agent would stall the slot until the dispatcher is closed.
    - NO to both → no real progress. Reset: `issueUpdate` back to `queued`. Remove from slots.
-3. For each slot in `slots` with `status: "in_flight"`:
+3. For each slot in `slots` with `status: "in_flight"` that was NOT handled in step 2:
    - Fetch the issue's current Linear state.
    - If it is `ready` or `needs_help` (finished while the dispatcher was down): free the slot,
      add to history.
-   - If it is still `in_progress`: keep the slot as-is.
+   - If it is still `in_progress` but has live progress: already handled above.
 
 ### Tab-close recovery
 
 Closing the runner tab is a hard stop. No cleanup runs at stop time. The next launch's Phase 1
 handles it:
 
-- Any `in_progress` issues that produced a branch/PR before the tab closed are kept in flight.
+- Any `in_progress` issues that produced a branch/PR before the tab closed: re-dispatched with
+  a fresh agent. The new agent resumes from the existing branch.
 - Any `in_progress` issues with no branch/PR (claimed but not yet started, or the agent was
-  just spawned and hadn't pushed yet) are reset to `queued`. They will be re-claimed on the
-  next poll.
+  just spawned and hadn't pushed yet): reset to `queued`. They will be re-claimed on the next
+  poll tick.
 
-The worst case is that an issue gets re-claimed and re-started. The background pipeline agent
-for the "lost" run (if it was spawned before the tab closed) will eventually reach `ready` or
-`needs_help` on its own — the dispatcher will notice the state change on the first post-recovery
-tick and free the slot. If both agents finish successfully, two PRs will exist for the same
-issue; a human reviewing `/merge-issue` will see the duplicate and close one. This edge case is
-rare and recoverable.
+If the original "lost" agent somehow continued running in the harness after the tab closed and
+reaches `ready` or `needs_help` independently, the dispatcher will see the state change on the
+next tick and free the slot. The re-dispatched agent will find the issue already in `ready` and
+exit cleanly. The PR opened by whichever agent finished first stands; the duplicate is harmless
+(one will be a no-op or close-without-merging). This overlap scenario is rare and recoverable.
 
 ---
 
