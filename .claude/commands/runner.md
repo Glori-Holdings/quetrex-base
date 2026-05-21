@@ -157,16 +157,18 @@ curl -s -X POST https://api.linear.app/graphql \
   -d '{"query": "{ issues(filter: { project: { id: { eq: \"PROJECT_ID\" } }, state: { name: { eq: \"IN_PROGRESS_STATE_NAME\" } } }) { nodes { id identifier title } } }"}'
 ```
 
-### Step 1b: For each in_progress issue, check for live progress
+### Step 1b: For each in_progress issue, apply the three-way recovery decision
 
-An issue has **live progress** if either of these is true:
+First, look up the existing slot entry (if any) for this issue in the state file to read its `recoveryAttempts` count.
+
+Next, check for live progress. An issue has **live progress** if either of these is true:
 
 ```bash
 # Check for open PR whose branch matches the issue identifier (lowercase) followed by a dash.
 # Anchor the identifier with a trailing dash to prevent glo-5 from matching glo-51 or glo-57.
 IDENTIFIER_LOWER="glo-57"   # example — use the actual lowercase identifier
-gh pr list --state open --json number,headRefName | \
-  python3 -c "import json,sys; prs=json.load(sys.stdin); print(any('${IDENTIFIER_LOWER}-' in p['headRefName'].lower() for p in prs))"
+gh pr list --state open --json number,headRefName,url | \
+  python3 -c "import json,sys; prs=json.load(sys.stdin); hits=[p for p in prs if '${IDENTIFIER_LOWER}-' in p['headRefName'].lower()]; print(hits[0]['url'] if hits else '')"
 
 # Check for pushed remote branch — anchor with trailing dash
 git ls-remote --heads origin "*${IDENTIFIER_LOWER}-*"
@@ -174,8 +176,44 @@ git ls-remote --heads origin "*${IDENTIFIER_LOWER}-*"
 
 Replace `IDENTIFIER_LOWER` with the lowercase issue identifier (e.g. `glo-57`). The trailing `-` anchor prevents `glo-5` from matching `glo-51` or `glo-57`.
 
-- **Live progress found (open PR or pushed branch)** → The agent that was driving this issue died with the previous session. A recovered slot must not sit idle — **re-dispatch**: spawn a fresh background worktree agent (isolation: "worktree") that resumes from the existing branch and drives the issue to `ready`. Record the slot with the new `agentRef` and `status: "in_flight"`. See `.claude/docs/runner.md` §6 for the re-dispatch rationale.
-- **No live progress** → Reset the issue: move it back to the `queued` column:
+Apply the **three-way recovery decision**:
+
+**Branch A — Live progress, first recovery (`recoveryAttempts == 0` or no prior slot):**
+The agent that was driving this issue died with the previous session. Re-dispatch: spawn a fresh background worktree agent (isolation: "worktree") that resumes from the existing branch and drives the issue to `ready`. Set the slot's `agentRef` to the new task reference, `status: "in_flight"`, and increment `recoveryAttempts` to 1. See `.claude/docs/runner.md` §6 for the re-dispatch rationale.
+
+**Branch B — Live progress, already recovered and still stuck (`recoveryAttempts >= 1`):**
+This issue was re-dispatched on a prior launch and still has not advanced in Linear state — the recovered agent made no progress either. Do NOT re-dispatch again. Instead:
+- Move the issue to the `needs_help` column (resolved from the map — never hardcoded):
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"NEEDS_HELP_STATE_ID\" }) { success } }"}'
+```
+
+- Post a Linear comment identifying the stale PR so a human can act:
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "mutation { commentCreate(input: { issueId: \"ISSUE_UUID\", body: \"Runner recovered this issue twice with no progress; a PR exists at PR_URL — needs human review.\" }) { success } }"}'
+```
+
+- Move the slot entry to `history` with `outcome: "needs_help_recovery"` and free the slot.
+
+**Branch C — No live progress (no open PR, no pushed branch):**
+No real work was done. Reset the issue to `queued`:
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"QUEUED_STATE_ID\" }) { success } }"}'
+```
+
+Remove it from the state file's `slots`. It is now reclaimable on the next poll.
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
@@ -198,7 +236,8 @@ Report the reconciliation results:
 
 ```
 Auto-recover: checked {N} in_progress issues
-  Re-dispatched (live branch/PR, fresh agent spawned): {list of identifiers}
+  Re-dispatched (live branch/PR, first recovery): {list of identifiers}
+  Escalated to needs_help (live PR, already recovered, no progress): {list of identifiers}
   Reset to queued (no branch/PR found): {list of identifiers}
   Slot freed (finished while down): {list}
 ```
@@ -282,6 +321,7 @@ Write the slot to the state file immediately after the `issueUpdate` succeeds �
   "agentRef": "pending",
   "status": "in_flight",
   "retries": 0,
+  "recoveryAttempts": 0,
   "claimedAt": "ISO_TIMESTAMP",
   "lastCheckedAt": "ISO_TIMESTAMP"
 }
@@ -399,7 +439,7 @@ If the runner's tab is closed or the session ends unexpectedly:
 /runner --resume
 ```
 
-This loads the most recent `.claude/runner-*.json` state file, runs Phase 1 auto-recovery (reconciles any orphaned `in_progress` issues — live branch/PR means re-dispatch a fresh agent; no branch/PR means reset to `queued`), and continues Phase 2.
+This loads the most recent `.claude/runner-*.json` state file, runs Phase 1 auto-recovery (three-way decision per issue: live branch/PR + first recovery → re-dispatch; live branch/PR + already recovered → escalate to `needs_help`; no branch/PR → reset to `queued`), and continues Phase 2.
 
 ---
 

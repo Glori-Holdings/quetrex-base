@@ -134,6 +134,7 @@ short and unambiguous even if multiple projects are running in separate tabs.
       "agentRef": "<harness background task ref>",
       "status": "in_flight",
       "retries": 0,
+      "recoveryAttempts": 0,
       "claimedAt": "ISO_TIMESTAMP",
       "lastCheckedAt": "ISO_TIMESTAMP"
     }
@@ -169,6 +170,11 @@ short and unambiguous even if multiple projects are running in separate tabs.
 - `retries`: not used by the dispatcher directly (the background pipeline tracks its own QA
   retries), but recorded for audit. The pipeline sets `needs_help` on 3 failures; the dispatcher
   reads that from Linear state.
+- `recoveryAttempts`: how many times Phase 1 has re-dispatched a fresh agent for this slot.
+  Starts at 0 on first claim; incremented to 1 when Phase 1 re-dispatches on the first recovery
+  launch. If Phase 1 encounters live progress again on a subsequent launch and `recoveryAttempts`
+  is already ≥ 1, the issue escalates to `needs_help` rather than being re-dispatched again.
+  This prevents unbounded re-dispatch loops when a recovered agent itself makes no progress.
 - The file is rewritten after every slot change (claim, free, drain flag, heartbeat). A fresh
   dispatcher always trusts **Linear over the stale file**: Phase 1 reconciliation wins on every
   launch.
@@ -220,10 +226,11 @@ own execution contexts; they do not live in the dispatcher's conversation. Compa
 completely restarting) the dispatcher session does not interrupt or cancel any running agent.
 
 The state file is the source of truth. After compaction or restart, Phase 1 auto-recovery
-reconstructs the slot table:
-- Issues in `in_progress` with a live branch or open PR: re-dispatch with a fresh agent.
-- Issues in `in_progress` with no branch or PR: reset to `queued`.
-- Issues already at `ready` or `needs_help`: free the slot, log to history.
+reconstructs the slot table using the three-way decision:
+- `in_progress` with live branch/PR and `recoveryAttempts == 0`: re-dispatch with a fresh agent.
+- `in_progress` with live branch/PR and `recoveryAttempts >= 1`: escalate to `needs_help`.
+- `in_progress` with no branch or PR: reset to `queued`.
+- Already at `ready` or `needs_help`: free the slot, log to history.
 
 The dispatcher can be compacted on any tick boundary without losing work.
 
@@ -239,40 +246,64 @@ state file is a local cache and must yield to it.
 ### Steps
 
 1. Query all issues in the project's `in_progress` column.
-2. For each:
+2. For each issue, check live progress:
    a. Does an open PR exist whose branch name contains the lowercase identifier followed by `-`?
-      Use `gh pr list --state open --json number,headRefName` and check for `<identifier>-` in
-      the branch name (anchored to prevent `glo-5` matching `glo-51` or `glo-57`).
+      Use `gh pr list --state open --json number,headRefName,url` and check for `<identifier>-`
+      in the branch name (anchored to prevent `glo-5` matching `glo-51` or `glo-57`). Capture
+      the PR URL if found — it is included in the escalation comment (Branch B below).
    b. Does a pushed remote branch exist with an anchored match?
       `git ls-remote --heads origin "*<identifier-lower>-*"` (trailing `-` anchors the prefix).
-   - YES to either → live progress exists, but the agent that was driving it is dead. **Re-dispatch:**
-     spawn a fresh background worktree agent (isolation: "worktree") that resumes from the
-     existing branch and drives the issue to `ready`. Update the slot entry with the new
-     `agentRef` and keep `status: "in_flight"`. A recovered slot MUST have a live agent; passive
-     "keep" with no agent would stall the slot until the dispatcher is closed.
-   - NO to both → no real progress. Reset: `issueUpdate` back to `queued`. Remove from slots.
-3. For each slot in `slots` with `status: "in_flight"` that was NOT handled in step 2:
+
+   Read the existing slot entry (if any) to get `recoveryAttempts`. Apply the **three-way
+   recovery decision**:
+
+   **Branch A — Live progress, first recovery** (`recoveryAttempts == 0` or no prior slot):
+   The agent that was driving this issue died with the previous session. Spawn a fresh background
+   worktree agent (`isolation: "worktree"`) that resumes from the existing branch and drives the
+   issue to `ready`. Update the slot: new `agentRef`, `status: "in_flight"`,
+   `recoveryAttempts: 1`. A recovered slot MUST have a live agent; passive "keep" with no agent
+   would stall the slot indefinitely.
+
+   **Branch B — Live progress, already recovered** (`recoveryAttempts >= 1`):
+   This issue was re-dispatched on a prior launch and still has not advanced — the recovered
+   agent also made no progress. Re-dispatching again would loop unboundedly. Instead, escalate:
+   - Move the issue to `needs_help` (resolved from the map — never hardcoded).
+   - Post a Linear comment: "Runner recovered this issue twice with no progress; a PR exists at
+     `<PR_URL>` — needs human review."
+   - Move the slot entry to `history` with `outcome: "needs_help_recovery"` and free the slot.
+
+   **Branch C — No live progress** (no open PR, no pushed branch):
+   No real work was done. Reset the issue to `queued` via `issueUpdate`. Remove the slot entry.
+   The issue is reclaimable on the next poll.
+
+3. For each slot in `slots` with `status: "in_flight"` NOT handled in step 2 (i.e. the issue
+   was no longer in `in_progress` in Linear when step 1 ran — it finished while the dispatcher
+   was down):
    - Fetch the issue's current Linear state.
-   - If it is `ready` or `needs_help` (finished while the dispatcher was down): free the slot,
-     add to history.
-   - If it is still `in_progress` but has live progress: already handled above.
+   - If `ready` or `needs_help`: free the slot, add to `history`.
+
+### Why the three-way branch is necessary
+
+Without Branch B, an issue that a recovered agent cannot advance would be re-dispatched on
+every subsequent launch — a silent, unbounded loop that occupies a concurrency slot forever
+without making progress and without surfacing for human attention. Branch B caps re-dispatch at
+one attempt per issue and escalates to `needs_help` when the cap is hit, matching the 3-strike
+rule the pipeline uses for QA failures.
 
 ### Tab-close recovery
 
 Closing the runner tab is a hard stop. No cleanup runs at stop time. The next launch's Phase 1
-handles it:
+handles it via the three-way decision:
 
-- Any `in_progress` issues that produced a branch/PR before the tab closed: re-dispatched with
-  a fresh agent. The new agent resumes from the existing branch.
-- Any `in_progress` issues with no branch/PR (claimed but not yet started, or the agent was
-  just spawned and hadn't pushed yet): reset to `queued`. They will be re-claimed on the next
-  poll tick.
+- `in_progress` issues with a live branch/PR and `recoveryAttempts == 0`: re-dispatched (Branch A).
+- `in_progress` issues with a live branch/PR and `recoveryAttempts >= 1`: escalated to
+  `needs_help` (Branch B) — they were already recovered once and still made no progress.
+- `in_progress` issues with no branch/PR: reset to `queued` (Branch C).
 
 If the original "lost" agent somehow continued running in the harness after the tab closed and
-reaches `ready` or `needs_help` independently, the dispatcher will see the state change on the
-next tick and free the slot. The re-dispatched agent will find the issue already in `ready` and
-exit cleanly. The PR opened by whichever agent finished first stands; the duplicate is harmless
-(one will be a no-op or close-without-merging). This overlap scenario is rare and recoverable.
+reaches `ready` or `needs_help` independently, the dispatcher will see the state change on step
+3 of the next launch and free the slot cleanly. The re-dispatched agent (Branch A) will find
+the issue already in `ready` and exit. This overlap is rare and recoverable.
 
 ---
 
