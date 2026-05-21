@@ -215,15 +215,6 @@ curl -s -X POST https://api.linear.app/graphql \
 
 Remove it from the state file's `slots`. It is now reclaimable on the next poll.
 
-```bash
-curl -s -X POST https://api.linear.app/graphql \
-  -H "Authorization: $LINEAR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"QUEUED_STATE_ID\" }) { success } }"}'
-```
-
-Then remove it from the state file's `slots`. It is now reclaimable on the next poll.
-
 ### Step 1c: Reconcile slot table
 
 For each entry in `slots` with `status: "in_flight"`, verify the issue is still `in_progress` in Linear. If it has moved to `ready` or `needs_help` (finished while the dispatcher was down), free the slot by moving the entry to `history`:
