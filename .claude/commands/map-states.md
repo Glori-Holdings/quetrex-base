@@ -104,11 +104,24 @@ Look right?
 Wait for confirmation. Apply any corrections. Validate every chosen column name exactly matches a
 real state name from Step 2 — if a name doesn't match, re-prompt; never invent a name.
 
-## Step 4: Write the map into project CLAUDE.md
+## Step 4: Write the map into the PROJECT CLAUDE.md
 
-The map lives in the project `.claude/CLAUDE.md` as a `## Linear States` section so the agents
-that already read that file pick it up. If a `## Linear States` section already exists, replace
-it; otherwise append it.
+**Target the project's own CLAUDE.md — never the global one.** First resolve the project root and
+build an absolute path, so there is no ambiguity with `~/.claude/CLAUDE.md`:
+
+```bash
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+echo "Writing the state map to: $ROOT/.claude/CLAUDE.md"
+```
+
+Write to `$ROOT/.claude/CLAUDE.md` (the repo you are working in). **Do NOT write to
+`~/.claude/CLAUDE.md`** — that is the global orchestrator config and must never hold a
+project-specific state map. If the absolute path you are about to edit starts with the user's home
+`.claude` directory rather than the project root, stop and re-resolve.
+
+The map goes in as a `## Linear States` section so the agents that already read the project file
+pick it up. If a `## Linear States` section already exists in that file, replace it; otherwise
+append it.
 
 ```markdown
 ## Linear States
@@ -129,13 +142,14 @@ it; otherwise append it.
 
 Omit any row the user mapped to "none".
 
-If `.claude/CLAUDE.md` does not exist, tell the user to run `/create-rules` first, but still offer
-to create a minimal file containing just this section.
+If `$ROOT/.claude/CLAUDE.md` does not exist, tell the user to run `/create-rules` first, but still
+offer to create a minimal file (at the project path, not the global one) containing just this
+section.
 
 ## Step 5: Commit
 
 ```bash
-git add .claude/CLAUDE.md
+git add "$ROOT/.claude/CLAUDE.md"
 git commit -m "chore: map Linear columns to Glori Builder pipeline states"
 ```
 
