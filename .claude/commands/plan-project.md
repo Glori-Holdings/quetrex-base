@@ -169,7 +169,11 @@ curl -s -X POST https://api.linear.app/graphql \
   -d '{"query": "{ team(id: \"TEAM_ID\") { labels { nodes { id name } } states { nodes { id name type } } } }"}'
 ```
 
-Identify the Backlog state (type: `backlog`).
+Identify the **queued** state — freshly planned issues are approved and ready for the pipeline to
+pick up. Resolve the `queued` column from the project's `## Linear States` map if it exists (see
+`.claude/docs/linear-states.md`). For a brand-new project with no map yet, fall back in this order:
+a state literally named "Queued", else the Backlog state (type: `backlog`). Note to the user that
+running `/map-states` will make this exact.
 
 Check if an "ai" label exists. If not, create it:
 
@@ -203,7 +207,7 @@ Use the project name from the PRD and a one-sentence description from the Execut
 {
   "teamId": "TEAM_UUID",
   "projectId": "PROJECT_UUID",
-  "stateId": "BACKLOG_STATE_UUID",
+  "stateId": "QUEUED_STATE_UUID",
   "labelIds": ["AI_LABEL_UUID"],
   "tasks": [
     {

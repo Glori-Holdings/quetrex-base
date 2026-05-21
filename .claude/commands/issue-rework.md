@@ -80,7 +80,7 @@ curl -s -X POST https://api.linear.app/graphql \
 Display the issue summary:
 - **ID**: {identifier}
 - **Title**: {title}
-- **State**: {state.name} (should be "Human: Changes Needed")
+- **State**: {state.name} (typically your `complete` or post-deploy column — the tester found something after sign-off)
 - **Labels**: {labels}
 
 **Step 1c** — Extract tester feedback:
@@ -211,24 +211,24 @@ curl -s -X POST https://api.linear.app/graphql \
 
 Replace `ISSUE_UUID` with the UUID from Step 1, and `{REWORK_FILENAME}` with the actual filename used.
 
-### Step 6: Set Linear Status to Todo
+### Step 6: Set Linear Status to Rework
 
-Get the "Todo" state ID:
+Resolve the `rework` column from the project's `## Linear States` map (see `.claude/docs/linear-states.md`). Get its state ID by exact name match:
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"query": "{ team(id: \"TEAM_UUID\") { states(filter: { name: { eq: \"Todo\" } }) { nodes { id name } } } }"}'
+  -d '{"query": "{ team(id: \"TEAM_UUID\") { states { nodes { id name type } } } }"}'
 ```
 
-Update the issue status:
+Find the state whose `name` exactly equals the `rework` column from the map (e.g. "AI: Rework"). If the map has no `rework` entry, ask the user which column rework issues belong in. Update the issue status:
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"TODO_STATE_ID\" }) { success issue { id state { name } } } }"}'
+  -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"REWORK_STATE_ID\" }) { success issue { id state { name } } } }"}'
 ```
 
 ### Step 7: Cleanup (MANDATORY — DO THIS LAST)

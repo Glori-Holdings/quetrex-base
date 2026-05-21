@@ -27,9 +27,10 @@ Quetrex-base is a Claude Code workflow system for software development teams. It
 ## Setup (run once per project)
 
 ```
-/project-setup     GitHub Actions CI, branch protection, direnv .envrc
-/create-rules      Generate .claude/CLAUDE.md with stack and verification commands
-/deploy-setup      Generate a project-specific /deploy skill
+/project-setup       GitHub Actions CI, branch protection, direnv .envrc
+/create-rules        Generate .claude/CLAUDE.md with stack and verification commands
+/map-states          Map your Linear columns to the pipeline's canonical states
+/deploy-setup        Generate a project-specific /deploy skill
 ```
 
 For existing projects with an existing CLAUDE.md:
@@ -42,29 +43,69 @@ For existing projects with an existing CLAUDE.md:
 ## The Development Pipeline
 
 ```
-/issue-prd → architect → developer(s) → QA → reviewer → git-workflow → /merge-issue
+/issue-prd → architect → developer(s) → QA → reviewer → git-workflow → (stops at PR Ready)
+```
+
+The automatic pipeline runs from `queued` and **stops at `ready` (PR Ready)**. Everything after
+is a deliberate human gate:
+
+```
+/merge-issue QUE-123   →  Merged     (merges the PR)
+/deploy                →  Deployed   (ships it; advances merged issues)
+/complete [QUE-123]    →  Complete   (after human testing; blank = all deployed in the project)
 ```
 
 **Greenfield — manual:**
 ```
-/plan-project → Linear project + issues created → /issue-prd QUE-1 (work one at a time)
+/plan-project → Linear project + issues → /issue-prd QUE-1 → … → PR Ready → /merge-issue → /deploy → /complete
 ```
 
 **Greenfield — auto-pilot (walk away):**
 ```
-/plan-project → Linear project + issues created → /auto-pilot PROJECT-ID
-             → works every issue through full pipeline → auto-merges → done
+/plan-project → Linear project + issues → /auto-pilot PROJECT-ID
+             → works every queued issue through the pipeline → auto-merges → sets Complete → done
 ```
+Auto-pilot is the one exception that bypasses the manual gates.
 
 **Brownfield (existing issue):**
 ```
-/issue-prd QUE-123 → pipeline runs → PR created → /merge-issue QUE-123
+/issue-prd QUE-123 → pipeline runs → PR Ready → /merge-issue QUE-123 → /deploy → /complete QUE-123
 ```
 
 **Rework (tester feedback):**
 ```
-/issue-rework QUE-123 → rework document → pipeline reruns
+/issue-rework QUE-123 → rework doc + issue set to Rework → /issue-prd QUE-123 reruns the pipeline
 ```
+
+---
+
+## Linear States
+
+The pipeline drives issues through canonical state keys. Each project maps its real Linear column
+names to these keys once with `/map-states` (stored in `.claude/CLAUDE.md`). Full reference:
+`.claude/docs/linear-states.md`.
+
+```
+backlog ──(human approves)──> queued ──(auto)──> in_progress ──(auto)──> ready   ◀── AUTOMATION STOPS
+                                          │
+                                          └─(fail: 3× QA / blocker)──> needs_help ◀── waits for human
+
+  ready ──(/merge-issue)──> merged ──(/deploy)──> deployed ──(/complete)──> complete
+  rework ──(/issue-rework → /issue-prd)──> back into the pipeline
+```
+
+| Key | Meaning | Set by |
+|---|---|---|
+| `queued` | Approved — pipeline picks it up | human |
+| `in_progress` | Pipeline building | `/issue-prd`, `/auto-pilot` |
+| `needs_help` | Hit a fail point, needs a human | any stage on failure |
+| `ready` | PR open, awaiting merge | `git-workflow` (terminus) |
+| `merged` | PR merged | `/merge-issue` |
+| `deployed` | Shipped | `/deploy` |
+| `complete` | Tested & signed off | `/complete` |
+
+Never hardcode column names — resolve through the map. Several columns often share Linear
+`type: "started"`, so only exact-name matching from the map is reliable.
 
 ---
 
@@ -74,10 +115,12 @@ For existing projects with an existing CLAUDE.md:
 
 | Command | What it does |
 |---|---|
-| `/issue-prd QUE-123` | Fetch Linear issue, evaluate, create feature branch, start pipeline |
-| `/issue-rework QUE-123` | Create rework document from tester feedback, restart pipeline |
-| `/merge-issue QUE-123` | Merge PR, update Linear status to Human Review |
-| `/auto-pilot PROJECT-ID` | Work entire Linear project backlog autonomously — walk away mode |
+| `/issue-prd QUE-123` | Fetch Linear issue, evaluate, create feature branch, run pipeline to PR Ready |
+| `/issue-rework QUE-123` | Create rework document from tester feedback, set issue to Rework |
+| `/merge-issue QUE-123` | Merge the PR, move issue to Merged (gate 1) |
+| `/deploy` | Ship it, advance merged issues to Deployed (gate 2) — project-specific |
+| `/complete [QUE-123]` | Move issue(s) to Complete after testing (gate 3); blank = all deployed in a project |
+| `/auto-pilot PROJECT-ID` | Work an entire Linear project autonomously, auto-merging — walk away mode |
 
 ### Planning
 
@@ -94,6 +137,7 @@ For existing projects with an existing CLAUDE.md:
 | `/project-setup` | One-time project setup (CI, branch protection, .envrc) |
 | `/create-rules` | Generate project .claude/CLAUDE.md from stack templates |
 | `/update-rules` | Audit and update existing project .claude/CLAUDE.md |
+| `/map-states` | Map Linear columns to the pipeline's canonical states |
 | `/deploy-setup` | Generate project-specific deploy skill (Fly.io, Vercel, etc.) |
 
 ### Keys and Secrets

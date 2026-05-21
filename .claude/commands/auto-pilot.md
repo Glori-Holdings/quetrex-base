@@ -5,7 +5,9 @@ argument-hint: <LINEAR-PROJECT-ID>
 
 # Auto-Pilot
 
-Works through every queued issue in a Linear project — one at a time, in dependency order — until the backlog is empty. Each issue runs the full Glori Builder pipeline and is auto-merged to main when QA and review pass.
+Works through every queued issue in a Linear project — one at a time, in dependency order — until the queue is empty. Each issue runs the full Glori Builder pipeline and is auto-merged to main when QA and review pass.
+
+**Auto-pilot is the deliberate exception to the manual-gate rule** (see `.claude/docs/linear-states.md`). The normal pipeline stops at `ready` (AI: PR Ready) and a human runs `/merge-issue` → `/deploy` → `/complete`. Auto-pilot instead auto-merges and sets each issue straight to `complete` — "vibe coding on steroids." Resolve all states through the project's `## Linear States` map.
 
 ## Before Starting
 
@@ -29,19 +31,21 @@ Stop if any check fails and tell the user what to fix.
 
 If `$ARGUMENTS` is provided, use it as the project ID. Otherwise, ask: "Which Linear project should I work? (provide the project ID)"
 
-Fetch all unstarted/backlog issues for this project, sorted by `sortOrder`:
+Resolve the `queued` column from the project's `## Linear States` map (see `.claude/docs/linear-states.md`). Fetch all issues for this project currently in that column, sorted by `sortOrder` — match on the exact state name:
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"query": "{ issues(filter: { project: { id: { eq: \"PROJECT_ID\" } }, state: { type: { in: [\"unstarted\", \"backlog\"] } } }, orderBy: sortOrder) { nodes { id identifier title sortOrder state { name type } relations { nodes { type relatedIssue { id identifier state { type } } } } } } }"}'
+  -d '{"query": "{ issues(filter: { project: { id: { eq: \"PROJECT_ID\" } }, state: { name: { eq: \"QUEUED_COLUMN_NAME\" } } }, orderBy: sortOrder) { nodes { id identifier title sortOrder state { name type } relations { nodes { type relatedIssue { id identifier state { name type } } } } } } }"}'
 ```
+
+If no map exists, fall back to `state: { type: { in: ["unstarted", "backlog"] } }` and suggest running `/map-states`.
 
 ### Step 1b: Build execution order
 
 From the results, build the dependency graph:
-- An issue is **ready** if all issues it is blocked by are in state `completed`
+- An issue is **ready** if all issues it is blocked by are in the `complete` column (resolve from the map; fall back to `type: "completed"`)
 - Sort ready issues by `sortOrder` (ascending)
 - Group into execution batches (same batch = no inter-dependency)
 
@@ -104,7 +108,7 @@ If status is `complete` or `skipped`, skip to next issue.
 
 Update state file: `"ISSUE_ID": { "status": "in_progress", "retries": 0 }`
 
-Update Linear status to In Progress:
+Update Linear status to the `in_progress` column (resolve from the map by exact name; fall back to type `started`):
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
@@ -166,14 +170,14 @@ If CI fails after 2 minutes: treat as QA failure, increment retry counter.
 
 ### Step 2f: Update status
 
-On **success**:
-- Find the completed state: query `team.states` and find the state with `type: "completed"` — this is whatever your workspace calls it ("Complete", "Done", etc.)
+On **success** (auto-pilot's deliberate exception — it skips the merge/deploy gates):
+- Resolve the `complete` column from the map (exact name match; fall back to `type: "completed"`)
 - Update Linear issue to that state
 - Update state file: `"status": "complete", "pr": PR_NUMBER`
 - Add Linear comment: "Completed by Glori Builder auto-pilot."
 
 On **skip** (3 failures):
-- Update Linear issue to status `in_review` (human needs to look)
+- Resolve the `needs_help` column from the map and set the issue to it (a human needs to look)
 - Update state file: `"status": "skipped", "reason": "3 QA/review cycles exhausted"`
 - Add Linear comment with the failure details
 
@@ -203,7 +207,7 @@ Auto-pilot complete.
 State log: .claude/autopilot-{timestamp}.json
 ```
 
-For skipped issues: update Linear to `In Review` so they surface for manual attention.
+For skipped issues: set Linear to the `needs_help` column so they surface for manual attention.
 
 ---
 
