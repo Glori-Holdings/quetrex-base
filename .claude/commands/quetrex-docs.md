@@ -60,12 +60,21 @@ is a deliberate human gate:
 /plan-project → Linear project + issues → /issue-prd QUE-1 → … → PR Ready → /merge-issue → /deploy → /complete
 ```
 
-**Greenfield — auto-pilot (walk away):**
+**Greenfield — auto-pilot (walk away, sequential, auto-merges):**
 ```
 /plan-project → Linear project + issues → /auto-pilot PROJECT-ID
              → works every queued issue through the pipeline → auto-merges → sets Complete → done
 ```
 Auto-pilot is the one exception that bypasses the manual gates.
+
+**Greenfield — continuous runner (walk away, N-wide, stops at PR Ready):**
+```
+/plan-project → Linear project + issues → /runner PROJECT-ID
+             → polls queue continuously → up to 3 issues in parallel → each stops at PR Ready
+             → /merge-issue → /deploy → /complete  (manual gates — runner does NOT auto-merge)
+```
+The runner never stops while issues are queued. Use `/runner stop` to drain gracefully.
+Unlike auto-pilot, the runner leaves every PR for a human to review and merge.
 
 **Brownfield (existing issue):**
 ```
@@ -97,7 +106,7 @@ backlog ──(human approves)──> queued ──(auto)──> in_progress ─
 | Key | Meaning | Set by |
 |---|---|---|
 | `queued` | Approved — pipeline picks it up | human |
-| `in_progress` | Pipeline building | `/issue-prd`, `/auto-pilot` |
+| `in_progress` | Pipeline building | `/issue-prd`, `/auto-pilot`, `/runner` |
 | `needs_help` | Hit a fail point, needs a human | any stage on failure |
 | `ready` | PR open, awaiting merge | `git-workflow` (terminus) |
 | `merged` | PR merged | `/merge-issue` |
@@ -121,6 +130,7 @@ Never hardcode column names — resolve through the map. Several columns often s
 | `/deploy` | Ship it, advance merged issues to Deployed (gate 2) — project-specific |
 | `/complete [QUE-123]` | Move issue(s) to Complete after testing (gate 3); blank = all deployed in a project |
 | `/auto-pilot PROJECT-ID` | Work an entire Linear project autonomously, auto-merging — walk away mode |
+| `/runner PROJECT-ID` | Continuous queue runner — up to 3 issues in parallel, stops at PR Ready (no auto-merge); `/runner stop` to drain; `/runner --resume` after interruption |
 
 ### Planning
 

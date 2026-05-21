@@ -16,7 +16,7 @@ machine elsewhere.
 |---|---|---|---|
 | `backlog` | Captured, not yet ready for the pipeline | human (grooming) | — |
 | `queued` | Approved — pipeline picks it up from here | human approves | — |
-| `in_progress` | Pipeline is actively building | `/issue-prd`, `/auto-pilot` | ✅ auto |
+| `in_progress` | Pipeline is actively building | `/issue-prd`, `/auto-pilot`, `/runner` | ✅ auto |
 | `needs_help` | Hit a fail point — needs a human decision | any stage on failure/blocker | ✅ auto |
 | `rework` | Tester sent it back with feedback | `/issue-rework` | — |
 | `ready` | PR open, awaiting human merge | `git-workflow` | ✅ auto — **pipeline terminus** |
@@ -50,6 +50,17 @@ rework  ──(/issue-rework, then /issue-prd)───────────>
 deploy, and complete are deliberate human gates. The one exception is `/auto-pilot` ("vibe
 coding on steroids"), which auto-merges and sets `complete` directly — bypassing the gates on
 purpose.
+
+`/runner` also runs from `queued` to `ready` automatically (like the normal pipeline), dispatching
+up to 3 issues in parallel as background worktree agents. It **stops at `ready`** — it does not
+auto-merge. See `.claude/docs/runner.md` for the full design.
+
+**Runner readiness rule (`merged = unblocked`):** when `/runner` evaluates whether a `queued`
+issue is ready to start, it treats a blocking issue as resolved as soon as that blocker reaches the
+`merged` column (or any column at/after `merged`: `deployed`, `complete`). This differs from
+`/auto-pilot`, which requires `complete`. The rationale: a blocker's code is on `main` once
+merged; the manual deploy/verify steps that follow should not stall downstream issues in the queue.
+Resolve these column names from the map — never hardcode them.
 
 `needs_help` is the universal failure landing spot. Any stage that cannot proceed without a
 human — vague requirements at intake, 3 failed QA cycles, a hard blocker — moves the issue to
