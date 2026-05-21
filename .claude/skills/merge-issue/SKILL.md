@@ -1,11 +1,16 @@
 ---
 name: merge-issue
-description: Merge a PR and update Linear issue status to Human Review
+description: Merge a PR and move the Linear issue to the Merged state. The first manual gate after the pipeline stops at PR Ready.
 argument-hint: <ISSUE-ID e.g. SMA-57>
 disable-model-invocation: true
 ---
 
-# Merge Issue PR and Update Linear Status
+# Merge Issue PR and Move to Merged
+
+The automatic pipeline stops at `ready` (AI: PR Ready). This is the first **human gate** after
+that: it merges the PR and moves the issue to the `merged` column. The remaining gates are
+`/deploy` (→ deployed) and `/complete` (→ complete). Resolve all states through the project's
+`## Linear States` map — see `.claude/docs/linear-states.md`.
 
 ## Input Validation
 
@@ -50,7 +55,7 @@ gh pr merge {PR_NUMBER} --merge --delete-branch
 
 If merge fails, report the error and STOP.
 
-## Step 4: Update Linear Status to "Human: Review"
+## Step 4: Update Linear Status to "Merged"
 
 **MANDATORY — this is the entire reason this skill exists. NEVER skip.**
 
@@ -76,16 +81,16 @@ curl -s -X POST https://api.linear.app/graphql \
   -d '{"query": "{ team(id: \"TEAM_UUID\") { issues(filter: { number: { eq: ISSUE_NUMBER } }) { nodes { id identifier title state { name } } } } }"}'
 ```
 
-**Step 4c** — Find the "Human: Review" state by name. Query the team's workflow states and find the one whose name contains "review" or "human review" (case-insensitive):
+**Step 4c** — Resolve the `merged` column from the project's `## Linear States` map. Query the team's workflow states and find the one whose `name` exactly equals that column:
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
   -H "Content-Type: application/json" \
   -H "Authorization: $LINEAR_API_KEY" \
-  -d '{"query": "{ team(id: \"TEAM_UUID\") { states { nodes { id name } } } }"}'
+  -d '{"query": "{ team(id: \"TEAM_UUID\") { states { nodes { id name type } } } }"}'
 ```
 
-From the results, select the state whose name matches (case-insensitive) "human: review", "human review", or contains both "human" and "review". If multiple states match and you cannot determine which is correct, list them to the user and ask which to use before proceeding.
+Select the state whose `name` exactly equals the `merged` column (e.g. "Merged"). If the project has no `## Linear States` map, stop and tell the user to run `/map-task-columns` — there is no reliable type-based fallback for `merged` (it usually shares `type: "started"` with several other columns).
 
 **Step 4d** — Set the issue status:
 
@@ -93,7 +98,7 @@ From the results, select the state whose name matches (case-insensitive) "human:
 curl -s -X POST https://api.linear.app/graphql \
   -H "Content-Type: application/json" \
   -H "Authorization: $LINEAR_API_KEY" \
-  -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"REVIEW_STATE_ID\" }) { success issue { identifier title state { name } } } }"}'
+  -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"MERGED_STATE_ID\" }) { success issue { identifier title state { name } } } }"}'
 ```
 
 **Verify** the mutation returned `success: true`. If it failed, report the error.
@@ -111,16 +116,18 @@ git checkout main && git pull origin main
 
 Report EXACTLY:
 
-> **$ARGUMENTS merged and moved to Human: Review.**
+> **$ARGUMENTS merged.**
 > - PR #{PR_NUMBER} merged
-> - Linear status: Human: Review
+> - Linear status: Merged
 > - Branch {BRANCH_NAME} deleted
+>
+> Next gates: `/deploy` to ship it, then `/complete $ARGUMENTS` after testing.
 
 Then STOP.
 
 ## Rules
 
-- NEVER set an issue to "Complete" — only the human does that
+- NEVER set an issue to `complete` — that's the `/complete` gate after deploy and testing
 - NEVER skip the Linear status update
-- NEVER hardcode team UUIDs or state IDs — always look them up dynamically
+- NEVER hardcode team UUIDs, state IDs, or column names — resolve `merged` from the project map and look up IDs dynamically
 - If any step fails, report clearly what failed and what state things are in

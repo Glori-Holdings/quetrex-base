@@ -63,6 +63,7 @@ The file must include:
 5. **Production confirmation gate** — explicit "Are you sure?" before touching production
 6. **Rollback procedure** — from Q3
 7. **Post-deploy verification** — check URL, confirm key flows work
+8. **Linear state advance** — after a successful production deploy, move the project's `merged` issues to the `deployed` column (the second manual gate; `/complete` is the third). Resolve column names from the project's `## Linear States` map — see `.claude/docs/linear-states.md`.
 
 ### Template
 
@@ -128,6 +129,30 @@ Wait for explicit confirmation before running:
 - [ ] {staging/production URL} loads without errors
 - [ ] [key user flow works]
 - [ ] Check logs: [log command for this platform]
+
+## Advance Linear Issues (production only)
+
+After a successful **production** deploy, move the project's merged issues to the `deployed`
+column. Resolve `merged` and `deployed` from the `## Linear States` map in the project
+`.claude/CLAUDE.md` (see .claude/docs/linear-states.md). If there is no map, skip this and tell
+the user to run /map-task-columns.
+
+Ask which Linear project this deploy covers (or default to the one the merged issues belong to),
+then find all issues in the `merged` column for that project and move each to `deployed`:
+
+```bash
+# Find merged issues in the project (match exact column name from the map)
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" \
+  -d '{"query": "{ issues(filter: { project: { id: { eq: \"PROJECT_ID\" } }, state: { name: { eq: \"MERGED_COLUMN_NAME\" } } }) { nodes { id identifier } } }"}'
+
+# For each, set state to the deployed column's ID
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" \
+  -d '{"query": "mutation { issueUpdate(id: \"ISSUE_UUID\", input: { stateId: \"DEPLOYED_STATE_ID\" }) { success } }"}'
+```
+
+Report which issues moved to Deployed, and remind: run `/complete` after human testing.
 ```
 
 ## Also: add .envrc if direnv is available
