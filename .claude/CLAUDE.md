@@ -46,6 +46,7 @@ Skip this if:
 - Squash merge: issue branch → main
 - PRs require human approval before merge
 - Max 3 QA failures on an issue before escalating to the user — do not loop forever
+- **Isolated work + cleanup is governed by the `worktree-workflow` skill** — the canonical procedure for branching, committing in a worktree (use `git -C <path>` so the enforce-branch hook recognizes the branch instead of blocking on main), PR → CI → squash-merge, and mandatory teardown. Never leave a dangling worktree, open/unmerged PR, or stale local/remote branch. Run its final audit at the end of any multi-unit effort.
 
 ## Pipeline Mode — No Stops
 
@@ -68,6 +69,7 @@ Run `/create-rules` to generate it. QA reads the Verification section from that 
 - Use Context7 MCP for current library documentation — never guess at APIs
 - Use agent teams when work touches 3+ files across layers
 - After every correction, save a feedback memory
+- **Fly.io access must always use an explicit per-company API token, never the ambient `fly auth` interactive login.** Glen keeps a separate token per company; the interactive login generally can't see a given company's apps. Before any `fly` command (status/deploy/etc.), source the project's token and pass it inline: `FLY_API_TOKEN="$TOK" fly <cmd> --app <app>`. The token usually lives in that project's `.env.local` (re-grep the var name — it can change). Confirm access with `fly status --app <app>` before deploying.
 
 ## For Teammates
 

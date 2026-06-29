@@ -16,22 +16,37 @@
       "Bash(git worktree:*)",
       "Bash(gh pr:*)",
       "Bash(gh run:*)",
-      "Read(/Users/barnent1/Desktop/**)",
       "WebSearch"
     ],
     "deny": [
-      "Bash(rm -rf *)",
-      "Bash(rm -rf .)",
+      "Bash(rm -rf /)",
       "Bash(rm -rf /*)",
+      "Bash(rm -rf ~)",
+      "Bash(rm -rf ~/)",
+      "Bash(rm -rf .)",
       "Bash(git reset --hard*)",
       "Bash(git checkout -- .)",
       "Bash(git clean -f*)",
       "Bash(git push --force*main*)",
       "Bash(git push --force*master*)"
     ],
+    "ask": [
+      "Bash(rm -rf *)"
+    ],
     "defaultMode": "dontAsk"
   },
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /Users/barnent1/.claude/hooks/workflow-reminder.sh",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
