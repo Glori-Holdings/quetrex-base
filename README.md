@@ -5,7 +5,7 @@ Claude Code base configuration for development teams. Agents, skills, and comman
 ## Install
 
 ```bash
-npm install -g glori-builder
+npm install -g quetrex-base
 ```
 
 Or install directly from GitHub (works with private repos — requires GitHub access):

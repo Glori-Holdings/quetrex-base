@@ -7,17 +7,17 @@ description: Check for and apply updates to Glori Builder. Shows current vs late
 ## Step 1: Check Installed Version
 
 ```bash
-npm list -g glori-builder --depth=0 --json 2>/dev/null
+npm list -g quetrex-base --depth=0 --json 2>/dev/null
 ```
 
 Extract the installed version from the JSON output.
 
-If `glori-builder` is not found in the output, tell the user: "Glori Builder does not appear to be installed globally. Install it with: `npm install -g glori-builder`" and stop.
+If `quetrex-base` is not found in the output, tell the user: "Glori Builder does not appear to be installed globally. Install it with: `npm install -g quetrex-base`" and stop.
 
 ## Step 2: Check Latest Version
 
 ```bash
-npm show glori-builder version 2>/dev/null
+npm show quetrex-base version 2>/dev/null
 ```
 
 ## Step 3: Compare
@@ -43,7 +43,7 @@ Wait for confirmation before proceeding.
 ## Step 4: Apply Update
 
 ```bash
-npm install -g glori-builder@latest
+npm install -g quetrex-base@latest
 ```
 
 The postinstall script runs automatically and copies all updated files to `~/.claude/`.
@@ -52,7 +52,7 @@ The postinstall script runs automatically and copies all updated files to `~/.cl
 
 ```bash
 rm -f ~/.claude/.quetrex-update-available
-npm list -g glori-builder --depth=0
+npm list -g quetrex-base --depth=0
 ```
 
 Report:
