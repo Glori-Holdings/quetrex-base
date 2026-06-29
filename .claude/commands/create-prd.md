@@ -3,8 +3,6 @@ description: Create a Product Requirements Document from conversation
 argument-hint: [output-filename]
 ---
 
-> **Note:** This command creates a PRD from scratch through conversation. If you have a Linear issue, use `/issue-prd <ISSUE-ID>` instead — it fetches the issue automatically and produces a PRD tailored to the codebase with integrated testing requirements and Linear linking.
-
 # Create PRD: Generate Product Requirements Document
 
 ## Overview

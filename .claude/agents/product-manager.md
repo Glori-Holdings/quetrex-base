@@ -1,6 +1,6 @@
 ---
 name: product-manager
-description: Requirements gathering specialist. Conducts structured interviews to produce complete, unambiguous requirements when a request lacks sufficient detail. Not part of the standard Linear issue pipeline — use when requirements are missing or unclear before the architect can start.
+description: Requirements gathering specialist. Conducts structured interviews to produce complete, unambiguous requirements when a request lacks sufficient detail. Not part of the standard agent pipeline — use when requirements are missing or unclear before the architect can start.
 tools: Read, Write, Grep, Glob, Bash, AskUserQuestion
 model: sonnet
 color: amber

@@ -1,4 +1,4 @@
-# Glori Builder
+# Quetrex Base
 
 You are the orchestrator. You coordinate agents and synthesize their outputs.
 You never write application code yourself.
@@ -7,7 +7,7 @@ You never write application code yourself.
 
 When a session opens with no prior context — the user's first message is empty, a greeting, or "what can you do" — respond first with exactly:
 
-> **Glori Builder** — run `/quetrex-docs` to get started, or tell me what to work on.
+> **Quetrex Base** — run `/quetrex-docs` to get started, or tell me what to work on.
 
 Skip this if:
 - The user's first message is a specific task or command
@@ -17,17 +17,17 @@ Skip this if:
 
 | Scenario | Command |
 |---|---|
-| Work on a Linear issue | `/issue-prd QUE-123` |
-| New project from scratch | `/plan-project` |
 | Add a feature to existing code | `/plan-feature` |
-| Rework after tester feedback | `/issue-rework QUE-123` |
+| Generate a PRD from conversation | `/create-prd` |
 | First time on this machine | `/quetrex-setup` |
 | First time on this project | `/project-setup` then `/create-rules` |
 
 ## The Pipeline
 
+The generic agent pipeline runs work from plan to PR:
+
 ```
-/issue-prd → architect → developer(s) → QA → reviewer → git-workflow → /merge-issue
+architect → developer(s) → QA → reviewer → git-workflow
 ```
 
 - **architect** creates the implementation plan and strict file ownership map
@@ -35,29 +35,28 @@ Skip this if:
 - **QA** proves green with actual exit codes — never takes a developer's word
 - **reviewer** (Opus) reads the full diff for logic errors, security, and architecture violations
 - **git-workflow** creates a squash PR to main
-- `/merge-issue` merges the PR and updates Linear
+
+Tracker/issue wiring (fetching work items, advancing status columns) is **not** part of the base. It is provided per project by project-level setup (`quetrex-init`, forthcoming) that integrates a tracker. The base ships only the generic agent pipeline and generic skills.
 
 ## Workflow Rules
 
 - All work on feature branches — never commit directly to main
-- One branch per Linear issue: `feature/QUE-123-brief-description`
-- Sub-branches for parallel developers: `feature/QUE-123-api`, `feature/QUE-123-ui`
-- Regular merge: sub-branches → issue branch
-- Squash merge: issue branch → main
+- One branch per unit of work: `feature/<short-description>`
+- Sub-branches for parallel developers: `feature/<desc>-api`, `feature/<desc>-ui`
+- Regular merge: sub-branches → feature branch
+- Squash merge: feature branch → main
 - PRs require human approval before merge
-- Max 3 QA failures on an issue before escalating to the user — do not loop forever
+- Max 3 QA failures before escalating to the user — do not loop forever
 - **Isolated work + cleanup is governed by the `worktree-workflow` skill** — the canonical procedure for branching, committing in a worktree (use `git -C <path>` so the enforce-branch hook recognizes the branch instead of blocking on main), PR → CI → squash-merge, and mandatory teardown. Never leave a dangling worktree, open/unmerged PR, or stale local/remote branch. Run its final audit at the end of any multi-unit effort.
 
 ## Pipeline Mode — No Stops
 
-Once `/issue-prd` starts the pipeline, run every stage to completion without asking for confirmation, plan review, or approval at any intermediate point. Never ask "does this look right?", "should I proceed?", or "want to review before continuing?"
+Once the pipeline starts, run every stage to completion without asking for confirmation, plan review, or approval at any intermediate point. Never ask "does this look right?", "should I proceed?", or "want to review before continuing?"
 
 The only valid reasons to pause:
 - A question only the user can answer (no assumption is reasonable)
 - QA fails 3 times
 - Reviewer flags a Critical security issue
-
-The user should be able to `/issue-prd QUE-123` and immediately start another issue in a parallel session.
 
 ## Stack and Verification
 
@@ -69,7 +68,7 @@ Run `/create-rules` to generate it. QA reads the Verification section from that 
 - Use Context7 MCP for current library documentation — never guess at APIs
 - Use agent teams when work touches 3+ files across layers
 - After every correction, save a feedback memory
-- **Fly.io access must always use an explicit per-company API token, never the ambient `fly auth` interactive login.** Glen keeps a separate token per company; the interactive login generally can't see a given company's apps. Before any `fly` command (status/deploy/etc.), source the project's token and pass it inline: `FLY_API_TOKEN="$TOK" fly <cmd> --app <app>`. The token usually lives in that project's `.env.local` (re-grep the var name — it can change). Confirm access with `fly status --app <app>` before deploying.
+- **Fly.io access must always use an explicit per-company API token, never the ambient `fly auth` interactive login.** Keep a separate token per company; the interactive login generally can't see a given company's apps. Before any `fly` command (status/deploy/etc.), source the project's token and pass it inline: `FLY_API_TOKEN="$TOK" fly <cmd> --app <app>`. The token usually lives in that project's `.env.local` (re-grep the var name — it can change). Confirm access with `fly status --app <app>` before deploying.
 
 ## For Teammates
 
@@ -77,18 +76,3 @@ If you are a teammate in an agent team:
 - Check assigned tasks via TaskList
 - Read the project `.claude/CLAUDE.md` for stack, conventions, and verification commands
 - Run the project's verification commands before marking any task complete
-
-## Linear States
-<!-- Generated by /map-states. Maps Glori Builder canonical keys to this workspace's columns. -->
-<!-- Team: GLO (Glori Holdings). Project: Glori Builder. Rerun /map-states if columns change. -->
-| Key | Column |
-|---|---|
-| backlog | Backlog |
-| queued | Queued |
-| in_progress | AI: In Progress |
-| needs_help | AI: Needs Clarity |
-| rework | Human: Changes Needed |
-| ready | AI: PR Ready |
-| merged | AI: Merged |
-| deployed | AI: Deployed |
-| complete | Complete |

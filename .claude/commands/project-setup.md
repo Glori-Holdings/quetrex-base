@@ -109,7 +109,7 @@ Run /create-rules to generate the full stack configuration.
 ## Workflow
 - All work on feature branches — never commit to main
 - PRs require CI to pass before merge
-- Use /issue-prd {ISSUE-ID} to start work on a Linear issue
+- Use /plan-feature to plan and run a unit of work through the pipeline
 EOF
 ```
 

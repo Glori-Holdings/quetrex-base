@@ -347,25 +347,9 @@ Report: "Project rules created. QA and developer agents will now read `.claude/C
 
 ---
 
-## Step 6: Map Linear States
-
-The pipeline moves issues through Linear columns, and every workspace names its columns
-differently. After writing the rules, tell the user:
-
-> Next: run `/map-states` to map your Linear columns to the pipeline's states (queued,
-> in_progress, ready, merged, deployed, complete, …). The pipeline needs this to know which
-> column each stage moves issues to.
-
-Do not guess the column names here — `/map-states` queries the live workspace. See
-`.claude/docs/linear-states.md` for the canonical keys and the full state machine.
-
----
-
 ## Notes
-- After this, run `/map-states` so the pipeline knows your Linear column names
-
 - The Verification section drives the QA agent — get these commands right
 - The Conventions section drives the developer agent — be specific about type safety rules
 - Run `/create-rules` again any time the stack changes significantly
 - Partners on the same project get these rules automatically via git clone
-- To disable the Glori Builder welcome message for this project, add `quetrex_welcome: false` anywhere in this file
+- To disable the Quetrex Base welcome message for this project, add `quetrex_welcome: false` anywhere in this file

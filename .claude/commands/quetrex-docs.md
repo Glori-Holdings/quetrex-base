@@ -10,18 +10,23 @@ Display the complete quetrex-base system reference.
 
 ## The System
 
-Quetrex-base is a Claude Code workflow system for software development teams. It provides:
-- A structured pipeline from Linear issue to merged PR
+Quetrex Base is a Claude Code workflow system for software development teams. It provides:
+- A structured agent pipeline from plan to merged PR
 - Specialized agents for each stage of development
 - Commands for planning, setup, secrets management, and deployment
 - Cross-platform support (macOS, Linux, Windows WSL)
+
+> **Tracker integration is project-level.** The base ships no tracker/issue commands. Per-project
+> tracker wiring (fetching work items, advancing status columns) is provided by project-level setup
+> (`quetrex-init`, forthcoming) that integrates a tracker such as quetrex-kanban. The base is
+> intentionally tracker-agnostic.
 
 ---
 
 ## Setup (run once per machine)
 
 ```
-/quetrex-setup     Configure gh auth, git identity, Linear API key, direnv
+/quetrex-setup     Configure gh auth, git identity, API keys, direnv
 ```
 
 ## Setup (run once per project)
@@ -29,7 +34,6 @@ Quetrex-base is a Claude Code workflow system for software development teams. It
 ```
 /project-setup       GitHub Actions CI, branch protection, direnv .envrc
 /create-rules        Generate .claude/CLAUDE.md with stack and verification commands
-/map-states          Map your Linear columns to the pipeline's canonical states
 /deploy-setup        Generate a project-specific /deploy skill
 ```
 
@@ -42,112 +46,41 @@ For existing projects with an existing CLAUDE.md:
 
 ## The Development Pipeline
 
-```
-/issue-prd → architect → developer(s) → QA → reviewer → git-workflow → (stops at PR Ready)
-```
-
-The automatic pipeline runs from `queued` and **stops at `ready` (PR Ready)**. Everything after
-is a deliberate human gate:
+The generic agent pipeline runs a unit of work from plan to an open PR:
 
 ```
-/merge-issue QUE-123   →  Merged     (merges the PR)
-/deploy                →  Deployed   (ships it; advances merged issues)
-/complete [QUE-123]    →  Complete   (after human testing; blank = all deployed in the project)
+architect → developer(s) → QA → reviewer → git-workflow → (open PR, awaiting human merge)
 ```
 
-**Greenfield — manual:**
-```
-/plan-project → Linear project + issues → /issue-prd QUE-1 → … → PR Ready → /merge-issue → /deploy → /complete
-```
+- **architect** — implementation plan, file ownership map, acceptance criteria
+- **developer(s)** — implementation + tests, in parallel worktrees on separate sub-branches
+- **QA** — runs the verification chain and reports actual exit codes
+- **reviewer** (Opus) — semantic review of the full diff: logic, security, architecture
+- **git-workflow** — commits, pushes, opens a squash PR to main
 
-**Greenfield — auto-pilot (walk away, sequential, auto-merges):**
-```
-/plan-project → Linear project + issues → /auto-pilot PROJECT-ID
-             → works every queued issue through the pipeline → auto-merges → sets Complete → done
-```
-Auto-pilot is the one exception that bypasses the manual gates.
-
-**Greenfield — continuous runner (walk away, N-wide, stops at PR Ready):**
-```
-/plan-project → Linear project + issues → /runner PROJECT-ID
-             → polls queue continuously → up to 3 issues in parallel → each stops at PR Ready
-             → /merge-issue → /deploy → /complete  (manual gates — runner does NOT auto-merge)
-```
-The runner never stops while issues are queued. Use `/runner stop` to drain gracefully.
-Unlike auto-pilot, the runner leaves every PR for a human to review and merge.
-
-**Brownfield (existing issue):**
-```
-/issue-prd QUE-123 → pipeline runs → PR Ready → /merge-issue QUE-123 → /deploy → /complete QUE-123
-```
-
-**Rework (tester feedback):**
-```
-/issue-rework QUE-123 → rework doc + issue set to Rework → /issue-prd QUE-123 reruns the pipeline
-```
-
----
-
-## Linear States
-
-The pipeline drives issues through canonical state keys. Each project maps its real Linear column
-names to these keys once with `/map-states` (stored in `.claude/CLAUDE.md`). Full reference:
-`.claude/docs/linear-states.md`.
-
-```
-backlog ──(human approves)──> queued ──(auto)──> in_progress ──(auto)──> ready   ◀── AUTOMATION STOPS
-                                          │
-                                          └─(fail: 3× QA / blocker)──> needs_help ◀── waits for human
-
-  ready ──(/merge-issue)──> merged ──(/deploy)──> deployed ──(/complete)──> complete
-  rework ──(/issue-rework → /issue-prd)──> back into the pipeline
-```
-
-| Key | Meaning | Set by |
-|---|---|---|
-| `queued` | Approved — pipeline picks it up | human |
-| `in_progress` | Pipeline building | `/issue-prd`, `/auto-pilot`, `/runner` |
-| `needs_help` | Hit a fail point, needs a human | any stage on failure |
-| `ready` | PR open, awaiting merge | `git-workflow` (terminus) |
-| `merged` | PR merged | `/merge-issue` |
-| `deployed` | Shipped | `/deploy` |
-| `complete` | Tested & signed off | `/complete` |
-
-Never hardcode column names — resolve through the map. Several columns often share Linear
-`type: "started"`, so only exact-name matching from the map is reliable.
+The pipeline terminus is an open PR. Merge, deploy, and tracker status updates are deliberate
+gates handled outside the base — merge by a human, `/deploy` for shipping, and project-level
+tracker integration for status.
 
 ---
 
 ## All Commands
 
-### Pipeline
-
-| Command | What it does |
-|---|---|
-| `/issue-prd QUE-123` | Fetch Linear issue, evaluate, create feature branch, run pipeline to PR Ready |
-| `/issue-rework QUE-123` | Create rework document from tester feedback, set issue to Rework |
-| `/merge-issue QUE-123` | Merge the PR, move issue to Merged (gate 1) |
-| `/deploy` | Ship it, advance merged issues to Deployed (gate 2) — project-specific |
-| `/complete [QUE-123]` | Move issue(s) to Complete after testing (gate 3); blank = all deployed in a project |
-| `/auto-pilot PROJECT-ID` | Work an entire Linear project autonomously, auto-merging — walk away mode |
-| `/runner PROJECT-ID` | Continuous queue runner — up to 3 issues in parallel, stops at PR Ready (no auto-merge); `/runner stop` to drain; `/runner --resume` after interruption |
-
 ### Planning
 
 | Command | What it does |
 |---|---|
-| `/plan-project` | Greenfield: interview → PRD → Linear project + all issues |
-| `/plan-feature` | Brownfield: codebase analysis + implementation plan |
+| `/plan-feature` | Codebase analysis + implementation plan for a feature |
+| `/create-prd` | Generate a PRD from the current conversation |
 
 ### Setup
 
 | Command | What it does |
 |---|---|
-| `/quetrex-setup` | One-time machine setup (gh auth, git config, Linear key, direnv) |
+| `/quetrex-setup` | One-time machine setup (gh auth, git config, keys, direnv) |
 | `/project-setup` | One-time project setup (CI, branch protection, .envrc) |
 | `/create-rules` | Generate project .claude/CLAUDE.md from stack templates |
 | `/update-rules` | Audit and update existing project .claude/CLAUDE.md |
-| `/map-states` | Map Linear columns to the pipeline's canonical states |
 | `/deploy-setup` | Generate project-specific deploy skill (Fly.io, Vercel, etc.) |
 
 ### Keys and Secrets
@@ -172,7 +105,6 @@ Never hardcode column names — resolve through the map. Several columns often s
 | `/commit` | Create a commit for current changes |
 | `/prime` | Prime agent with codebase understanding |
 | `/execute` | Execute an implementation plan |
-| `/create-rules` | Already listed above |
 
 ---
 
@@ -187,7 +119,7 @@ Never hardcode column names — resolve through the map. Several columns often s
 | `git-workflow` | Haiku | Commit, push, squash PR to main |
 | `designer` | Sonnet | UI design spec (orchestrator decides when to invoke) |
 | `database-architect` | Sonnet | Schema design and migrations |
-| `product-manager` | Sonnet | Requirements gathering when issue lacks detail |
+| `product-manager` | Sonnet | Requirements gathering when a work item lacks detail |
 | `security-reviewer` | Opus | OWASP security audit — read-only, invoked explicitly |
 | `test-writer` | Sonnet | Adds test coverage to existing code (utility, not pipeline) |
 | `nextjs-migrator` | Sonnet | Next.js major version upgrades |
@@ -198,27 +130,15 @@ Never hardcode column names — resolve through the map. Several columns often s
 
 ```
 main
-  └── feature/QUE-123-description        ← one per issue
-        ├── feature/QUE-123-api          ← parallel developer A
-        ├── feature/QUE-123-db           ← parallel developer B
-        └── feature/QUE-123-ui           ← parallel developer C
+  └── feature/<short-description>          ← one per unit of work
+        ├── feature/<desc>-api             ← parallel developer A
+        ├── feature/<desc>-db              ← parallel developer B
+        └── feature/<desc>-ui              ← parallel developer C
 ```
 
-- Sub-branches merge regularly into issue branch
-- Issue branch squash-merges into main via PR
+- Sub-branches merge regularly into the feature branch
+- Feature branch squash-merges into main via PR
 - All work on feature branches — never commit directly to main
-
----
-
-## Multiple Linear Workspaces
-
-```bash
-# Global default (primary workspace)
-~/.claude/secrets.env → export LINEAR_API_KEY="lin_api_..."
-
-# Project-specific override (different workspace)
-project/.env → LINEAR_API_KEY=lin_api_other_workspace
-```
 
 ---
 
@@ -227,7 +147,6 @@ project/.env → LINEAR_API_KEY=lin_api_other_workspace
 | Requirement | Check | Install |
 |---|---|---|
 | GitHub CLI | `gh auth status` | `gh auth login` |
-| Linear API key | `/secrets list` | `/quetrex-setup` |
 | direnv | `which direnv` | `brew install direnv` / `apt install direnv` |
 | Node.js 18+ | `node --version` | nodejs.org |
 
@@ -236,7 +155,7 @@ project/.env → LINEAR_API_KEY=lin_api_other_workspace
 ## Partner Onboarding
 
 ```bash
-npm install -g @quetrex/base   # installs agents, skills, commands
-/quetrex-setup                 # one-time machine config
-git clone <repo-url>           # project already has CI and rules
+npm install -g quetrex-base     # installs agents, skills, commands
+/quetrex-setup                  # one-time machine config
+git clone <repo-url>            # project already has CI and rules
 ```
