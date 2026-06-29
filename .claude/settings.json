@@ -32,6 +32,17 @@
     "defaultMode": "dontAsk"
   },
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /Users/barnent1/.claude/hooks/workflow-reminder.sh",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
