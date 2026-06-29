@@ -50,39 +50,9 @@ chmod 600 ~/.claude/secrets.env
 
 `chmod 600` makes the file readable only by you — not other users on the machine.
 
-## Step 4: LINEAR_API_KEY
+Add any API keys you need with `/secrets add KEY` (global) or `/secrets add KEY --project`.
 
-Check which workspaces are already configured:
-
-```bash
-grep "LINEAR" ~/.claude/secrets.env 2>/dev/null || echo "none"
-```
-
-Display what's configured. Then ask:
-
-> "What Linear workspaces do you need? For each one, I need a name (e.g. 'personal', 'dealerq', 'client-x') and API key from Linear → Settings → API → Personal API Keys.
->
-> Start with your primary workspace — you can add more with /secrets add later."
-
-For each workspace the user provides:
-
-- If it's the primary (first) workspace: add as `LINEAR_API_KEY`
-- If it's a named workspace: add as `LINEAR_{NAME}_API_KEY` (uppercased)
-
-Write to `~/.claude/secrets.env`:
-
-```bash
-# Append primary key
-echo '' >> ~/.claude/secrets.env
-echo '# Linear: primary workspace' >> ~/.claude/secrets.env
-echo 'export LINEAR_API_KEY="VALUE"' >> ~/.claude/secrets.env
-
-# Append named workspace key (if provided)
-echo '# Linear: NAME workspace' >> ~/.claude/secrets.env
-echo 'export LINEAR_NAME_API_KEY="VALUE"' >> ~/.claude/secrets.env
-```
-
-## Step 5: Shell Profile
+## Step 4: Shell Profile
 
 Check if secrets.env is already sourced:
 
@@ -102,7 +72,7 @@ If not found in any profile, show the user exactly what to add and where:
 
 If already sourced, confirm and skip.
 
-## Step 6: direnv (recommended)
+## Step 5: direnv (recommended)
 
 direnv automatically loads a project's `.env` file when you enter its directory. This means database URLs, project API keys, and other credentials are available to Claude's commands without any manual setup or per-command sourcing.
 
@@ -136,11 +106,10 @@ If the hook is missing, show the user the command to add it. If already configur
 
 **How direnv works with projects:** When a project has a `.env` file and an `.envrc` file containing `dotenv`, direnv auto-exports those vars whenever you `cd` into the directory. Claude's bash commands inherit them — no manual sourcing needed. The `/project-setup` command creates the `.envrc` file.
 
-## Step 7: Confirm
+## Step 6: Confirm
 
 ```bash
 source ~/.claude/secrets.env 2>/dev/null
-echo "LINEAR_API_KEY : ${LINEAR_API_KEY:+set (${#LINEAR_API_KEY} chars)}"
 echo "gh auth        : $(gh auth status --active 2>&1 | head -1)"
 echo "git name       : $(git config --global user.name)"
 echo "git email      : $(git config --global user.email)"
@@ -149,11 +118,10 @@ echo "direnv         : $(which direnv 2>/dev/null && direnv version || echo 'not
 
 Report clearly what is set and what is missing. If everything is green:
 
-> "quetrex-base setup complete. You're ready to use /issue-prd, /plan-project, and the full pipeline."
+> "quetrex-base setup complete. You're ready to plan work and run the full pipeline."
 
 ## Notes
 
-- LINEAR_API_KEY is your primary workspace default — used unless a project .env overrides it
-- Named workspace keys (LINEAR_DEALERQ_API_KEY etc.) are selected by /secrets when working in that project
-- Run /secrets to add keys, list what is configured, or switch a project to a named workspace
-- This file is read-only to other users (chmod 600) — do not put it in any git repo
+- Add API keys with /secrets — global keys are defaults, project .env keys override per project
+- Run /secrets to add keys or list what is configured
+- secrets.env is read-only to other users (chmod 600) — do not put it in any git repo

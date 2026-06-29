@@ -93,7 +93,7 @@ For each segment, write:
 - Write for the ear, not the eye — short sentences, conversational tone
 - Cipher is confident, warm, slightly playful — not robotic or corporate
 - One idea per sentence. No compound sentences with semicolons.
-- Name-drop specific tools and skills to create desire ("This uses the /issue-prd skill from Module 2")
+- Name-drop specific tools and skills to create desire ("This uses the /plan-feature skill from Module 2")
 - Time estimate: ~150 words per minute of narration
 
 ### Step 4: Build the Lesson File

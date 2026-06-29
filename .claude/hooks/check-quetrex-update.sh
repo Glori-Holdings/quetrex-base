@@ -1,5 +1,5 @@
 #!/bin/bash
-# Daily background check for Glori Builder updates.
+# Daily background check for Quetrex Base updates.
 # Runs on session Stop. Fast exit if checked within 24 hours.
 
 TIMESTAMP_FILE="$HOME/.claude/.quetrex-last-check"

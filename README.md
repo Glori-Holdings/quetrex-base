@@ -1,6 +1,10 @@
-# Glori Builder
+# Quetrex Base
 
-Claude Code base configuration for development teams. Agents, skills, and commands for a complete AI-powered development pipeline — from Linear issue to merged PR.
+Claude Code base configuration for development teams. Agents, skills, and commands for a complete AI-powered development pipeline — from plan to merged PR.
+
+> **Tracker-agnostic.** The base ships no tracker/issue commands. Per-project tracker wiring
+> (fetching work items, advancing status columns) is provided by project-level setup
+> (`quetrex-init`, forthcoming).
 
 ## Install
 
@@ -20,7 +24,7 @@ npm install -g github:Barnhardt-Enterprises-Inc/quetrex-base
 /quetrex-setup
 ```
 
-Configures GitHub CLI auth, git identity, Linear API key, and direnv.
+Configures GitHub CLI auth, git identity, API keys, and direnv.
 
 ## First Time on a New Project
 
@@ -29,27 +33,20 @@ Configures GitHub CLI auth, git identity, Linear API key, and direnv.
 /create-rules     # Stack configuration (Next.js, Python, Rust, Rails, iOS, Go, Node.js)
 ```
 
-## Working Issues
+## Planning Work
 
 ```bash
-/issue-prd QUE-123    # Start a Linear issue through the full pipeline
-/merge-issue QUE-123  # Merge the PR and update Linear
-```
-
-## Auto-Pilot (Walk Away Mode)
-
-```bash
-/plan-project         # Plan a new project → creates all Linear issues
-/auto-pilot PROJECT-ID  # Works every issue autonomously until the backlog is empty
+/plan-feature     # Codebase analysis + implementation plan for a feature
+/create-prd       # Generate a PRD from the current conversation
 ```
 
 ## The Pipeline
 
 ```
-/issue-prd → architect → developer(s) → QA → reviewer → git-workflow → /merge-issue
+architect → developer(s) → QA → reviewer → git-workflow → (open PR)
 ```
 
-Each stage is a specialized agent. QA proves green with actual exit codes. The reviewer (Opus) reads the full diff. PRs squash-merge to main.
+Each stage is a specialized agent. QA proves green with actual exit codes. The reviewer (Opus) reads the full diff. PRs squash-merge to main. The pipeline terminus is an open PR awaiting human merge.
 
 ## All Commands
 
@@ -60,12 +57,8 @@ Each stage is a specialized agent. QA proves green with actual exit codes. The r
 | `/project-setup` | One-time project setup |
 | `/create-rules` | Generate project stack configuration |
 | `/update-rules` | Audit and fix existing project rules |
-| `/plan-project` | Plan a new project from scratch |
 | `/plan-feature` | Plan a feature for an existing codebase |
-| `/issue-prd QUE-123` | Start a Linear issue through the pipeline |
-| `/issue-rework QUE-123` | Rework after tester feedback |
-| `/auto-pilot PROJECT-ID` | Autonomous project execution |
-| `/merge-issue QUE-123` | Merge PR, update Linear |
+| `/create-prd` | Generate a PRD from conversation |
 | `/deploy-setup` | Generate project-specific deploy skill |
 | `/secrets` | Manage API keys |
 | `/quetrex-update` | Check for and apply updates |
@@ -83,4 +76,3 @@ Checks the installed version against npm latest and updates if behind.
 - Node.js 18+
 - Claude Code
 - GitHub CLI (`gh auth login`)
-- Linear API key (configured via `/quetrex-setup`)

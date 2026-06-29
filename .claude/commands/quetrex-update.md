@@ -1,5 +1,5 @@
 ---
-description: Check for and apply updates to Glori Builder. Shows current vs latest version and updates if behind.
+description: Check for and apply updates to Quetrex Base. Shows current vs latest version and updates if behind.
 ---
 
 # Quetrex Update
@@ -12,7 +12,7 @@ npm list -g quetrex-base --depth=0 --json 2>/dev/null
 
 Extract the installed version from the JSON output.
 
-If `quetrex-base` is not found in the output, tell the user: "Glori Builder does not appear to be installed globally. Install it with: `npm install -g quetrex-base`" and stop.
+If `quetrex-base` is not found in the output, tell the user: "Quetrex Base does not appear to be installed globally. Install it with: `npm install -g quetrex-base`" and stop.
 
 ## Step 2: Check Latest Version
 
@@ -23,14 +23,14 @@ npm show quetrex-base version 2>/dev/null
 ## Step 3: Compare
 
 If installed == latest:
-> "You're on the latest version of Glori Builder (v{version}). Nothing to do."
+> "You're on the latest version of Quetrex Base (v{version}). Nothing to do."
 
 Clear the flag file if it exists: `rm -f ~/.claude/.quetrex-update-available`
 
 Stop.
 
 If installed != latest, display:
-> "Glori Builder update available
+> "Quetrex Base update available
 > Installed: v{installed}
 > Latest:    v{latest}
 >

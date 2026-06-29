@@ -18,8 +18,8 @@ If `$ARGUMENTS` is empty or unrecognised, show usage and stop.
 
 ## add KEY_NAME [--project]
 
-**Global** (`add LINEAR_API_KEY`): writes to `~/.claude/secrets.env`
-**Project** (`add LINEAR_API_KEY --project`): writes to `.env` in the current directory
+**Global** (`add EXAMPLE_API_KEY`): writes to `~/.claude/secrets.env`
+**Project** (`add EXAMPLE_API_KEY --project`): writes to `.env` in the current directory
 
 ### Global add
 
@@ -115,8 +115,8 @@ Display the output cleanly. If a key appears in both: note "project overrides gl
 ## Notes
 
 - Global keys are your defaults across all projects — set once, work everywhere
-- Project `.env` keys override the global for that project only — use for different Linear workspaces, project-specific services, etc.
+- Project `.env` keys override the global for that project only — use for project-specific services, separate accounts, etc.
 - Never store secrets in code, CLAUDE.md, or any file that gets committed
-- All commands that need LINEAR_API_KEY read `$LINEAR_API_KEY` from the environment — the layered system (shell sources secrets.env, project .env overrides) handles the rest
+- Commands that need a key read `$KEY_NAME` from the environment — the layered system (shell sources secrets.env, project .env overrides) handles the rest
 - On a new machine: run /quetrex-setup to create secrets.env and configure your primary keys
-- On a new project with a different Linear workspace: run `/secrets add LINEAR_API_KEY --project`
+- For a project-specific override: run `/secrets add EXAMPLE_API_KEY --project`
