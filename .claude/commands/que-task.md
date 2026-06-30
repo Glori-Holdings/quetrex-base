@@ -177,9 +177,9 @@ qx_task_comment "$TASK_ID" "Epic decomposed into N children with M dependency ed
 ```
 
 **4. DAG dispatch (concurrency cap ≈ 3–5).** This command is the lean dispatcher — it does
-**not** run any pipeline inline; the heavy work is the background child workflows. Mirror the
-`/runner` dispatcher pattern: the **kanban is the state of truth** (status + dependencies +
-`isBlocked`), polled between ticks.
+**not** run any pipeline inline; the heavy work is the background child workflows. Use a
+continuous in-session dispatcher pattern: the **kanban is the state of truth** (status +
+dependencies + `isBlocked`), polled between ticks.
 
 Loop:
 
@@ -220,8 +220,8 @@ Loop:
   a child either advances toward `merged` / `needs_clarity` or there is simply nothing left to
   launch. **Do not spin** on children that can never become ready — a child whose dependency is
   `needs_clarity` is **permanently blocked until the human reworks that dependency**, so it is part
-  of the fixpoint, not a reason to keep polling. (This dispatcher polls **in this session** like
-  `/runner`; the heavy work is the background child workflows, so the session stays light.)
+  of the fixpoint, not a reason to keep polling. (This dispatcher polls **in this session**;
+  the heavy work is the background child workflows, so the session stays light.)
 
 **Epic terminus (fixpoint reached).** Partition the children:
 
@@ -251,8 +251,8 @@ parse their stdout. Report:
 - **Single unit:** fire-and-forget — the one workflow title and that it is building toward
   `pr_ready`; remind the user to `/task-merge $TASK_ID` when the PR is green + approved. Then exit;
   the terminal stays free.
-- **Epic:** the **DAG dispatcher itself runs in this session** (it polls the kanban between ticks,
-  like `/runner`) until the fixpoint in Step 3 B.4. While it runs, report the integration branch,
+- **Epic:** the **DAG dispatcher itself runs in this session** (it polls the kanban between ticks)
+  until the fixpoint in Step 3 B.4. While it runs, report the integration branch,
   the N children + M dependency edges, and which children **started** vs **waiting** (and on what).
   At the fixpoint, report the terminus partition (all `merged` → integration PR opened, hand off to
   `/task-merge <EPIC-ID>`; else which children are `needs_clarity` / blocked-waiting and the

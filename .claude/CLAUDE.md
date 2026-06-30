@@ -41,7 +41,7 @@ architect → developer(s) → QA → reviewer → git-workflow
 - **reviewer** (Opus) reads the full diff for logic errors, security, and architecture violations
 - **git-workflow** creates a squash PR to main
 
-Tracker/issue wiring (fetching work items, advancing status columns) is **not** part of the base. It is provided per project by project-level setup (`quetrex-init`, forthcoming) that integrates a tracker. The base ships only the generic agent pipeline and generic skills.
+Tracker/issue wiring (fetching tasks, advancing status columns) is provided by the Quetrex kanban commands — `/quetrex-login`, `/quetrex-init`, `/new-task`, `/refine-task`, `/que-task`, `/rework`, `/task-merge`, `/task-complete`. Bind each repo to a Quetrex project with `/quetrex-init`; the generic agent pipeline above then runs the work from plan to PR.
 
 ## Workflow Rules
 
