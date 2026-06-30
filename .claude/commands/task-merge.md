@@ -75,20 +75,29 @@ gh pr list --state open \
   --search "head:feature/$TASK_ID"
 ```
 
-If that search yields nothing, list all open PRs and match `headRefName` containing
-`"$TASK_ID"` (case-insensitive):
+If that search yields nothing, list all open PRs and match `headRefName` on the task
+identifier as a **whole token**, not a loose substring. A plain `includes("SMA-1")` would
+also match `feature/SMA-12-...`, which could squash-merge the **wrong** PR; require the id to
+be bounded by a non-alphanumeric char (or string start/end) on both sides so `SMA-1` matches
+`feature/SMA-1-foo` and `feature/SMA-1-api` but never `feature/SMA-12-bar`:
 
 ```bash
 gh pr list --state open --json number,title,headRefName | \
   node -e '
     const id=process.argv[1].toLowerCase();
+    const esc=id.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+    const re=new RegExp("(^|[^a-z0-9])"+esc+"([^a-z0-9]|$)","i");
     let a=""; process.stdin.on("data",d=>a+=d).on("end",()=>{
-      const m=JSON.parse(a).filter(p=>p.headRefName.toLowerCase().includes(id));
+      const m=JSON.parse(a).filter(p=>re.test(p.headRefName));
       m.forEach(p=>console.log(`${p.number}\t${p.headRefName}\t${p.title}`));
       process.exit(m.length?0:3);
     });
   ' "$TASK_ID"
 ```
+
+The `head:feature/$TASK_ID` search in the previous sub-step can also surface a longer-id
+branch as a prefix match; apply the same whole-token check to anything it returns before
+treating it as the match.
 
 - **0 matches** → tell the user no open PR was found for `$TASK_ID`, and stop.
 - **>1 matches** → list them and ask the user to disambiguate. Do **not** guess.
