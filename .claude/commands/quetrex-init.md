@@ -11,9 +11,11 @@ re-create the binding and never prompt for a name. If it is **not linked**, crea
 the project (or surface the admin-only guidance on 403) and write the binding.
 
 This command is **non-destructive**: it only ever ADDs `.quetrex/project.json` and
-auto-cleans stale tracker references from `CLAUDE.md`. It never overwrites or deletes
-existing `.claude/`, `CLAUDE.md` body content, commands, settings, or any git/Claude
-history. Secrets are never prompted for here — they live at `dash.quetrex.com/keys`.
+auto-cleans stale tracker references from `CLAUDE.md`. It never overwrites or silently
+deletes existing `.claude/`, `CLAUDE.md` body content, commands, settings, or any
+git/Claude history. The **only** removals are stale old-Quetrex project commands/skills,
+and only the specific ones the user **confirms** (step 4c) — never auto-deleted. Secrets
+are never prompted for here — they live at `dash.quetrex.com/keys`.
 
 **Token safety:** never echo or print the bearer token. The helper's `qapi` injects
 it via a `0600` temp config and never exposes it. Build all JSON with
@@ -248,6 +250,69 @@ created or appended so step 6 stages the file and step 7 reports it.
 
 ---
 
+## 4c. Stale project-command cleanup (with confirmation)
+
+During adoption of an **existing** repo, scan the repo's **project-level** command/skill
+directories for STALE old-Quetrex artifacts and offer to remove them — **never without
+confirmation**. This excises dead pipeline commands left over from a previous Quetrex
+generation so the adopted repo's `.claude/` matches the current command set.
+
+Operate **only** on these two `$REPO_ROOT`-pinned directories (same hard-pin guardrail as
+step 4):
+
+- `$REPO_ROOT/.claude/commands/`  (one `*.md` per command; basename = command name)
+- `$REPO_ROOT/.claude/skills/`    (one subdirectory per skill; dir name = skill name)
+
+> **IMPORTANT:** this is about the *adopted repo's own* project-level `.claude/`, **NOT**
+> the user's global `~/.claude` (never touch `~/.claude`) and **NOT** the new global
+> Quetrex skills. Resolve everything against `$REPO_ROOT` — never a bare/CWD-relative path.
+> If neither directory exists, skip this step silently.
+
+**1. Flag likely-stale artifacts.** A file/skill is FLAGGED when ANY of these holds:
+
+- Its basename (command file name without `.md`, or skill directory name) is in the known
+  REMOVED old-Quetrex command set:
+  `issue-prd`, `issue-rework`, `map-states`, `complete`, `auto-pilot`, `plan-project`,
+  `runner`, `deploy-setup`, `create-prd`, `create-rules`, `update-rules`, `execute`,
+  `prime`, `plan-feature`, `project-setup`, `quetrex-docs`, `quetrex-setup`, `secrets`,
+  `new-video`.
+- Its skill directory name is in the known REMOVED old-Quetrex skill set:
+  `domain-capture`, `story-builder`, `agent-browser`, `e2e-test`, `quetrex`,
+  `quetrex-create-agent`, `quetrex-create-plugin`.
+- Its CONTENT references the removed tracker/pipeline — e.g. `Linear`, `api.linear.app`,
+  or the removed pipeline commands (`/issue-prd`, `/issue-rework`, `/merge-issue`,
+  `/map-states`, `/runner`). For a skill, check its `SKILL.md` (and any `*.md`) content.
+
+Detect with the **Read tool** / `node` (never `cat`). Record, per flagged item, the
+absolute path and a one-line reason (which rule matched).
+
+**2. Present + confirm.** Show the flagged list — name + one-line reason each — and ASK the
+user to confirm removal. Allow **per-item or batch** selection. PRESERVE anything genuinely
+custom; when unsure, **KEEP it** and let the user decide. **Never auto-delete without
+confirmation.** If nothing is flagged, say *"No stale project commands found."* and move on.
+
+**3. Remove only the confirmed items** with `git rm` (so the removal is staged into the same
+adoption commit/PR as steps 4/4b). Use `git -C "$REPO_ROOT"` so the enforce-branch hook sees
+the branch. Files use `git rm`; skill directories use `git rm -r`:
+
+```bash
+# CONFIRMED_PATHS = the user-confirmed $REPO_ROOT-relative paths to remove (commands as
+# .claude/commands/<name>.md, skills as .claude/skills/<name>). Empty => nothing to do.
+for rel in "${CONFIRMED_PATHS[@]}"; do
+  [ -n "$rel" ] || continue
+  if [ -d "$REPO_ROOT/$rel" ]; then
+    git -C "$REPO_ROOT" rm -r --quiet -- "$rel" && echo "Removed stale skill: $rel"
+  elif [ -f "$REPO_ROOT/$rel" ]; then
+    git -C "$REPO_ROOT" rm --quiet -- "$rel" && echo "Removed stale command: $rel"
+  fi
+done
+```
+
+Track exactly what was removed vs kept so step 6 includes the removals and step 7 reports
+them.
+
+---
+
 ## 5. Point to /keys (never prompt for secrets)
 
 Print exactly:
@@ -314,9 +379,10 @@ a credential that was just imported.
 ## 6. Commit the additions — PR if possible, else local
 
 Follow the `worktree-workflow` conventions. Stage **only** the additions/cleanups:
-`.quetrex/project.json` plus any `CLAUDE.md` edits made in step 4. Use
-`git -C "$REPO_ROOT"` so the enforce-branch hook sees the branch rather than blocking
-on `main`.
+`.quetrex/project.json` plus any `CLAUDE.md` edits made in step 4. The confirmed stale
+removals from step 4c are already staged (they were `git rm`'d into the index), so they
+ride along in this same commit/PR. Use `git -C "$REPO_ROOT"` so the enforce-branch hook
+sees the branch rather than blocking on `main`.
 
 ```bash
 BRANCH="feature/quetrex-init-adopt"
@@ -366,6 +432,8 @@ Summarize for the user:
   *"no stale tracker references found"* if nothing matched.
 - **Verification rules** — *"added"* (with the commands written), *"already present"*, or
   the file path that now carries the `## Verification` section.
+- **Stale project commands** — which flagged command/skill artifacts were removed (by path)
+  vs kept, or *"no stale project commands found"* if nothing matched.
 - **Secrets** — which local env creds were imported into the vault (by CANON name +
   masked last-4, never values), and the `dash.quetrex.com/keys` reminder for any missing
   ones.
@@ -382,4 +450,6 @@ Summarize for the user:
 - Idempotent: re-running on a linked repo never re-creates the binding and never
   prompts for a name — it re-verifies access and can re-clean / re-PR.
 - Non-destructive: the only file created is `.quetrex/project.json`; `CLAUDE.md`
-  edits only excise stale tracker blocks, never wholesale rewrites.
+  edits only excise stale tracker blocks, never wholesale rewrites. The only removals
+  are user-confirmed stale old-Quetrex project commands/skills (step 4c) — never
+  auto-deleted, never anything in the global `~/.claude`.
