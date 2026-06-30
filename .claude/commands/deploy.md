@@ -14,7 +14,11 @@ Deploy this project's app using its **vault secrets** from the Quetrex kanban. v
 - The Fly API token and runtime secrets are passed to `fly` inline per-command or via STDIN,
   never on a logged line and never on argv where `ps` could see them.
 - The deploy config written to `.quetrex/project.json` contains **non-secret fields only**
-  (provider, app name, environments, needsDb) — never any key or token.
+  (provider, app name, environments, needsDb, and `runtimeSecrets` — an allowlist of secret
+  NAMES, never values) — never any key or token.
+- Only the **allowlisted** runtime secrets are ever pushed to the deployed app. Pipeline-only
+  creds (the Fly token, GitHub/CI tokens, the Quetrex bearer, etc.) are used by the deploy
+  process and are NEVER exposed in the app's runtime environment.
 - No `set -x`, no `curl -v`, no `fly` verbose flags. The sensitive vars are `unset` at the end.
 
 Argument: `$ARGUMENTS` is an optional environment, `staging` or `production`.
@@ -64,8 +68,9 @@ DEPLOY_CFG="$(node -e '
 ' "$BIND")"
 ```
 
-**If `DEPLOY_CFG` is present**, parse `provider`, `appName`, `environments` (array), and
-`needsDb` from it with node.
+**If `DEPLOY_CFG` is present**, parse `provider`, `appName`, `environments` (array), `needsDb`,
+and `runtimeSecrets` (array of secret NAMES — the runtime allowlist; may be absent on configs
+written before this field existed) from it with node.
 
 **If it is ABSENT (node exited non-zero) → INTERVIEW** the user, one question at a time
 (like `/deploy-setup`), capturing **non-secret fields only**:
@@ -76,15 +81,26 @@ DEPLOY_CFG="$(node -e '
   comma-separated string into `ENVS` (e.g. `staging,production`).
 - **needsDb** — does it need a DB migration step before deploy? `true`/`false` into `NEEDSDB`.
 
+The runtime-secret allowlist (`runtimeSecrets`) is **not** asked here — it is gathered in
+step 6b, which needs the live list of vault secret names. Leave it out of this write; step 6b
+fills it in.
+
 Then MERGE the block into the existing binding **without clobbering** `projectCode` /
-`kanbanUrl` and **without writing any secret**:
+`kanbanUrl` (and preserving any existing `runtimeSecrets`) and **without writing any secret**:
 
 ```bash
 node -e '
   const fs=require("fs");
   const [f,provider,appName,envs,needsDb]=process.argv.slice(1);
   const o=JSON.parse(fs.readFileSync(f,"utf8"));
-  o.deploy={provider,appName,environments:envs.split(",").map(s=>s.trim()).filter(Boolean),needsDb:needsDb==="true"};
+  const prev=o.deploy||{};
+  o.deploy={
+    provider,appName,
+    environments:envs.split(",").map(s=>s.trim()).filter(Boolean),
+    needsDb:needsDb==="true",
+    // preserve a previously-saved allowlist; step 6b sets it if absent
+    runtimeSecrets:Array.isArray(prev.runtimeSecrets)?prev.runtimeSecrets:[]
+  };
   fs.writeFileSync(f,JSON.stringify(o,null,2)+"\n");
 ' "$BIND" "$PROVIDER" "$APPNAME" "$ENVS" "$NEEDSDB"
 echo "Wrote non-secret deploy config to $BIND"
@@ -118,6 +134,80 @@ shell variable. Do **NOT** `export` it — an exported var is visible to every c
 `ps e` / `/proc/<pid>/environ`. It is fed to `node` only over STDIN (never argv, never the
 environment). **NEVER** `echo`/`cat`/redirect it, never write it to disk, never print any key
 or value, never pass it through a command that would log it.
+
+---
+
+## 6b. Resolve the runtime-secret allowlist
+
+Only secrets the user explicitly marks as **runtime app secrets** are ever pushed to the
+deployed app. Everything else in the vault (the Fly token, GitHub/CI tokens, the Quetrex
+bearer, build-only keys) is used by the deploy process and must NEVER reach the app's runtime
+environment.
+
+**If `runtimeSecrets` is present and non-empty in the deploy config**, use it as-is — skip the
+interview.
+
+**If `runtimeSecrets` is absent or empty**, build it now. List the vault's secret **NAMES**
+from the **masked** endpoint (names only — values are masked server-side and we never print
+them anyway):
+
+```bash
+MASKED="$(qapi GET "/api/projects/$QX_PROJECT_CODE/secrets")" || exit 1
+printf '%s' "$MASKED" | node -e '
+  let d="";
+  process.stdin.on("data", c => { d += c; });
+  process.stdin.on("end", () => {
+    let a; try { a = JSON.parse(d); } catch { process.exit(1); }
+    const list = Array.isArray(a) ? a
+      : (Array.isArray(a.secrets) ? a.secrets
+      : Object.keys(a).map(k => ({ name: k })));   // map shape -> names only
+    const names = [...new Set(
+      list.map(x => typeof x === "string" ? x : (x && (x.name || x.key || x.id)))
+          .filter(Boolean)
+    )];
+    names.forEach(n => console.log(n));            // NAMES ONLY, never masked values
+  });
+'
+unset MASKED
+```
+
+Show that name list to the user and ask **which names are RUNTIME app secrets** (the ones the
+running app needs in its environment). Make clear everything they leave out stays deploy-only
+and is never pushed to the app. Collect the chosen names into a `CHOSEN` bash array.
+
+Persist just the chosen **names** (non-secret) to the binding, preserving the rest of the
+deploy block:
+
+```bash
+node -e '
+  const fs=require("fs");
+  const [f,...names]=process.argv.slice(1);
+  const o=JSON.parse(fs.readFileSync(f,"utf8"));
+  o.deploy=o.deploy||{};
+  o.deploy.runtimeSecrets=names;
+  fs.writeFileSync(f,JSON.stringify(o,null,2)+"\n");
+' "$BIND" "${CHOSEN[@]}"
+echo "Saved runtime-secret allowlist (names only) to $BIND"
+```
+
+Now load the allowlist into the `RUNTIME_NAMES` bash array (names only — passed as argv to the
+push step in step 8; never any value):
+
+```bash
+RUNTIME_NAMES=()
+while IFS= read -r n; do
+  [ -n "$n" ] && RUNTIME_NAMES+=("$n")
+done < <(node -e '
+  const fs=require("fs");
+  const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+  ((o.deploy && Array.isArray(o.deploy.runtimeSecrets)) ? o.deploy.runtimeSecrets : [])
+    .forEach(n => console.log(n));
+' "$BIND")
+
+if [ "${#RUNTIME_NAMES[@]}" -eq 0 ]; then
+  echo "Note: no runtime secrets are allowlisted — nothing will be pushed to the app runtime." >&2
+fi
+```
 
 ---
 
@@ -170,25 +260,35 @@ FLY_API_TOKEN="$_FLY_TOK" fly status --app "$APP" >/dev/null 2>&1 || {
 }
 ```
 
-**Push runtime app secrets** into the Fly app via STDIN so values never hit argv or logs. The
-in-memory map is fed to node over STDIN (not the environment); node emits `NAME=value` lines
-straight into the `fly` pipe:
+**Push runtime app secrets** into the Fly app via STDIN so values never hit argv or logs. Only
+the **allowlisted** names (`RUNTIME_NAMES`, from step 6b) are pushed — pipeline-only creds
+(`FLY_API_TOKEN`, CI/GitHub tokens, the Quetrex bearer, build-only keys) are never exposed in
+the app runtime. The in-memory map is fed to node over STDIN (not the environment); the
+allowlist NAMES are passed as argv (names are non-secret); node emits only the allowlisted
+`NAME=value` lines straight into the `fly` pipe:
 
 ```bash
-printf '%s' "$SECRETS_JSON" | node -e '
-  let d="";
-  process.stdin.on("data", c => { d += c; });
-  process.stdin.on("end", () => {
-    let s; try { s = JSON.parse(d); } catch { process.exit(1); }
-    for (const [k, v] of Object.entries(s)) {
-      if (k === "FLY_API_TOKEN") continue;
-      process.stdout.write(`${k}=${v}\n`);
-    }
-  });
-' | FLY_API_TOKEN="$_FLY_TOK" fly secrets import --app "$APP" --stage
+if [ "${#RUNTIME_NAMES[@]}" -gt 0 ]; then
+  printf '%s' "$SECRETS_JSON" | node -e '
+    let d="";
+    process.stdin.on("data", c => { d += c; });
+    process.stdin.on("end", () => {
+      let s; try { s = JSON.parse(d); } catch { process.exit(1); }
+      const allow = new Set(process.argv.slice(1));   // allowlisted NAMES (non-secret)
+      for (const [k, v] of Object.entries(s)) {
+        if (!allow.has(k)) continue;                  // allowlist only — never the whole map
+        if (k === "FLY_API_TOKEN") continue;          // belt-and-suspenders: never the deploy token
+        process.stdout.write(`${k}=${v}\n`);
+      }
+    });
+  ' "${RUNTIME_NAMES[@]}" | FLY_API_TOKEN="$_FLY_TOK" fly secrets import --app "$APP" --stage
+else
+  echo "No runtime secrets allowlisted; skipping 'fly secrets import'." >&2
+fi
 ```
 
-(`--stage` so they apply on the next deploy; values are never printed.)
+(`--stage` so they apply on the next deploy; values are never printed. Only the allowlisted
+names reach the app — the rest of the vault never leaves the deploy process.)
 
 **If `needsDb` is true**, note the pre-deploy migration step. v1 leaves the actual migration
 command as a TODO hook — mention in the report that a DB migration may be required and was not
@@ -213,7 +313,8 @@ unset SECRETS_JSON _FLY_TOK
 On a successful deploy, capture the URL (`fly status --app "$APP"` or the known
 `https://$APP.fly.dev`) and report:
 - the environment, resolved app name, and deployed URL,
-- that runtime secrets were staged from the vault (count only — never names/values),
+- that the allowlisted runtime secrets were staged from the vault (count only — never
+  names/values), and that non-allowlisted vault entries were NOT pushed to the app runtime,
 - that the in-memory secret map was scrubbed (`unset`) and nothing was written to disk.
 
 ---
@@ -245,19 +346,27 @@ Report which tasks advanced.
 
 ## Secret/token safety invariants (restated)
 
-- The vault map lives only in `$SECRETS_JSON` (process memory); never to disk/logs/context.
-- `FLY_API_TOKEN` is passed inline per-command, never echoed, never on a logged line.
-- Runtime secrets are piped to `fly secrets import` via STDIN, never on argv.
-- `unset SECRETS_JSON _FLY_TOK` at the end (and on every early-exit after they are set).
+- The vault map lives only in `$SECRETS_JSON`, a **plain, NON-exported** shell variable
+  (process memory); never `export`ed, never to disk/logs/context. It is fed to `node` only over
+  STDIN — never via the environment (`ps e` / `/proc/<pid>/environ`) and never via argv.
+- `FLY_API_TOKEN` is extracted **without `eval`** (raw value captured from a STDIN-fed node via
+  command substitution) and passed inline per-command, never echoed, never on a logged line.
+- Only the **allowlisted** `runtimeSecrets` names reach the app runtime; values are piped to
+  `fly secrets import` via STDIN, with the allowlist NAMES (non-secret) passed as argv. The
+  rest of the vault never leaves the deploy process.
+- `unset SECRETS_JSON _FLY_TOK` at the end (and on every early-exit after they are set);
+  `MASKED` is unset right after the name list is built.
 - No `set -x`, no `curl -v`, no `fly` verbose flags that echo secrets.
-- The only thing written to disk is the **non-secret** `deploy` config in
-  `.quetrex/project.json`.
+- The only thing written to disk is the **non-secret** `deploy` config (including the
+  `runtimeSecrets` allowlist — names only) in `.quetrex/project.json`.
 
 ---
 
 ## Error-handling rules
 
 - Absent deploy config → interview + write non-secret config, then continue.
+- Absent/empty `runtimeSecrets` → list masked vault NAMES, ask which are runtime, save the
+  chosen names; if the user picks none, push nothing to the app runtime (warn, don't fail).
 - Unsupported provider → stop (v1 is Fly-only).
 - Missing `FLY_API_TOKEN` in vault → clear "set FLY_API_TOKEN at <kanban>/keys" message; stop.
 - `fly status` unreachable → stop before deploy; scrub vars.
