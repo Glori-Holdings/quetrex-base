@@ -165,7 +165,10 @@ qapi() {
 
   cfg="$(mktemp)"   || { echo "Quetrex API error (temp file)" >&2; return 1; }
   bodyf="$(mktemp)" || { rm -f "$cfg"; echo "Quetrex API error (temp file)" >&2; return 1; }
-  chmod 600 "$cfg"
+  # Both temp files may hold sensitive bytes: cfg the bearer token, bodyf the
+  # response body (which for /secrets/export is the vault map). Lock both to 0600
+  # on creation and rm -f each on every return path below.
+  chmod 600 "$cfg" "$bodyf"
 
   # The token's only on-disk home: a 0600 curl config (-K), never on argv.
   printf 'header = "Authorization: Bearer %s"\n' "$_QX_TOKEN" > "$cfg"
