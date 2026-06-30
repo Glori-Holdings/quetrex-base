@@ -38,8 +38,10 @@
 #   NEVER passed on a command line (so it cannot appear in `ps aux`), and is
 #   NEVER exposed by `curl -v` or a shell `set -x` trace. It lives only in
 #   _QX_TOKEN (in-process) and, transiently, in a 0600 temp curl config file
-#   that is removed via a RETURN trap. Do not add `set -x`, `-v`, or `echo
-#   "$_QX_TOKEN"` anywhere in this file or in callers.
+#   that is removed with an explicit `rm` the instant curl returns (no trap —
+#   see qapi for why; zsh has no RETURN pseudo-signal). Do not add `set -x`,
+#   `-v`, or `echo "$_QX_TOKEN"` anywhere in this file or in callers, and do
+#   not replace the explicit `rm` with a trap.
 #
 # ---------------------------------------------------------------------------
 # Module-level state (set by the resolvers, read by qapi):
