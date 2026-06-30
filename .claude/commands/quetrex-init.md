@@ -128,8 +128,16 @@ settings, or history. The only file this command CREATES is `.quetrex/project.js
 Adoption only *edits* `CLAUDE.md` files to remove **stale old-tracker / Linear
 references**, preserving everything else.
 
-Check both `CLAUDE.md` (repo root) and `.claude/CLAUDE.md`. For each that exists,
-read it and compute a cleaned version that removes ONLY:
+Operate **only** on files inside this repo. Resolve both targets against
+`$REPO_ROOT` explicitly — never a CWD-relative or bare `.claude/CLAUDE.md`, which
+could resolve to a subdirectory's file or, worse, the user's **global**
+`~/.claude/CLAUDE.md`. The two and only two candidates are:
+
+- `$REPO_ROOT/CLAUDE.md`
+- `$REPO_ROOT/.claude/CLAUDE.md`
+
+For each of those two absolute paths that exists, read it and compute a cleaned
+version that removes ONLY:
 
 - **`## Linear States` section blocks** — the heading through its table, up to (but
   not including) the next `##` heading or EOF.
@@ -147,9 +155,11 @@ each block/line you remove so you can report it.
 If a file does not exist, skip it silently. After processing, build a precise list of
 what changed.
 
-> Implementation note: read each `CLAUDE.md` with the Read tool, decide the removals,
-> and apply them with `Edit` (exact-match) calls or by writing back a `node`-computed
-> version. Never blank a whole file; only excise the matched blocks/lines.
+> Implementation note: read each file with the Read tool using its **absolute
+> `$REPO_ROOT/…` path** (never a bare or global path), decide the removals, and apply
+> them with `Edit` (exact-match) calls or by writing back a `node`-computed version.
+> Never blank a whole file; only excise the matched blocks/lines. Never touch any
+> `CLAUDE.md` outside `$REPO_ROOT` — in particular, never the global `~/.claude/CLAUDE.md`.
 
 ---
 
