@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Quetrex — New User Setup Guide</title>
+<style>
+  :root{
+    --violet:#7c3aed; --violet-d:#5b21b6; --ink:#18181b; --muted:#52525b;
+    --line:#e4e4e7; --soft:#faf5ff; --code-bg:#f4f4f5;
+  }
+  *{box-sizing:border-box;}
+  @page{ size:letter; margin:18mm 16mm; }
+  html,body{ margin:0; padding:0; }
+  body{
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--ink); -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  .wrap{ max-width:760px; margin:0 auto; }
+  header.hero{
+    background:linear-gradient(135deg,var(--violet) 0%,var(--violet-d) 100%);
+    color:#fff; border-radius:14px; padding:26px 28px; margin-bottom:24px;
+    display:flex; align-items:center; gap:18px;
+  }
+  .mark{ width:46px; height:46px; flex:0 0 auto; color:#fff; }
+  header.hero h1{ font-size:24px; margin:0 0 3px; letter-spacing:-.3px; }
+  header.hero p{ margin:0; opacity:.92; font-size:13px; }
+  h2{ font-size:16px; margin:24px 0 8px; color:var(--violet-d); border-bottom:2px solid var(--soft); padding-bottom:5px; }
+  h3{ font-size:13.5px; margin:14px 0 4px; }
+  p{ margin:7px 0; }
+  .lead{ color:var(--muted); }
+  code{ background:var(--code-bg); padding:1.5px 6px; border-radius:5px; font-family:"SF Mono",Menlo,Consolas,monospace; font-size:12.5px; color:var(--violet-d); }
+  ol.steps{ counter-reset:s; list-style:none; padding:0; margin:10px 0; }
+  ol.steps>li{ counter-increment:s; position:relative; padding:10px 0 10px 42px; border-bottom:1px solid var(--line); }
+  ol.steps>li:last-child{ border-bottom:0; }
+  ol.steps>li::before{
+    content:counter(s); position:absolute; left:0; top:9px; width:26px; height:26px;
+    background:var(--violet); color:#fff; border-radius:50%; text-align:center; line-height:26px; font-weight:600; font-size:13px;
+  }
+  .card{ background:var(--soft); border:1px solid #ede9fe; border-radius:10px; padding:12px 14px; margin:12px 0; }
+  table{ border-collapse:collapse; width:100%; margin:8px 0 4px; }
+  th,td{ text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; font-size:13px; }
+  th{ color:var(--violet-d); font-size:12px; text-transform:uppercase; letter-spacing:.4px; }
+  td code{ white-space:nowrap; }
+  .note{ border-left:3px solid var(--violet); background:#fbfaff; padding:9px 13px; border-radius:0 8px 8px 0; margin:12px 0; font-size:13px; }
+  .flow{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:8px 0; }
+  .flow span{ background:#fff; border:1px solid #ddd6fe; color:var(--violet-d); border-radius:7px; padding:5px 9px; font-size:12px; font-weight:600; }
+  .flow .arr{ border:0; color:var(--violet); padding:0 1px; }
+  .cols{ font-size:12.5px; }
+  .cols td:first-child{ white-space:nowrap; font-weight:600; color:var(--violet-d); }
+  footer{ margin-top:24px; padding-top:12px; border-top:1px solid var(--line); color:var(--muted); font-size:11.5px; text-align:center; }
+  .pagebreak{ page-break-before:always; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <svg class="mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" aria-hidden="true">
+      <defs><clipPath id="q"><path fill-rule="evenodd" d="M15 1 C7.268 1 1 7.268 1 15 C1 22.732 7.268 29 15 29 C22.732 29 29 22.732 29 15 C29 7.268 22.732 1 15 1 Z M15 8.5 C18.59 8.5 21.5 11.41 21.5 15 C21.5 18.59 18.59 21.5 15 21.5 C11.41 21.5 8.5 18.59 8.5 15 C8.5 11.41 11.41 8.5 15 8.5 Z"/><path d="M21.09 17.91 L32.09 28.91 L28.91 32.09 L17.91 21.09 Z"/></clipPath></defs>
+      <g clip-path="url(#q)" fill="currentColor">
+        <rect x="0" y="0" width="32" height="2.5"/><rect x="0" y="3.7" width="32" height="2.5"/><rect x="0" y="7.4" width="32" height="2.5"/><rect x="0" y="11.1" width="32" height="2.5"/><rect x="0" y="14.8" width="32" height="2.5"/><rect x="0" y="18.5" width="32" height="2.5"/><rect x="0" y="22.2" width="32" height="2.5"/><rect x="0" y="25.9" width="32" height="2.5"/><rect x="0" y="29.6" width="32" height="2.5"/>
+      </g>
+    </svg>
+    <div>
+      <h1>Quetrex — New User Setup</h1>
+      <p>Get your machine and repositories connected. One-time setup, then you're working.</p>
+    </div>
+  </header>
+
+  <p class="lead">Welcome. Quetrex is your team's project board at <b>dash.quetrex.com</b> plus a set of terminal commands that do the actual work. The board is where you <b>see</b> what's happening; the commands are how you <b>do</b> things. This guide gets you set up and explains how everything fits together.</p>
+
+  <h2>Part 1 &middot; One-time setup on your machine</h2>
+  <p>You only do this <b>once per computer</b>.</p>
+  <ol class="steps">
+    <li><b>Accept your invite.</b> You'll receive an email from <code>noreply@quetrex.com</code>. Click the link, set your password, and you're in at <b>https://dash.quetrex.com</b>. You'll only see the projects you've been given access to — that's expected.</li>
+    <li><b>Install Quetrex:</b> <code>npm install -g quetrex-base</code></li>
+    <li><b>Log in:</b> <code>/quetrex-login</code> — opens your browser to approve this device, then stores your access on this machine. You won't repeat it until it expires.</li>
+  </ol>
+
+  <h2>Part 2 &middot; Connect each repository</h2>
+  <p>For <b>each</b> repo you work in, run <code>/quetrex-init</code> once.</p>
+  <ol class="steps">
+    <li><b>A brand-new repo:</b> it asks for a project name, creates the project on the board (assigning its code, e.g. <code>SMA</code>), and links the repo.</li>
+    <li><b>A repo already set up by a teammate</b> (one you've joined): it detects the existing link and simply connects you — no project is re-created. If you don't have access yet, it tells you to contact your administrator.</li>
+  </ol>
+
+  <div class="note">
+    <b>Your existing work is safe.</b> <code>/quetrex-init</code> is non-destructive by design. It <b>checks whether the repo has already been initialized and will not overwrite a previous setup.</b> It keeps your existing <code>CLAUDE.md</code>, custom commands, settings, and your entire git &amp; Claude history — it only <b>adds</b> the Quetrex link and tidies up any stale references from older tooling. Nothing you've built is lost.
+  </div>
+
+  <h2>Part 3 &middot; The commands</h2>
+  <table>
+    <tr><th>Command</th><th>What it does</th></tr>
+    <tr><td><code>/quetrex-login</code></td><td>Authenticates your machine via your browser. One-time (until it expires). Run it again if a command says you're not logged in.</td></tr>
+    <tr><td><code>/quetrex-init</code></td><td>Connects a repository to its Quetrex project. Safe on existing repos — never overwrites your prior setup.</td></tr>
+    <tr><td><code>/new-task</code></td><td>Creates a task in the <b>Backlog</b> — title, description, assignee, and priority.</td></tr>
+    <tr><td><code>/que-task&nbsp;SMA-1</code></td><td>Queues a task and starts the work. An agent reviews the task and the code, asks anything unclear, then builds it (see Part 5). The board moves it to <b>In&nbsp;Progress</b>, then <b>PR&nbsp;Ready</b>.</td></tr>
+    <tr><td><code>/rework&nbsp;SMA-1</code></td><td>For a task that needs another pass. It explains what went wrong, talks the fix through with you, notes the plan on the task, and re-runs the work.</td></tr>
+    <tr><td><code>/task-complete&nbsp;SMA-1</code></td><td>Marks a deployed task as <b>Complete</b> after you've confirmed it.</td></tr>
+    <tr><td><code>/task-merge&nbsp;SMA-1</code></td><td>Merges the task's pull request and cleans up — no leftover branches or worktrees.</td></tr>
+    <tr><td><code>/deploy</code></td><td>Deploys the project.</td></tr>
+  </table>
+
+  <h2>Part 4 &middot; The board &amp; task lifecycle</h2>
+  <p>The board is an <b>observability layer</b> — you watch progress here; you act through the commands. A task moves through these columns:</p>
+  <table class="cols">
+    <tr><td>Backlog</td><td>Created with <code>/new-task</code>, not started.</td></tr>
+    <tr><td>Queued</td><td>Picked up with <code>/que-task</code>; about to be worked.</td></tr>
+    <tr><td>In Progress</td><td>An agent workflow is actively building it.</td></tr>
+    <tr><td>PR Ready</td><td>Work done; a pull request is open for review.</td></tr>
+    <tr><td>Merged</td><td>The PR has been merged with <code>/task-merge</code>.</td></tr>
+    <tr><td>Deployed</td><td>Released with <code>/deploy</code>.</td></tr>
+    <tr><td>Needs Clarity</td><td>The agent couldn't finish and left a note explaining why — pick it up with <code>/rework</code>.</td></tr>
+    <tr><td>Complete</td><td>Confirmed done with <code>/task-complete</code>.</td></tr>
+  </table>
+
+  <h2>Part 5 &middot; How your work gets built</h2>
+  <p>When you run <code>/que-task</code>, Quetrex runs a strict, automated development pipeline so work is consistent and reviewed:</p>
+  <div class="card">
+    <div class="flow">
+      <span>Branch&nbsp;+&nbsp;Worktree</span><b class="arr">&rarr;</b>
+      <span>Architect</span><b class="arr">&rarr;</b>
+      <span>Developer(s)&nbsp;+&nbsp;Tests</span><b class="arr">&rarr;</b>
+      <span>QA</span><b class="arr">&rarr;</b>
+      <span>Reviewer</span><b class="arr">&rarr;</b>
+      <span>Pull&nbsp;Request</span>
+    </div>
+  </div>
+  <p>It creates an <b>isolated branch and worktree</b>, then runs a <b>workflow</b> of specialized agents: the <b>architect</b> plans, one or more <b>developers</b> implement with tests, <b>QA</b> proves everything passes, the <b>reviewer</b> checks logic and security, and a <b>pull request</b> is opened for you. It all runs in the <b>background</b>, so your terminal is free to start the next task. You watch progress on the board.</p>
+
+  <h2>Part 6 &middot; Roles &amp; access</h2>
+  <p>You only see and work on the projects you've been granted — everything else is invisible to you. Access is enforced on the server, so it's a hard boundary, not just hidden in the interface.</p>
+  <table class="cols">
+    <tr><td>Super&nbsp;Admin</td><td>Full access to all projects; manages admins and all access.</td></tr>
+    <tr><td>Admin</td><td>Manages access for the projects they belong to.</td></tr>
+    <tr><td>User</td><td>Works on assigned projects; views the board for those projects.</td></tr>
+  </table>
+  <div class="note">
+    If you try to act on a project you don't have access to, Quetrex stops you and tells you to <b>contact your administrator</b>. Getting added to a project takes effect immediately — nothing to reinstall.
+  </div>
+
+  <h2>Part 7 &middot; For administrators</h2>
+  <p>From the dashboard you manage people and access — no terminal needed:</p>
+  <table class="cols">
+    <tr><td>Invite someone</td><td>Click <b>Invite</b>, enter their email, choose their role, and pick which projects they get. They receive an email to set their password.</td></tr>
+    <tr><td>Grant / revoke access</td><td>Open <b>Members&nbsp;/&nbsp;Access</b>, select a person, and check or uncheck projects. Changes are instant — the user does nothing.</td></tr>
+    <tr><td>Create a project</td><td>Done from the terminal with <code>/quetrex-init</code> in the repo — it creates the project and links the code automatically.</td></tr>
+  </table>
+
+  <footer>
+    Quetrex &middot; dash.quetrex.com &middot; Questions? Contact your administrator.
+  </footer>
+
+</div>
+</body>
+</html>
