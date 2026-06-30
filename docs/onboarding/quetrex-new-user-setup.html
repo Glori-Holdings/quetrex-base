@@ -88,12 +88,29 @@
     <b>Your existing work is safe.</b> <code>/quetrex-init</code> is non-destructive by design. It <b>checks whether the repo has already been initialized and will not overwrite a previous setup.</b> It keeps your existing <code>CLAUDE.md</code>, custom commands, settings, and your entire git &amp; Claude history — it only <b>adds</b> the Quetrex link and tidies up any stale references from older tooling. Nothing you've built is lost.
   </div>
 
-  <h2>Part 3 &middot; The commands</h2>
+  <div class="note">
+    <b>Adopting an existing repo?</b> <code>/quetrex-init</code> also makes sure the project's <b>Verification commands</b> are in place and offers to clean up stale commands left by an older tracker. And if it finds credentials already in your <code>.env</code> / <code>.env.*</code> files (database URLs, tokens, app keys), it offers — with your confirmation — to <b>import them into the project's secure vault</b>, so you don't have to re-enter them by hand. See <b>Part 3</b>.
+  </div>
+
+  <h2>Part 3 &middot; Secrets &amp; deploy keys</h2>
+  <p>Projects need secrets — a <code>DATABASE_URL</code>, a Fly.io deploy token, third-party app keys. In Quetrex these live in a <b>secure vault</b>, not in your terminal or in plain files.</p>
+  <ol class="steps">
+    <li><b>You enter them in the browser</b>, never in the terminal — go to <b>dash.quetrex.com/keys</b> and add each project's deploy and runtime secrets there.</li>
+    <li><b>They're stored encrypted</b> and <b>scoped</b> to the people with access to that project. Once saved, they're shown <b>masked</b> (only the last 4 characters) — even to you.</li>
+    <li><b>Skills fetch them securely at run time.</b> When a command like <code>/deploy</code> runs, it pulls the secrets it needs in-memory; they're never printed or written to disk.</li>
+    <li><b>Rotating a secret?</b> Just re-enter the new value at <b>/keys</b> — the next run picks it up automatically.</li>
+  </ol>
+  <div class="note">
+    Already have secrets in a repo's <code>.env</code> files? <code>/quetrex-init</code> can <b>import them into the vault for you</b> (with confirmation) when you connect the repo — see Part 2.
+  </div>
+
+  <h2>Part 4 &middot; The commands</h2>
   <table>
     <tr><th>Command</th><th>What it does</th></tr>
     <tr><td><code>/quetrex-login</code></td><td>Authenticates your machine via your browser. One-time (until it expires). Run it again if a command says you're not logged in.</td></tr>
     <tr><td><code>/quetrex-init</code></td><td>Connects a repository to its Quetrex project. Safe on existing repos — never overwrites your prior setup.</td></tr>
     <tr><td><code>/new-task</code></td><td>Creates a task in the <b>Backlog</b> — title, description, assignee, and priority.</td></tr>
+    <tr><td><code>/refine-task&nbsp;SMA-1</code></td><td>Sharpens a vague task into a clear spec (with acceptance criteria) before building — an interactive dialog grounded in the code. Run it before <code>/que-task</code>; it doesn't start work.</td></tr>
     <tr><td><code>/que-task&nbsp;SMA-1</code></td><td>Queues a task and starts the work. An agent reviews the task and the code, asks anything unclear, then builds it (see Part 5). The board moves it to <b>In&nbsp;Progress</b>, then <b>PR&nbsp;Ready</b>.</td></tr>
     <tr><td><code>/rework&nbsp;SMA-1</code></td><td>For a task that needs another pass. It explains what went wrong, talks the fix through with you, notes the plan on the task, and re-runs the work.</td></tr>
     <tr><td><code>/task-complete&nbsp;SMA-1</code></td><td>Marks a deployed task as <b>Complete</b> after you've confirmed it.</td></tr>
@@ -101,10 +118,10 @@
     <tr><td><code>/deploy</code></td><td>Deploys the project.</td></tr>
   </table>
 
-  <h2>Part 4 &middot; The board &amp; task lifecycle</h2>
+  <h2>Part 5 &middot; The board &amp; task lifecycle</h2>
   <p>The board is an <b>observability layer</b> — you watch progress here; you act through the commands. A task moves through these columns:</p>
   <table class="cols">
-    <tr><td>Backlog</td><td>Created with <code>/new-task</code>, not started.</td></tr>
+    <tr><td>Backlog</td><td>Created with <code>/new-task</code>, not started. Optionally sharpen it first with <code>/refine-task</code>.</td></tr>
     <tr><td>Queued</td><td>Picked up with <code>/que-task</code>; about to be worked.</td></tr>
     <tr><td>In Progress</td><td>An agent workflow is actively building it.</td></tr>
     <tr><td>PR Ready</td><td>Work done; a pull request is open for review.</td></tr>
@@ -114,8 +131,8 @@
     <tr><td>Complete</td><td>Confirmed done with <code>/task-complete</code>.</td></tr>
   </table>
 
-  <h2>Part 5 &middot; How your work gets built</h2>
-  <p>When you run <code>/que-task</code>, Quetrex runs a strict, automated development pipeline so work is consistent and reviewed:</p>
+  <h2>Part 6 &middot; How your work gets built</h2>
+  <p>Before queuing a vague task, it's worth running <code>/refine-task&nbsp;SMA-1</code> first: it opens an interactive dialog — grounded in your actual code — that turns a fuzzy idea into a clear spec with <b>acceptance criteria</b>, then writes the sharpened description back to the board. It doesn't start any work; it just makes the build that follows far more accurate. When you run <code>/que-task</code>, Quetrex runs a strict, automated development pipeline so work is consistent and reviewed:</p>
   <div class="card">
     <div class="flow">
       <span>Branch&nbsp;+&nbsp;Worktree</span><b class="arr">&rarr;</b>
@@ -128,7 +145,7 @@
   </div>
   <p>It creates an <b>isolated branch and worktree</b>, then runs a <b>workflow</b> of specialized agents: the <b>architect</b> plans, one or more <b>developers</b> implement with tests, <b>QA</b> proves everything passes, the <b>reviewer</b> checks logic and security, and a <b>pull request</b> is opened for you. It all runs in the <b>background</b>, so your terminal is free to start the next task. You watch progress on the board.</p>
 
-  <h2>Part 6 &middot; Watching a build with <code>/workflows</code></h2>
+  <h2>Part 7 &middot; Watching a build with <code>/workflows</code></h2>
   <p>When you run <code>/que-task</code>, the pipeline above runs as a <b>background workflow</b> — that's why your terminal stays free. To watch it live, type <code>/workflows</code>.</p>
   <p>It opens a <b>live, auto-updating view</b> of every build in progress. Each one shows a progress tree:</p>
   <table class="cols">
@@ -138,7 +155,7 @@
   </table>
   <p>So at a glance you know <b>exactly where your task is</b> — which phase is running, what's finished, what's left — and you'd spot a stall or failure immediately. It's <b>read-only</b> (you watch; the commands drive), and you don't need to keep it open — you're notified when a build finishes — but it's your window into work in flight.</p>
 
-  <h2>Part 7 &middot; Roles &amp; access</h2>
+  <h2>Part 8 &middot; Roles &amp; access</h2>
   <p>You only see and work on the projects you've been granted — everything else is invisible to you. Access is enforced on the server, so it's a hard boundary, not just hidden in the interface.</p>
   <table class="cols">
     <tr><td>Super&nbsp;Admin</td><td>Full access to all projects; manages admins and all access.</td></tr>
@@ -149,7 +166,7 @@
     If you try to act on a project you don't have access to, Quetrex stops you and tells you to <b>contact your administrator</b>. Getting added to a project takes effect immediately — nothing to reinstall.
   </div>
 
-  <h2>Part 8 &middot; For administrators</h2>
+  <h2>Part 9 &middot; For administrators</h2>
   <p>From the dashboard you manage people and access — no terminal needed:</p>
   <table class="cols">
     <tr><td>Invite someone</td><td>Click <b>Invite</b>, enter their email, choose their role, and pick which projects they get. They receive an email to set their password.</td></tr>
