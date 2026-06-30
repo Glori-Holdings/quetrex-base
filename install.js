@@ -81,13 +81,13 @@ function ensureSecretsEnv() {
       '# Add to your shell profile (~/.zshrc or ~/.bashrc):',
       '#   source ~/.claude/secrets.env',
       '#',
-      '# Managed by /secrets and /quetrex-setup',
+      '# Add your API keys below as KEY=value lines.',
       '',
     ].join('\n'));
     try {
       fs.chmodSync(secretsPath, 0o600);
     } catch {}
-    console.log('  created: ~/.claude/secrets.env (run /quetrex-setup to configure keys)');
+    console.log('  created: ~/.claude/secrets.env (add your API keys, then source it from your shell profile)');
   }
 }
 

@@ -301,3 +301,107 @@ qx_is_unblocked() {
     process.exit(0);
   ' "$task"
 }
+
+# ---------------------------------------------------------------------------
+# ENV-CRED AUTO-DETECT helpers (used by /quetrex-init and /deploy).
+#
+# These let a command discover credentials already on disk in the repo's local
+# env files and import them straight into the project vault WITHOUT ever echoing
+# a secret value. The single security invariant: a secret VALUE is only ever
+# read inside node, straight from the file, and handed to qapi as a JSON body —
+# it never appears on this file's argv (as a value), on stdout, or in any log.
+# The only value-derived output is a masked last-4 tail. Token-safe: inherits
+# qapi's bearer protection. Consumed by command callers, not here — SC2329.
+# ---------------------------------------------------------------------------
+
+# qx_env_scan DIR
+#   Scan DIR for .env, .env.local and .env.* (skipping *.example / *.sample) and
+#   print one tab-separated line per relevant credential discovered:
+#       <FILE>\t<RAWNAME>\t<CANON>\t****<last4>
+#   FILE = absolute env-file path, RAWNAME = the key as written in the file,
+#   CANON = the vault's canonical name (e.g. FLY_TOKEN -> FLY_API_TOKEN), and a
+#   MASKED tail (last 4 chars) only. The full secret VALUE is NEVER printed. All
+#   parsing happens in node; the file is never cat/echo'd. On a variant/canonical
+#   collision (e.g. both FLY_TOKEN and FLY_API_TOKEN present) the canonical wins
+#   and the variant is skipped. Later definitions win (mirrors dotenv).
+# shellcheck disable=SC2329,SC2016
+qx_env_scan() {
+  node -e '
+    const fs=require("fs"), path=require("path");
+    const dir=process.argv[1];
+    const NORM={FLY_TOKEN:"FLY_API_TOKEN"};
+    const isRelevant=(k)=>
+      /(_API_KEY|_SECRET|_TOKEN|_KEY|_PASSWORD|_DSN)$/.test(k)
+      || /^(DATABASE_URL|FLY_API_TOKEN|FLY_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY)$/.test(k)
+      || /^(STRIPE_|NEON_)/.test(k);
+    let files=[];
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (f!==".env" && !f.startsWith(".env.")) continue;
+        if (/\.(example|sample)$/i.test(f)) continue;
+        files.push(path.join(dir,f));
+      }
+    } catch { process.exit(0); }
+    files.sort();
+    const found=new Map();   // CANON -> {file, raw, value}
+    for (const file of files) {
+      let txt; try { txt=fs.readFileSync(file,"utf8"); } catch { continue; }
+      for (let line of txt.split(/\r?\n/)) {
+        line=line.replace(/^\s*export\s+/,"").trim();
+        if (!line || line.startsWith("#")) continue;
+        const eq=line.indexOf("="); if (eq<0) continue;
+        const k=line.slice(0,eq).trim();
+        let v=line.slice(eq+1).trim();
+        if ((v.startsWith("\"")&&v.endsWith("\"")) || (v.startsWith("'\''")&&v.endsWith("'\''"))) v=v.slice(1,-1);
+        if (!k || !v || !isRelevant(k)) continue;
+        const canon=NORM[k]||k;
+        const newIsVariant=(NORM[k]!==undefined);
+        const existing=found.get(canon);
+        if (existing) {
+          const existingIsVariant=(existing.raw!==canon);
+          if (newIsVariant && !existingIsVariant) continue;   // canonical beats variant
+        }
+        found.set(canon,{file,raw:k,value:v});
+      }
+    }
+    for (const [canon,info] of found) {
+      const v=info.value;
+      const last4=v.length>=4 ? v.slice(-4) : v;
+      process.stdout.write(`${info.file}\t${info.raw}\t${canon}\t****${last4}\n`);
+    }
+  ' "$1"
+}
+
+# qx_secret_put_from_env ENVFILE RAWNAME CANON
+#   Read RAWNAME's value straight from ENVFILE inside node, build the JSON body
+#   {name:CANON, value:<value>} with JSON.stringify, and PUT it to the project
+#   vault via qapi. The secret VALUE is sourced inside node from the file and is
+#   never passed as a shell-visible argv value, never echoed, never logged — only
+#   the non-secret ENVFILE / RAWNAME / CANON are passed in. Requires
+#   QX_PROJECT_CODE (resolve_project). Returns non-zero on failure.
+# shellcheck disable=SC2329
+qx_secret_put_from_env() {
+  local body rc
+  body="$(node -e '
+    const fs=require("fs");
+    const [file,raw,canon]=process.argv.slice(1);
+    let txt; try { txt=fs.readFileSync(file,"utf8"); } catch { process.exit(1); }
+    let val=null;
+    for (let line of txt.split(/\r?\n/)) {
+      line=line.replace(/^\s*export\s+/,"").trim();
+      if (!line || line.startsWith("#")) continue;
+      const eq=line.indexOf("="); if (eq<0) continue;
+      const k=line.slice(0,eq).trim();
+      if (k!==raw) continue;
+      let v=line.slice(eq+1).trim();
+      if ((v.startsWith("\"")&&v.endsWith("\"")) || (v.startsWith("'\''")&&v.endsWith("'\''"))) v=v.slice(1,-1);
+      val=v;   // keep scanning so the LAST definition wins
+    }
+    if (val==null) { process.exit(1); }
+    process.stdout.write(JSON.stringify({name:canon,value:val}));
+  ' "$1" "$2" "$3")" || return 1
+  qapi PUT "/api/projects/$QX_PROJECT_CODE/secrets" "$body" >/dev/null
+  rc=$?
+  unset body
+  return "$rc"
+}

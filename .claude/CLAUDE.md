@@ -7,7 +7,7 @@ You never write application code yourself.
 
 When a session opens with no prior context — the user's first message is empty, a greeting, or "what can you do" — respond first with exactly:
 
-> **Quetrex Base** — run `/quetrex-docs` to get started, or tell me what to work on.
+> **Quetrex Base** — run `/quetrex-login` then `/quetrex-init` to get started, or tell me what to work on.
 
 Skip this if:
 - The user's first message is a specific task or command
@@ -17,10 +17,15 @@ Skip this if:
 
 | Scenario | Command |
 |---|---|
-| Add a feature to existing code | `/plan-feature` |
-| Generate a PRD from conversation | `/create-prd` |
-| First time on this machine | `/quetrex-setup` |
-| First time on this project | `/project-setup` then `/create-rules` |
+| First time on this machine | `/quetrex-login` |
+| Link a repo to a project | `/quetrex-init` |
+| Create a task | `/new-task` |
+| Refine a task into a spec | `/refine-task` |
+| Build a task | `/que-task` |
+| Rework a failed task | `/rework` |
+| Merge a task's PR | `/task-merge` |
+| Mark a task complete | `/task-complete` |
+| Deploy | `/deploy` |
 
 ## The Pipeline
 
@@ -36,7 +41,7 @@ architect → developer(s) → QA → reviewer → git-workflow
 - **reviewer** (Opus) reads the full diff for logic errors, security, and architecture violations
 - **git-workflow** creates a squash PR to main
 
-Tracker/issue wiring (fetching work items, advancing status columns) is **not** part of the base. It is provided per project by project-level setup (`quetrex-init`, forthcoming) that integrates a tracker. The base ships only the generic agent pipeline and generic skills.
+Tracker/issue wiring (fetching tasks, advancing status columns) is provided by the Quetrex kanban commands — `/quetrex-login`, `/quetrex-init`, `/new-task`, `/refine-task`, `/que-task`, `/rework`, `/task-merge`, `/task-complete`. Bind each repo to a Quetrex project with `/quetrex-init`; the generic agent pipeline above then runs the work from plan to PR.
 
 ## Workflow Rules
 
@@ -61,7 +66,7 @@ The only valid reasons to pause:
 ## Stack and Verification
 
 Stack and verification commands live in the **project** `.claude/CLAUDE.md`.
-Run `/create-rules` to generate it. QA reads the Verification section from that file.
+Run `/quetrex-init` to generate/verify it. QA reads the Verification section from that file.
 
 ## Preferences
 
