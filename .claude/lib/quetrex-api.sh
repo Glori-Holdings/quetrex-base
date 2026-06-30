@@ -206,3 +206,98 @@ qapi() {
   rm -f "$bodyf"
   return "$rc"
 }
+
+# ---------------------------------------------------------------------------
+# CONVENIENCE WRAPPERS over qapi (added for /que-task + /rework).
+#
+# Each helper builds its JSON body with node/JSON.stringify (never echo, never
+# hand-built strings) and routes through qapi, so every one INHERITS qapi's
+# token safety: the bearer is never echoed, logged, or placed on argv. Call
+# resolve_auth (and, where a helper uses QX_PROJECT_CODE, resolve_project)
+# first. These are consumed by command callers, not within this file — hence the
+# per-function SC2329 disables marking them as "never invoked here".
+# ---------------------------------------------------------------------------
+
+# qx_task_status TASK_ID STATUS  -> PATCH /api/tasks/$ID {status}
+# shellcheck disable=SC2329
+qx_task_status() {
+  local body
+  body="$(node -e 'process.stdout.write(JSON.stringify({status:process.argv[1]}))' "$2")" || return 1
+  qapi PATCH "/api/tasks/$1" "$body" >/dev/null
+}
+
+# qx_task_ainote TASK_ID NOTE  -> PATCH /api/tasks/$ID {aiNotes}  (AI-notes are PATCH)
+# shellcheck disable=SC2329
+qx_task_ainote() {
+  local body
+  body="$(node -e 'process.stdout.write(JSON.stringify({aiNotes:process.argv[1]}))' "$2")" || return 1
+  qapi PATCH "/api/tasks/$1" "$body" >/dev/null
+}
+
+# qx_task_comment TASK_ID BODY  -> POST /api/tasks/$ID/comments {body}
+# shellcheck disable=SC2329
+qx_task_comment() {
+  local body
+  body="$(node -e 'process.stdout.write(JSON.stringify({body:process.argv[1]}))' "$2")" || return 1
+  qapi POST "/api/tasks/$1/comments" "$body" >/dev/null
+}
+
+# qx_task_type TASK_ID TYPE  -> PATCH /api/tasks/$ID {type}  (classification label)
+# shellcheck disable=SC2329
+qx_task_type() {
+  local body
+  body="$(node -e 'process.stdout.write(JSON.stringify({type:process.argv[1]}))' "$2")" || return 1
+  qapi PATCH "/api/tasks/$1" "$body" >/dev/null
+}
+
+# qx_create_child EPIC_ID TITLE DESC
+#   POST /api/tasks {parentTaskId, projectCode, title, description}. Prints the
+#   new child's human identifier (CODE-N.C) on stdout; returns 1 on failure.
+#   Requires QX_PROJECT_CODE (resolve_project). EPIC_ID is the parent's human id.
+# shellcheck disable=SC2329,SC2016
+qx_create_child() {
+  local body resp
+  body="$(node -e '
+    const [parentTaskId, projectCode, title, description] = process.argv.slice(1);
+    process.stdout.write(JSON.stringify({ parentTaskId, projectCode, title, description }));
+  ' "$1" "$QX_PROJECT_CODE" "$2" "$3")" || return 1
+  resp="$(qapi POST /api/tasks "$body")" || return 1
+  node -e '
+    let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(1); }
+    if (o.identifier) { process.stdout.write(String(o.identifier)); process.exit(0); }
+    if (o.code && o.number != null) { process.stdout.write(`${o.code}-${o.number}`); process.exit(0); }
+    process.exit(1);
+  ' "$resp"
+}
+
+# qx_add_dep TASK_ID DEPENDS_ON_ID  -> POST /api/tasks/$ID/dependencies {dependsOnTaskId}
+#   The server is cycle-safe, but the caller still DAG-validates the proposed
+#   graph before any write (see /que-task).
+# shellcheck disable=SC2329
+qx_add_dep() {
+  local body
+  body="$(node -e 'process.stdout.write(JSON.stringify({dependsOnTaskId:process.argv[1]}))' "$2")" || return 1
+  qapi POST "/api/tasks/$1/dependencies" "$body" >/dev/null
+}
+
+# qx_is_unblocked TASK_ID  -> exit 0 if ready to start, 1 if still blocked.
+#   Readiness predicate for the DAG dispatch. Prefers the server's isBlocked
+#   flag on the task record; falls back to checking that every dependency's
+#   status is in DONE_FOR_UNBLOCKING = {merged, deployed, complete}. Re-poll
+#   after each child auto-merge to refill the ready set.
+# shellcheck disable=SC2329
+qx_is_unblocked() {
+  local task
+  task="$(qapi GET "/api/tasks/$1")" || return 1
+  node -e '
+    let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(1); }
+    const DONE = new Set(["merged", "deployed", "complete"]);
+    if (typeof o.isBlocked === "boolean") { process.exit(o.isBlocked ? 1 : 0); }
+    const deps = Array.isArray(o.dependencies) ? o.dependencies : [];
+    for (const d of deps) {
+      const st = (d && (d.status || (d.task && d.task.status))) || "";
+      if (!DONE.has(st)) { process.exit(1); }
+    }
+    process.exit(0);
+  ' "$task"
+}
