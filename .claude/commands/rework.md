@@ -134,9 +134,12 @@ Determine the base branch from `parentTaskId`:
 - **Standalone task** (`parentTaskId` empty) → `BASE_BRANCH=main`; the PR targets `main`. The human
   merges later with `/task-merge $TASK_ID`.
 - **Epic child** (`parentTaskId` set, e.g. `SMA-1.2`) → `BASE_BRANCH=feature/<EPIC-ID>` (the
-  per-epic integration branch); the PR targets the integration branch. This **re-enters the epic
-  DAG** — on pass it auto-merges into the integration branch and unblocks dependents, exactly like a
-  first run.
+  per-epic integration branch); the PR targets the integration branch. On pass it auto-merges into
+  the integration branch and **unblocks** its dependents. Unblocking only flips their readiness — it
+  does **not** dispatch them; this command rebuilds the **one** child only. To actually drain the
+  now-eligible dependents, the user **re-runs `/que-task <EPIC-ID>`**, which resumes the DAG
+  dispatcher over the existing children (the epic stays `in_progress`). Surface this next step in the
+  report.
 
 Then:
 
@@ -158,10 +161,11 @@ Dispatch the workflow in the **background**. The engine drives `queued/in_progre
 
 ## Step 5 — Report (do not block the terminal)
 
-Report what was launched: the workflow title, the base branch (and, for an epic child, that it
-re-entered the epic DAG and will auto-merge into `feature/<EPIC-ID>` on pass), and that it is
-building toward `pr_ready`. Point the user to `/workflows` and the board for live progress. Do
-**not** parse workflow output inline or block the terminal.
+Report what was launched: the workflow title, the base branch, and that it is building toward
+`pr_ready`. For an **epic child**, also state that on pass it auto-merges into `feature/<EPIC-ID>`
+and unblocks its dependents, and that the user should then **re-run `/que-task <EPIC-ID>`** to
+resume the dispatcher and drain those dependents. Point the user to `/workflows` and the board for
+live progress. Do **not** parse workflow output inline or block the terminal.
 
 ---
 

@@ -68,8 +68,15 @@ node -e '
 
 - Actionable starting statuses: `backlog`, `queued`. A `needs_clarity` task should go through
   `/rework` instead — say so and stop.
-- If the task is already `in_progress` / `pr_ready` / `merged` / `deployed` / `complete`, say so
-  and **stop** (avoid duplicate work).
+- If the task is already `pr_ready` / `merged` / `deployed` / `complete`, say so and **stop**
+  (avoid duplicate work).
+- If the task is already `in_progress`:
+  - **a single unit** (no children) → say so and **stop** (its pipeline is already running).
+  - **an epic that already has children** (its persisted `type` is `project`/epic and `$TASK`
+    exposes child tasks) → this is a **RESUME**, not duplicate work. Skip decomposition +
+    approval (those are one-time, already done) and go straight to **DAG dispatch** (Step 3 B.4)
+    over the existing children. This is the supported path for draining dependents that a
+    `/rework` of a failed child has since unblocked.
 - If the task is an **epic child** (`parentTaskId` is set), say: "this is a child of
   `<EPIC-ID>`; run `/que-task` on the epic, or `/rework` on the child" and **stop**. `/que-task`
   operates on standalone tasks and epics, not lone children.
@@ -108,6 +115,12 @@ The PR targets `main`. Dispatch the workflow in the **background**. The engine d
 with `/task-merge $TASK_ID`. Then go to **Step 4**.
 
 ### B) PROJECT / EPIC → decompose
+
+**0. Resume short-circuit.** If you arrived here via the Step 1 **resume** path (the epic already
+has children), do **not** re-decompose and do **not** re-ask for approval — those are one-time.
+The integration branch `feature/<EPIC-ID>` already exists. Jump straight to **B.4 (DAG dispatch)**
+over the existing children. A resume is idempotent: it skips children already `in_progress` /
+`merged` / `needs_clarity` and only launches newly-eligible ones.
 
 **1. Decompose — ONE LEVEL ONLY.** Plan the epic into a set of **child units** — no
 grandchildren (this keeps child identifiers `CODE-N.C` collision-free) — with a **dependency
@@ -179,8 +192,9 @@ Loop:
 
   Prefer the server's `isBlocked` flag; the helper falls back to checking dependency statuses.
 
-- **Launch up to the cap.** For each ready child, up to the concurrency cap (≈3–5 running at
-  once), launch **its own named Workflow-tool run** titled `"<EPIC-ID> · <unit name>"`, running
+- **Launch up to the cap.** Count children currently `in_progress` (in-flight) and launch ready
+  children only up to `cap − in_flight` (cap ≈ 3–5 running at once). For each, launch **its own
+  named Workflow-tool run** titled `"<EPIC-ID> · <unit name>"`, running
   THE DEV PIPELINE (`.claude/lib/dev-pipeline.md`) with:
   - `TASK_ID` = the child id,
   - `TASK_TITLE` = the child title,
@@ -200,29 +214,52 @@ Loop:
   `needs_clarity` on exhaustion. Its **independent siblings keep running**; its **dependents
   WAIT** (they stay blocked — never auto-`needs_clarity` a dependent by association).
 
-- **Repeat** the dispatch tick until every child is `merged` or `needs_clarity` **and** the ready
-  set is empty.
+- **Repeat** the dispatch tick — re-poll the kanban, refill the ready set, launch newly-eligible
+  children — until the DAG reaches a **fixpoint**: **no child is in-flight (`in_progress`)** AND
+  **the ready set is empty**. This is the bounded terminus and it **always** terminates: each tick
+  a child either advances toward `merged` / `needs_clarity` or there is simply nothing left to
+  launch. **Do not spin** on children that can never become ready — a child whose dependency is
+  `needs_clarity` is **permanently blocked until the human reworks that dependency**, so it is part
+  of the fixpoint, not a reason to keep polling. (This dispatcher polls **in this session** like
+  `/runner`; the heavy work is the background child workflows, so the session stays light.)
 
-**Epic terminus.** When **all children are `merged`**, the epic is ready for **ONE human merge**
-(integration branch → `main`) via `/task-merge <EPIC-ID>`. Leave the epic `in_progress` until
-its integration branch is merged. If any child is `needs_clarity`, report exactly which — the
-user runs `/rework` on it, which re-enters the same DAG off the integration branch (on pass it
-auto-merges and unblocks dependents just like a first run).
+**Epic terminus (fixpoint reached).** Partition the children:
+
+- **All children `merged`** → the epic is ready for **ONE human merge**. Open the single
+  **integration → main PR** (`feature/<EPIC-ID>` → `main`) now — via the `git-workflow` agent or
+  `gh pr create --base main --head feature/<EPIC-ID>` — so the human merge gate has a PR to act on.
+  Then point the user at **`/task-merge <EPIC-ID>`**, which reviews + squash-merges that PR and
+  sets the epic `merged`. Leave the epic `in_progress` until that PR merges. (Every child branch was
+  already deleted on its auto-merge, so `feature/<EPIC-ID>` is the only branch carrying the epic id
+  — no `/task-merge` ambiguity.)
+
+- **Any child `needs_clarity` (or blocked-waiting on one)** → do **NOT** open the integration PR.
+  Report exactly which children **failed** (`needs_clarity`) and which are **blocked-waiting** on a
+  failed dependency. The user runs **`/rework <child>`** on each failure; on pass it auto-merges
+  into the integration branch and **unblocks** its dependents. Then re-running **`/que-task
+  <EPIC-ID>`** **resumes** the dispatcher (Step 1 resume path) and drains the now-eligible
+  dependents. Only when every child is `merged` is the integration → main PR opened. The epic stays
+  `in_progress` throughout.
 
 ---
 
-## Step 4 — Report (do not block the terminal)
+## Step 4 — Report
 
-Everything runs in the **background**. Report what was launched:
+The heavy work — every unit's DEV PIPELINE — runs in **background** Workflow-tool runs; you never
+parse their stdout. Report:
 
-- **Single unit:** the one workflow title and that it is building toward `pr_ready`; remind the
-  user to `/task-merge $TASK_ID` when the PR is green + approved.
-- **Epic:** the integration branch, the N children + M dependency edges, **which children
-  started** vs which are **waiting** (and on what), and that the finish line is one human merge
-  via `/task-merge <EPIC-ID>`.
+- **Single unit:** fire-and-forget — the one workflow title and that it is building toward
+  `pr_ready`; remind the user to `/task-merge $TASK_ID` when the PR is green + approved. Then exit;
+  the terminal stays free.
+- **Epic:** the **DAG dispatcher itself runs in this session** (it polls the kanban between ticks,
+  like `/runner`) until the fixpoint in Step 3 B.4. While it runs, report the integration branch,
+  the N children + M dependency edges, and which children **started** vs **waiting** (and on what).
+  At the fixpoint, report the terminus partition (all `merged` → integration PR opened, hand off to
+  `/task-merge <EPIC-ID>`; else which children are `needs_clarity` / blocked-waiting and the
+  `/rework <child>` → `/que-task <EPIC-ID>` resume path), then exit.
 
 Point the user to `/workflows` and the board for live progress. Do **not** parse workflow output
-inline or block the terminal.
+inline.
 
 ---
 
