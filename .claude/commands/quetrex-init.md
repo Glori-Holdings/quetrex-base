@@ -1,5 +1,5 @@
 ---
-description: Link this repo to a Quetrex project (writes ./.quetrex/project.json) or create one, then non-destructively adopt the repo (clean stale tracker refs, point to /keys, open a PR). Usage: /quetrex-init [project name]
+description: Link this repo to a Quetrex project (writes ./.quetrex/project.json) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, offer to import local env creds into the vault, open a PR). Usage: /quetrex-init [project name]
 argument-hint: "[project name — only used when the repo is not yet linked]"
 ---
 
@@ -163,6 +163,91 @@ what changed.
 
 ---
 
+## 4b. Ensure project Verification rules
+
+The QA agent reads the **project** `.claude/CLAUDE.md` `## Verification` section to know
+which commands to run. Guarantee that section exists so QA always has it. This is the
+fold of the former `/create-rules` — minimal, **non-destructive**, append-only, and
+strictly pinned to `$REPO_ROOT`.
+
+**Target file (resolve strictly, never the global file):**
+
+```bash
+PROJ_RULES="$REPO_ROOT/.claude/CLAUDE.md"
+```
+
+Use this exact `$REPO_ROOT`-anchored path — never a bare/CWD-relative `.claude/CLAUDE.md`
+and **never** the user's global `~/.claude/CLAUDE.md` (same hard-pin guardrail as step 4).
+
+**1. Idempotent check.** If `$PROJ_RULES` already contains a `## Verification` heading,
+leave it untouched and report *"Verification rules already present."* Detect with `node`
+(do not `cat`):
+
+```bash
+if [ -f "$PROJ_RULES" ] && node -e '
+  const fs=require("fs");
+  process.exit(/^##\s+Verification\s*$/m.test(fs.readFileSync(process.argv[1],"utf8"))?0:1);
+' "$PROJ_RULES"; then
+  echo "Verification rules already present."
+  VERIF_CHANGED=0
+else
+  VERIF_CHANGED=1   # absent — detect, confirm, append below
+fi
+```
+
+**2. Auto-detect candidate commands** (only when `VERIF_CHANGED=1`). Read repo signals
+with the **Read tool** or `node` (never `cat`) and map to a verification list — order is
+lint → typecheck → test → build:
+
+- **`package.json`** → inspect its `scripts`: map `lint`/`test`/`build` and
+  `typecheck`|`type-check` to `npm run <script>`. If a Biome signal is present
+  (`biome` in deps/devDeps or a `biome.json`/`biome.jsonc`), prefer `npx biome check .`
+  for the lint step.
+- else **`pyproject.toml`** / **`requirements.txt`** → `ruff check .`, `mypy .`, `pytest`.
+- else **`Cargo.toml`** → `cargo fmt --check`, `cargo clippy -- -D warnings`,
+  `cargo test`, `cargo build`.
+- else **`go.mod`** → `golangci-lint run`, `go vet ./...`, `go test ./...`,
+  `go build ./...`.
+- else **`Gemfile`** (Rails) → `bundle exec rubocop`, `bundle exec rspec`.
+- else → **ask the user** for the exact verification commands; do not assume.
+
+Only include steps that actually exist (e.g. skip `build` if there is no `build` script).
+
+**3. Confirm with the user before writing.** Present the detected list:
+*"Detected these verification commands — correct? add/remove any?"* Apply their edits.
+Do not write on a genuine gap without confirmation.
+
+**4. Append-only write** (never truncate, never reorder existing content). Use a `node`
+writer that reads the existing file (if any), bails if a `## Verification` heading is
+already present, and otherwise appends the confirmed block. Pass the confirmed commands
+as argv (one per line, in order):
+
+```bash
+# CONFIRMED_STEPS = the user-confirmed commands, one per line, in run order.
+node -e '
+  const fs=require("fs");
+  const file=process.argv[1];
+  const steps=process.argv.slice(2).filter(Boolean);
+  let cur="";
+  try { cur=fs.readFileSync(file,"utf8"); } catch {}
+  if (/^##\s+Verification\s*$/m.test(cur)) process.exit(0);   // never duplicate
+  const fresh=(cur.trim()==="");
+  const lines=[];
+  if (fresh) lines.push(`# Project: ${process.argv[1].split("/").slice(-3,-2)[0]||"this project"}`,"");
+  lines.push("## Verification","Run in this order — all must pass before any PR:");
+  steps.forEach((s,i)=>lines.push(`${i+1}. \`${s}\``));
+  const sep = (cur && !cur.endsWith("\n")) ? "\n\n" : (cur ? "\n" : "");
+  fs.mkdirSync(require("path").dirname(file),{recursive:true});
+  fs.writeFileSync(file, cur + sep + lines.join("\n") + "\n");
+' "$PROJ_RULES" "${CONFIRMED_STEPS[@]}"
+echo "Wrote ## Verification to $PROJ_RULES"
+```
+
+Same `$REPO_ROOT` pin and "never the global file" rule as step 4. Record whether 4b
+created or appended so step 6 stages the file and step 7 reports it.
+
+---
+
 ## 5. Point to /keys (never prompt for secrets)
 
 Print exactly:
@@ -170,6 +255,59 @@ Print exactly:
 > Set this project's deploy secrets at https://dash.quetrex.com/keys — do not paste keys here.
 
 Do not prompt for, read, or store any key values in this command.
+
+---
+
+## 5b. Import local env creds into the vault (offer, never echo a value)
+
+Before sending the user off to paste keys by hand, see what's already on disk in this
+repo's local env files and offer to import them straight into the project's vault. This
+turns the bare "set them in the dashboard" pointer into a one-keystroke import.
+
+**SECRET SAFETY (the invariant of this step):** the scan and import NEVER print a secret
+value or the bearer token. The only value-derived output is a masked last-4 tail. Each
+value flows **file → `node` → `qapi` → vault** and is never echoed, never on argv as a
+value, never written to disk or logs. No `set -x`, no `curl -v`. `unset` after use.
+
+Requires the project to be linked: ensure `QX_PROJECT_CODE` is resolved (it is, from this
+command's flow once linked — otherwise `resolve_project`).
+
+**1. Scan.** Use the shared `qx_env_scan` helper, which reads `$REPO_ROOT/.env`,
+`.env.local`, and `.env.*` (skipping `*.example`/`*.sample`), parses them in `node`
+(handles `KEY=value`, `export KEY=…`, quotes, `#` comments), filters to relevant
+credential names, normalizes variants (notably `FLY_TOKEN` → `FLY_API_TOKEN`), and emits
+`FILE<TAB>RAWNAME<TAB>CANON<TAB>****<last4>` — masked tail only, never the value:
+
+```bash
+source ~/.claude/lib/quetrex-api.sh   # already sourced earlier; harmless to re-source
+SCAN="$(qx_env_scan "$REPO_ROOT")"
+if [ -z "$SCAN" ]; then
+  echo "No local env credentials found to import."
+fi
+```
+
+**2. Show + ask.** If `SCAN` is non-empty, present the discovered entries by **CANON name
++ masked last-4 only** (e.g. `FLY_API_TOKEN … ****CDEF`), then ask:
+*"Import these N keys into the project's vault?"* On **no**, skip the import. On **yes**,
+import each one — read the value inside `node` straight from its file via the shared
+`qx_secret_put_from_env` helper (PUT `/api/projects/$QX_PROJECT_CODE/secrets` with
+`{name,value}`); the value is never visible to the shell:
+
+```bash
+# Iterate the scan lines; FILE/RAWNAME/CANON are non-secret, the value stays inside node.
+while IFS=$'\t' read -r ENVFILE RAWNAME CANON MASK; do
+  [ -n "$CANON" ] || continue
+  if qx_secret_put_from_env "$ENVFILE" "$RAWNAME" "$CANON"; then
+    echo "Imported $CANON ($MASK)"
+  else
+    echo "Failed to import $CANON — set it at $QX_KANBAN_URL/keys" >&2
+  fi
+done <<< "$SCAN"
+```
+
+**3. Only prompt for what's missing.** Anything not found locally stays the user's job —
+direct them to `dash.quetrex.com/keys` for those specific names only. Never re-prompt for
+a credential that was just imported.
 
 ---
 
@@ -184,7 +322,8 @@ on `main`.
 BRANCH="feature/quetrex-init-adopt"
 git -C "$REPO_ROOT" checkout -b "$BRANCH" 2>/dev/null || git -C "$REPO_ROOT" checkout "$BRANCH"
 
-# Stage only what this command added/cleaned.
+# Stage only what this command added/cleaned: the binding, any CLAUDE.md cleanups
+# (step 4), and the project Verification rules created/appended in step 4b.
 git -C "$REPO_ROOT" add .quetrex/project.json 2>/dev/null || true
 [ -f "$REPO_ROOT/CLAUDE.md" ]        && git -C "$REPO_ROOT" add CLAUDE.md 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/CLAUDE.md" ] && git -C "$REPO_ROOT" add .claude/CLAUDE.md 2>/dev/null || true
@@ -194,7 +333,8 @@ if git -C "$REPO_ROOT" diff --cached --quiet; then
 else
   git -C "$REPO_ROOT" commit -m "chore: adopt repo into Quetrex project $CODE
 
-Add .quetrex/project.json binding and clean stale tracker references." >/dev/null
+Add .quetrex/project.json binding, clean stale tracker references, and ensure
+project Verification rules." >/dev/null
 
   # Open a PR only if there is a remote AND gh is available.
   if git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1 && command -v gh >/dev/null 2>&1; then
@@ -224,7 +364,11 @@ Summarize for the user:
   already linked, newly created, or admin-blocked).
 - **Cleaned** — each `CLAUDE.md` file and the exact blocks/lines removed; or
   *"no stale tracker references found"* if nothing matched.
-- **Secrets** — the `dash.quetrex.com/keys` reminder.
+- **Verification rules** — *"added"* (with the commands written), *"already present"*, or
+  the file path that now carries the `## Verification` section.
+- **Secrets** — which local env creds were imported into the vault (by CANON name +
+  masked last-4, never values), and the `dash.quetrex.com/keys` reminder for any missing
+  ones.
 - **Delivery** — the PR URL, or the local-commit note if no remote.
 
 ---

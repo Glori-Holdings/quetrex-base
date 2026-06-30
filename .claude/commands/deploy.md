@@ -42,6 +42,7 @@ source ~/.claude/lib/quetrex-api.sh
 resolve_auth    || exit 1
 resolve_project || exit 1
 BIND="$(qx_binding_path)" || { echo "Run /quetrex-init" >&2; exit 1; }
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || dirname "$(dirname "$BIND")")"
 echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL"
 ```
 
@@ -120,6 +121,52 @@ is **not** in the configured list, say so and ask the user to pick a valid one.
 Derive the concrete Fly app name. v1 convention: base `appName`, suffixed per non-default
 environment (e.g. `${APPNAME}-staging`); `production` uses the bare `appName`. Confirm the
 resolved name with the user if unsure. Capture into `APP`.
+
+---
+
+## 5b. Offer to import local env creds into the vault (before fetching it)
+
+Before the vault is fetched, scan this repo's local env files and offer to import any
+credentials found into the project vault — so a `FLY_API_TOKEN` (or other deploy/runtime
+secret) that exists only in `.env.local` can be put into the vault and picked up by the
+fetch in step 6, instead of failing later with "set it at /keys". Running this **before**
+step 6 means freshly imported keys appear in the in-memory map.
+
+**SECRET SAFETY (same invariant as the rest of this command):** the scan and import NEVER
+print a secret value or the bearer; the only value-derived output is a masked last-4 tail.
+Each value flows **file → `node` → `qapi` → vault** — never echoed, never on argv as a
+value, never to disk/logs. No `set -x`, no `curl -v`. `unset` after use.
+
+Use the shared helpers (identical pattern to `/quetrex-init` step 5b). `qx_env_scan`
+parses `$REPO_ROOT/.env`, `.env.local`, `.env.*` (skipping `*.example`/`*.sample`) in
+`node`, filters to relevant credential names, **normalizes `FLY_TOKEN` → `FLY_API_TOKEN`**
+(the exact name step 8 looks up), and emits `FILE<TAB>RAWNAME<TAB>CANON<TAB>****<last4>`:
+
+```bash
+SCAN="$(qx_env_scan "$REPO_ROOT")"
+```
+
+If `SCAN` is non-empty, show the discovered entries by **CANON name + masked last-4 only**
+and ask: *"Import these N keys into the project's vault before deploying?"* On **yes**,
+import each with `qx_secret_put_from_env` (value read inside `node`, PUT to
+`/api/projects/$QX_PROJECT_CODE/secrets`); on **no**, skip:
+
+```bash
+if [ -n "$SCAN" ]; then
+  while IFS=$'\t' read -r ENVFILE RAWNAME CANON MASK; do
+    [ -n "$CANON" ] || continue
+    # (Ask once up front; only loop here if the user said yes.)
+    if qx_secret_put_from_env "$ENVFILE" "$RAWNAME" "$CANON"; then
+      echo "Imported $CANON ($MASK)"
+    else
+      echo "Failed to import $CANON — set it at $QX_KANBAN_URL/keys" >&2
+    fi
+  done <<< "$SCAN"
+fi
+```
+
+Only fall back to the "set it at /keys" error (step 8) if a needed key is in **neither**
+the vault nor local env. Never re-prompt for a credential just imported.
 
 ---
 
@@ -243,7 +290,7 @@ _FLY_TOK="$(printf '%s' "$SECRETS_JSON" | node -e '
 ')"
 
 if [ -z "$_FLY_TOK" ]; then
-  echo "No FLY_API_TOKEN in the project vault. Set FLY_API_TOKEN at $QX_KANBAN_URL/keys, then re-run /deploy." >&2
+  echo "No FLY_API_TOKEN in the project vault or this repo's local env files (step 5b checked .env*). Set FLY_API_TOKEN at $QX_KANBAN_URL/keys, then re-run /deploy." >&2
   unset SECRETS_JSON _FLY_TOK
   exit 1
 fi
@@ -359,6 +406,9 @@ Report which tasks advanced.
 - No `set -x`, no `curl -v`, no `fly` verbose flags that echo secrets.
 - The only thing written to disk is the **non-secret** `deploy` config (including the
   `runtimeSecrets` allowlist — names only) in `.quetrex/project.json`.
+- The step 5b env-cred import never prints a secret value or the bearer; masked last-4 is
+  the only value-derived output; values flow file→`node`→`qapi`→vault and are never on
+  argv as a value, never to disk/logs; the body var is `unset` after each import.
 
 ---
 
@@ -368,7 +418,9 @@ Report which tasks advanced.
 - Absent/empty `runtimeSecrets` → list masked vault NAMES, ask which are runtime, save the
   chosen names; if the user picks none, push nothing to the app runtime (warn, don't fail).
 - Unsupported provider → stop (v1 is Fly-only).
-- Missing `FLY_API_TOKEN` in vault → clear "set FLY_API_TOKEN at <kanban>/keys" message; stop.
+- Missing `FLY_API_TOKEN` → step 5b first offers to import it from a local `.env*`
+  (normalizing `FLY_TOKEN` → `FLY_API_TOKEN`); only if it's in neither the vault nor local
+  env do you stop with the "set FLY_API_TOKEN at <kanban>/keys" message.
 - `fly status` unreachable → stop before deploy; scrub vars.
 - Env arg not in config → ask the user to pick a valid environment.
 - Any `qapi` or resolver non-zero exit → the helper already printed the correct message.

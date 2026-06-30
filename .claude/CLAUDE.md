@@ -66,7 +66,7 @@ The only valid reasons to pause:
 ## Stack and Verification
 
 Stack and verification commands live in the **project** `.claude/CLAUDE.md`.
-Run `/create-rules` to generate it. QA reads the Verification section from that file.
+Run `/quetrex-init` to generate/verify it. QA reads the Verification section from that file.
 
 ## Preferences
 

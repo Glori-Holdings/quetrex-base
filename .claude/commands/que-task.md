@@ -149,7 +149,7 @@ node -e '
     for(const m of (adj.get(n)||[])){ indeg.set(m,indeg.get(m)-1); if(indeg.get(m)===0) q.push(m); } }
   if(seen!==nodes.size){ console.error("CYCLE — not a DAG; revise the plan"); process.exit(1); }
   console.log("DAG OK");
-' "$EDGES_JSON" || { echo "Dependency graph is not a DAG — revise before approval." >&2; }
+' "$EDGES_JSON" || { echo "Dependency graph is not a DAG — revise before approval." >&2; exit 1; }
 ```
 
 Iterate on the plan with the user if they tweak it (re-validate after each change). **Create
