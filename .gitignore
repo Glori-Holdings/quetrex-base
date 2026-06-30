@@ -5,6 +5,9 @@
 node_modules/
 *.db
 
+# Scratch plans
+.phase2-plan.md
+
 # Local secrets — never commit
 .env
 .env.*
