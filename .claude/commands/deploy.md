@@ -111,12 +111,13 @@ resolved name with the user if unsure. Capture into `APP`.
 
 ```bash
 SECRETS_JSON="$(qapi POST "/api/projects/$QX_PROJECT_CODE/secrets/export")" || exit 1
-export SECRETS_JSON
 ```
 
-`SECRETS_JSON` is a `{NAME:value}` map held only in this process. **NEVER**
-`echo`/`cat`/redirect it, never write it to disk, never print any key or value, never pass it
-through a command that would log it.
+`SECRETS_JSON` is a `{NAME:value}` map held only in this process as a **plain, NON-exported**
+shell variable. Do **NOT** `export` it — an exported var is visible to every child process via
+`ps e` / `/proc/<pid>/environ`. It is fed to `node` only over STDIN (never argv, never the
+environment). **NEVER** `echo`/`cat`/redirect it, never write it to disk, never print any key
+or value, never pass it through a command that would log it.
 
 ---
 
@@ -169,16 +170,21 @@ FLY_API_TOKEN="$_FLY_TOK" fly status --app "$APP" >/dev/null 2>&1 || {
 }
 ```
 
-**Push runtime app secrets** (the whole vault map minus `FLY_API_TOKEN`) into the Fly app via
-STDIN so values never hit argv or logs. node emits `NAME=value` lines straight into the pipe:
+**Push runtime app secrets** into the Fly app via STDIN so values never hit argv or logs. The
+in-memory map is fed to node over STDIN (not the environment); node emits `NAME=value` lines
+straight into the `fly` pipe:
 
 ```bash
-node -e '
-  const s=JSON.parse(process.env.SECRETS_JSON);
-  for(const [k,v] of Object.entries(s)){
-    if(k==="FLY_API_TOKEN") continue;
-    process.stdout.write(`${k}=${v}\n`);
-  }
+printf '%s' "$SECRETS_JSON" | node -e '
+  let d="";
+  process.stdin.on("data", c => { d += c; });
+  process.stdin.on("end", () => {
+    let s; try { s = JSON.parse(d); } catch { process.exit(1); }
+    for (const [k, v] of Object.entries(s)) {
+      if (k === "FLY_API_TOKEN") continue;
+      process.stdout.write(`${k}=${v}\n`);
+    }
+  });
 ' | FLY_API_TOKEN="$_FLY_TOK" fly secrets import --app "$APP" --stage
 ```
 
