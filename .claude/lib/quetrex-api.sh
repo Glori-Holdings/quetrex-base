@@ -94,6 +94,25 @@ resolve_auth() {
   return 0
 }
 
+# qx_binding_path
+#   Print the absolute path of the repo's .quetrex/project.json by walking up from
+#   $PWD — the same walk resolve_project uses. Useful for skills that need to READ
+#   or WRITE non-secret binding fields (e.g. /deploy's deploy config). Prints the
+#   path on stdout and returns 0 if found; prints nothing and returns 1 on miss.
+#   Never reads or emits any secret — the binding holds only projectCode/kanbanUrl
+#   (and non-secret deploy config). Token-safe: touches no auth state.
+qx_binding_path() {
+  local dir="$PWD"
+  while [ "$dir" != "/" ]; do
+    if [ -f "$dir/.quetrex/project.json" ]; then
+      printf '%s\n' "$dir/.quetrex/project.json"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
 # resolve_project
 #   Walk up from $PWD to find .quetrex/project.json. Sets QX_PROJECT_CODE.
 #   Keeps auth.json's kanbanUrl as the source of truth, falling back to the

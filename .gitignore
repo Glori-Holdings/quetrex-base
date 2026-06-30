@@ -8,6 +8,7 @@ node_modules/
 # Scratch plans
 .phase2-plan.md
 .login-init-plan.md
+.simple-skills-plan.md
 
 # Local secrets — never commit
 .env
