@@ -85,7 +85,7 @@ node -e '
 - **Classify** the task as **Project / Feature / Bug** and persist the label:
 
 ```bash
-qx_task_type "$TASK_ID" <project|feature|bug>
+qx_task_type "$TASK_ID" "<project|feature|bug>"
 ```
 
 ---

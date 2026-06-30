@@ -176,5 +176,3 @@ building toward `pr_ready`. Point the user to `/workflows` and the board for liv
 - Reference the shared engine in `.claude/lib/dev-pipeline.md`; do **not** restate its steps here.
 - Never print or echo the bearer token. Never run `set -x` / `curl -v` around `qapi`. Build every
   JSON payload with `node` / `JSON.stringify`, never `echo`.
-</content>
-</invoke>
