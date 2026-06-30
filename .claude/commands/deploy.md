@@ -134,15 +134,21 @@ esac
 ## 8. Fly deploy — token-safely
 
 Per project rules, Fly access uses an explicit per-app `FLY_API_TOKEN` passed inline, never
-the ambient `fly auth` login. Pull the token from the in-memory map into an env var
-**without printing it** (node emits a shell assignment that `eval` consumes; the value is
-JSON-encoded for the assignment, never sent to the terminal as output):
+the ambient `fly auth` login. Pull the token from the in-memory map into a plain (non-exported)
+shell variable **without `eval` and without printing it**. Feed the map to node over STDIN
+(`printf` is a shell builtin, so the map never appears as a separate process in `ps`); node
+parses it and writes the *raw* token to stdout, which command substitution captures. Because
+the value is never re-interpreted by the shell, a token containing shell metacharacters can
+never be executed:
 
 ```bash
-eval "$(node -e '
-  const s=JSON.parse(process.env.SECRETS_JSON);
-  const tok=s.FLY_API_TOKEN||"";
-  process.stdout.write("export _FLY_TOK="+JSON.stringify(tok));
+_FLY_TOK="$(printf '%s' "$SECRETS_JSON" | node -e '
+  let d="";
+  process.stdin.on("data", c => { d += c; });
+  process.stdin.on("end", () => {
+    let s; try { s = JSON.parse(d); } catch { process.exit(1); }
+    process.stdout.write(String(s.FLY_API_TOKEN || ""));
+  });
 ')"
 
 if [ -z "$_FLY_TOK" ]; then
