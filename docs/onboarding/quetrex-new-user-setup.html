@@ -128,7 +128,17 @@
   </div>
   <p>It creates an <b>isolated branch and worktree</b>, then runs a <b>workflow</b> of specialized agents: the <b>architect</b> plans, one or more <b>developers</b> implement with tests, <b>QA</b> proves everything passes, the <b>reviewer</b> checks logic and security, and a <b>pull request</b> is opened for you. It all runs in the <b>background</b>, so your terminal is free to start the next task. You watch progress on the board.</p>
 
-  <h2>Part 6 &middot; Roles &amp; access</h2>
+  <h2>Part 6 &middot; Watching a build with <code>/workflows</code></h2>
+  <p>When you run <code>/que-task</code>, the pipeline above runs as a <b>background workflow</b> — that's why your terminal stays free. To watch it live, type <code>/workflows</code>.</p>
+  <p>It opens a <b>live, auto-updating view</b> of every build in progress. Each one shows a progress tree:</p>
+  <table class="cols">
+    <tr><td>Phases</td><td>The big steps (Architect &rarr; Developers &rarr; QA &rarr; Reviewer &rarr; PR); the current one is highlighted.</td></tr>
+    <tr><td>Agents</td><td>Each specialized agent under its phase, marked queued &rarr; running &rarr; done.</td></tr>
+    <tr><td>Status lines</td><td>Short live messages from agents as they work.</td></tr>
+  </table>
+  <p>So at a glance you know <b>exactly where your task is</b> — which phase is running, what's finished, what's left — and you'd spot a stall or failure immediately. It's <b>read-only</b> (you watch; the commands drive), and you don't need to keep it open — you're notified when a build finishes — but it's your window into work in flight.</p>
+
+  <h2>Part 7 &middot; Roles &amp; access</h2>
   <p>You only see and work on the projects you've been granted — everything else is invisible to you. Access is enforced on the server, so it's a hard boundary, not just hidden in the interface.</p>
   <table class="cols">
     <tr><td>Super&nbsp;Admin</td><td>Full access to all projects; manages admins and all access.</td></tr>
@@ -139,7 +149,7 @@
     If you try to act on a project you don't have access to, Quetrex stops you and tells you to <b>contact your administrator</b>. Getting added to a project takes effect immediately — nothing to reinstall.
   </div>
 
-  <h2>Part 7 &middot; For administrators</h2>
+  <h2>Part 8 &middot; For administrators</h2>
   <p>From the dashboard you manage people and access — no terminal needed:</p>
   <table class="cols">
     <tr><td>Invite someone</td><td>Click <b>Invite</b>, enter their email, choose their role, and pick which projects they get. They receive an email to set their password.</td></tr>
