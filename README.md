@@ -1,10 +1,6 @@
 # Quetrex Base
 
-Claude Code base configuration for development teams. Agents, skills, and commands for a complete AI-powered development pipeline — from plan to merged PR.
-
-> **Tracker-agnostic.** The base ships no tracker/issue commands. Per-project tracker wiring
-> (fetching work items, advancing status columns) is provided by project-level setup
-> (`quetrex-init`, forthcoming).
+Claude Code base configuration for development teams. Agents, skills, and commands for a complete AI-powered development pipeline — from task to merged PR — wired to the Quetrex kanban.
 
 ## Install
 
@@ -21,23 +17,22 @@ npm install -g github:Barnhardt-Enterprises-Inc/quetrex-base
 ## First Time on a New Machine
 
 ```bash
-/quetrex-setup
+/quetrex-login
 ```
 
-Configures GitHub CLI auth, git identity, API keys, and direnv.
+Logs in to the Quetrex kanban via browser device-flow and stores a per-user API token.
 
 ## First Time on a New Project
 
 ```bash
-/project-setup    # CI, branch protection, direnv
-/create-rules     # Stack configuration (Next.js, Python, Rust, Rails, iOS, Go, Node.js)
+/quetrex-init     # Link the repo to a Quetrex project (also sets up Verification rules)
 ```
 
 ## Planning Work
 
 ```bash
-/plan-feature     # Codebase analysis + implementation plan for a feature
-/create-prd       # Generate a PRD from the current conversation
+/new-task         # Create a Backlog task on the kanban
+/refine-task      # Refine a task into a clear, buildable spec
 ```
 
 ## The Pipeline
@@ -52,15 +47,16 @@ Each stage is a specialized agent. QA proves green with actual exit codes. The r
 
 | Command | What it does |
 |---|---|
-| `/quetrex-docs` | Full reference — pipeline, commands, agents, setup |
-| `/quetrex-setup` | One-time machine setup |
-| `/project-setup` | One-time project setup |
-| `/create-rules` | Generate project stack configuration |
-| `/update-rules` | Audit and fix existing project rules |
-| `/plan-feature` | Plan a feature for an existing codebase |
-| `/create-prd` | Generate a PRD from conversation |
-| `/deploy-setup` | Generate project-specific deploy skill |
-| `/secrets` | Manage API keys |
+| `/quetrex-login` | One-time machine login to the Quetrex kanban |
+| `/quetrex-init` | Link a repo to a Quetrex project; set up Verification rules |
+| `/new-task` | Create a Backlog task on the kanban |
+| `/refine-task` | Refine a task into a buildable spec |
+| `/que-task` | Vet, classify, and build a task end to end |
+| `/rework` | Re-plan and re-run a failed task |
+| `/task-merge` | Squash-merge a task's PR with cleanup |
+| `/task-complete` | Mark a deployed task Complete |
+| `/deploy` | Deploy the project's app from vault secrets |
+| `/commit` | Commit uncommitted changes |
 | `/quetrex-update` | Check for and apply updates |
 
 ## Updates

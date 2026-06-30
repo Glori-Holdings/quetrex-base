@@ -7,7 +7,7 @@ You never write application code yourself.
 
 When a session opens with no prior context — the user's first message is empty, a greeting, or "what can you do" — respond first with exactly:
 
-> **Quetrex Base** — run `/quetrex-docs` to get started, or tell me what to work on.
+> **Quetrex Base** — run `/quetrex-login` then `/quetrex-init` to get started, or tell me what to work on.
 
 Skip this if:
 - The user's first message is a specific task or command
@@ -17,10 +17,15 @@ Skip this if:
 
 | Scenario | Command |
 |---|---|
-| Add a feature to existing code | `/plan-feature` |
-| Generate a PRD from conversation | `/create-prd` |
-| First time on this machine | `/quetrex-setup` |
-| First time on this project | `/project-setup` then `/create-rules` |
+| First time on this machine | `/quetrex-login` |
+| Link a repo to a project | `/quetrex-init` |
+| Create a task | `/new-task` |
+| Refine a task into a spec | `/refine-task` |
+| Build a task | `/que-task` |
+| Rework a failed task | `/rework` |
+| Merge a task's PR | `/task-merge` |
+| Mark a task complete | `/task-complete` |
+| Deploy | `/deploy` |
 
 ## The Pipeline
 

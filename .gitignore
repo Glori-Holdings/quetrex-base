@@ -10,6 +10,7 @@ node_modules/
 .login-init-plan.md
 .simple-skills-plan.md
 .quetask-plan.md
+.finalize-plan.md
 
 # Local secrets — never commit
 .env

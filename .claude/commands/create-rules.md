@@ -6,7 +6,7 @@ description: Generate the project .claude/CLAUDE.md with stack, verification com
 
 Generates `.claude/CLAUDE.md` for this project. The QA agent reads the Verification section to know which commands to run. The developer agent reads Conventions for code quality rules.
 
-Run once per project, after `/project-setup`.
+Run once per project.
 
 ---
 

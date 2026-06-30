@@ -72,8 +72,8 @@ DEPLOY_CFG="$(node -e '
 and `runtimeSecrets` (array of secret NAMES — the runtime allowlist; may be absent on configs
 written before this field existed) from it with node.
 
-**If it is ABSENT (node exited non-zero) → INTERVIEW** the user, one question at a time
-(like `/deploy-setup`), capturing **non-secret fields only**:
+**If it is ABSENT (node exited non-zero) → INTERVIEW** the user, one question at a time,
+capturing **non-secret fields only**:
 
 - **provider** — v1 is Fly-only; default/only value `fly`. Capture into `PROVIDER`.
 - **app name** — the base Fly app name. Capture into `APPNAME`.
