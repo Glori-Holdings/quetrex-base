@@ -1,12 +1,20 @@
 ---
-description: Deploy this project's app using its vault secrets (Fly.io for v1). Interviews for deploy config on first run, fetches secrets in-memory, runs the deploy token-safely. Usage: /deploy [staging|production]
-argument-hint: "[environment: staging | production]"
+description: Deploy this project's app using its vault secrets (Fly.io for v1). Interviews for deploy config on first run, fetches secrets in-memory, runs the deploy token-safely (rolling). Also supports rollback to the previous release. Usage: /deploy [staging|production|rollback]
+argument-hint: "[staging | production | rollback]"
 ---
 
 # Deploy
 
 Deploy this project's app using its **vault secrets** from the Quetrex kanban. v1 supports
 **Fly.io** only, but the flow branches on `provider` so other platforms can be added later.
+
+Forward deploys use a **rolling** strategy — Fly replaces machines one at a time, gated on
+health checks, so a bad release never takes the whole app down at once.
+
+**Rollback:** `/deploy rollback [staging|production]` re-deploys the **previous** successful
+release's image instead of building a new one. It lists recent releases, shows which prior
+image it will roll back to, and **confirms with you before acting**. See
+[§8b. Rollback](#8b-rollback--redeploy-the-previous-image-token-safely).
 
 **SECRET SAFETY — the core invariant of this command:**
 - Vault secret VALUES live ONLY in process memory (one shell variable). They are NEVER
@@ -21,17 +29,31 @@ Deploy this project's app using its **vault secrets** from the Quetrex kanban. v
   process and are NEVER exposed in the app's runtime environment.
 - No `set -x`, no `curl -v`, no `fly` verbose flags. The sensitive vars are `unset` at the end.
 
-Argument: `$ARGUMENTS` is an optional environment, `staging` or `production`.
+Argument: `$ARGUMENTS` is optional. The first token is either an environment (`staging` /
+`production`) for a normal forward deploy, or the literal `rollback` to roll back to the
+previous release. When the first token is `rollback`, an optional **second** token is the
+environment (`/deploy rollback production`).
 
 ---
 
-## 1. Parse the optional environment argument
+## 1. Parse the arguments (mode + environment)
 
 ```bash
-ENV_ARG="$(echo "$ARGUMENTS" | tr -d '[:space:]')"
+# First token = mode-or-env; optional second token = env when rolling back.
+ARG1="$(printf '%s' "$ARGUMENTS" | awk '{print $1}' | tr -d '[:space:]')"
+ARG2="$(printf '%s' "$ARGUMENTS" | awk '{print $2}' | tr -d '[:space:]')"
+
+if [ "$ARG1" = "rollback" ]; then
+  MODE="rollback"
+  ENV_ARG="$ARG2"          # optional; may be empty → ask in step 5
+else
+  MODE="deploy"
+  ENV_ARG="$ARG1"          # optional; may be empty → ask in step 5
+fi
 ```
 
-Validated later against the project's configured environments. May be empty.
+`ENV_ARG` is validated later against the project's configured environments and may be empty.
+`MODE` is `deploy` (forward, build-and-ship) or `rollback` (re-deploy the previous image).
 
 ---
 
@@ -186,6 +208,10 @@ or value, never pass it through a command that would log it.
 
 ## 6b. Resolve the runtime-secret allowlist
 
+**Skip this entire step when `MODE=rollback`** — a rollback re-deploys an existing image and
+does not push secrets, so no allowlist is needed. Set `RUNTIME_NAMES=()` (empty) and jump
+straight to step 7. The rest of 6b runs only for a forward deploy (`MODE=deploy`).
+
 Only secrets the user explicitly marks as **runtime app secrets** are ever pushed to the
 deployed app. Everything else in the vault (the Fly token, GitHub/CI tokens, the Quetrex
 bearer, build-only keys) is used by the deploy process and must NEVER reach the app's runtime
@@ -307,6 +333,11 @@ FLY_API_TOKEN="$_FLY_TOK" fly status --app "$APP" >/dev/null 2>&1 || {
 }
 ```
 
+**If `MODE=rollback`, skip the rest of this step and jump to [§8b. Rollback](#8b-rollback--redeploy-the-previous-image-token-safely)**
+— a rollback re-deploys an existing image, so there is no secret push and no forward `fly
+deploy`. (The token extraction and `fly status` reachability check above still apply.) The
+secret-push and forward-deploy blocks below run only for a forward deploy (`MODE=deploy`).
+
 **Push runtime app secrets** into the Fly app via STDIN so values never hit argv or logs. Only
 the **allowlisted** names (`RUNTIME_NAMES`, from step 6b) are pushed — pipeline-only creds
 (`FLY_API_TOKEN`, CI/GitHub tokens, the Quetrex bearer, build-only keys) are never exposed in
@@ -341,10 +372,12 @@ names reach the app — the rest of the vault never leaves the deploy process.)
 command as a TODO hook — mention in the report that a DB migration may be required and was not
 run automatically.
 
-**Deploy:**
+**Deploy (rolling):** deploy with an explicit **rolling** strategy so Fly replaces machines
+one at a time, each gated on health checks, regardless of machine count — a bad release can
+never take the whole app down at once. This is the forward-deploy path (`MODE=deploy`):
 
 ```bash
-FLY_API_TOKEN="$_FLY_TOK" fly deploy --app "$APP"
+FLY_API_TOKEN="$_FLY_TOK" fly deploy --app "$APP" --strategy rolling
 ```
 
 **Scrub the sensitive vars** as soon as the deploy returns (success or failure):
@@ -355,7 +388,80 @@ unset SECRETS_JSON _FLY_TOK
 
 ---
 
+## 8b. Rollback — redeploy the previous image (token-safely)
+
+**Runs only when `MODE=rollback`.** A rollback re-deploys the previous successful release's
+image instead of building a new one — no build, no secret push. It reuses the same token-safe
+`_FLY_TOK` extracted in step 8 (never echoed) and the same `fly status` reachability check.
+
+**1. List recent releases (token-safe).** Show the user the last few releases so they can see
+what they're rolling back from and to. `--json` gives a stable shape to parse the prior image:
+
+```bash
+RELEASES_JSON="$(FLY_API_TOKEN="$_FLY_TOK" fly releases --app "$APP" --json 2>/dev/null)"
+```
+
+Also show a human-readable table (version + date + status) — this prints release metadata
+only, never a secret:
+
+```bash
+FLY_API_TOKEN="$_FLY_TOK" fly releases --app "$APP" | head -n 12
+```
+
+**2. Determine the previous image.** The current (live) release is the newest successful one;
+the rollback target is the **next** successful release below it. Parse the image ref from the
+releases JSON with node over STDIN (metadata only — no secret is involved):
+
+```bash
+PREV_IMAGE="$(printf '%s' "$RELEASES_JSON" | node -e '
+  let d="";
+  process.stdin.on("data", c => { d += c; });
+  process.stdin.on("end", () => {
+    let a; try { a = JSON.parse(d); } catch { process.exit(1); }
+    const list = Array.isArray(a) ? a : (Array.isArray(a.releases) ? a.releases : []);
+    // Newest first. Keep only successful/complete releases that carry a deployment image.
+    const ok = list.filter(r => {
+      const st = String(r.status || r.Status || "").toLowerCase();
+      return (st === "" || st === "succeeded" || st === "complete" || st === "running");
+    });
+    const img = r => r.imageRef || r.ImageRef || r.image || r.Image || "";
+    // The live release is ok[0]; the rollback target is the next one with a *different* image.
+    const cur = ok.length ? img(ok[0]) : "";
+    const prev = ok.slice(1).map(img).find(x => x && x !== cur) || "";
+    process.stdout.write(String(prev));
+  });
+')"
+```
+
+**3. Confirm before acting.** Tell the user the current image (from `ok[0]`) and the resolved
+`PREV_IMAGE` it will roll back **to**, and **wait for explicit confirmation**. This is a
+mutating action gated on a yes/no — never roll back without it.
+
+**If `PREV_IMAGE` is empty** (couldn't determine a prior image), do **not** guess. Explain that
+the previous image couldn't be resolved automatically, re-show `fly releases --app "$APP"`, and
+ask the user to paste the exact image ref (e.g. `registry.fly.io/<app>:deployment-<id>`) to
+roll back to. Capture their answer into `PREV_IMAGE`.
+
+**4. Roll back (rolling).** Re-deploy the prior image with the same health-check-gated rolling
+strategy. `--image` re-deploys an existing image without a rebuild:
+
+```bash
+FLY_API_TOKEN="$_FLY_TOK" fly deploy --app "$APP" --image "$PREV_IMAGE" --strategy rolling
+```
+
+Report the result: the environment, resolved app name, and the image rolled back to. Then scrub
+the sensitive vars (same as the forward path — success or failure):
+
+```bash
+unset SECRETS_JSON _FLY_TOK RELEASES_JSON
+```
+
+---
+
 ## 9. Report success
+
+*(Forward deploy only — the rollback path already reported in §8b. For a rollback, skip to the
+end; do **not** advance task status in step 10.)*
 
 On a successful deploy, capture the URL (`fly status --app "$APP"` or the known
 `https://$APP.fly.dev`) and report:
@@ -367,6 +473,8 @@ On a successful deploy, capture the URL (`fly status --app "$APP"` or the known
 ---
 
 ## 10. Optionally advance merged → deployed
+
+*(Forward deploy only — a rollback does not advance task status.)*
 
 **Ask the user first** whether to advance this project's `merged` tasks to `deployed`. Only if
 they say yes:
@@ -409,6 +517,11 @@ Report which tasks advanced.
 - The step 5b env-cred import never prints a secret value or the bearer; masked last-4 is
   the only value-derived output; values flow file→`node`→`qapi`→vault and are never on
   argv as a value, never to disk/logs; the body var is `unset` after each import.
+- **Rollback** uses the same `_FLY_TOK` (inline per-command, never echoed); `fly releases`
+  prints release metadata only (never a secret); the prior image ref is non-secret and parsed
+  from `--json` via STDIN-fed node; `RELEASES_JSON` is `unset` with the rest at the end.
+- Both forward deploy and rollback use `--strategy rolling` (health-check-gated, one machine
+  at a time). Rollback pushes **no** secrets and skips the runtime-secret allowlist (step 6b).
 
 ---
 
@@ -423,6 +536,11 @@ Report which tasks advanced.
   env do you stop with the "set FLY_API_TOKEN at <kanban>/keys" message.
 - `fly status` unreachable → stop before deploy; scrub vars.
 - Env arg not in config → ask the user to pick a valid environment.
+- **Rollback** (`/deploy rollback [env]`) → skip the runtime-secret allowlist and secret push;
+  list releases, resolve the previous image, **confirm with the user before acting**, then
+  `fly deploy --image <prev> --strategy rolling`. If the previous image can't be resolved,
+  show `fly releases` and ask the user to paste the image ref — never guess. Do not advance
+  task status on a rollback.
 - Any `qapi` or resolver non-zero exit → the helper already printed the correct message.
 - Never print or echo the bearer token or any vault secret. Never run `set -x` around `qapi`
   or `fly`.
