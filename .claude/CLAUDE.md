@@ -52,7 +52,7 @@ Tracker/issue wiring (fetching tasks, advancing status columns) is provided by t
 - Squash merge: feature branch → main
 - PRs require human approval before merge
 - Max 3 QA failures before escalating to the user — do not loop forever
-- **Isolated work + cleanup is governed by the `worktree-workflow` skill** — the canonical procedure for branching, committing in a worktree (use `git -C <path>` so the enforce-branch hook recognizes the branch instead of blocking on main), PR → CI → squash-merge, and mandatory teardown. Never leave a dangling worktree, open/unmerged PR, or stale local/remote branch. Run its final audit at the end of any multi-unit effort.
+- **Isolated work + cleanup is governed by the `worktree-workflow` skill** — the canonical procedure for branching, committing in a worktree (use `git -C <path>` so the enforce-branch hook recognizes the branch instead of blocking on main), PR → human approval → squash-merge, and mandatory teardown. Never leave a dangling worktree, open/unmerged PR, or stale local/remote branch. Run its final audit at the end of any multi-unit effort.
 
 ## Pipeline Mode — No Stops
 

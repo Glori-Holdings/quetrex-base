@@ -96,7 +96,7 @@
   <p>Projects need secrets — a <code>DATABASE_URL</code>, a Fly.io deploy token, third-party app keys. In Quetrex these live in a <b>secure vault</b>, not in your terminal or in plain files.</p>
   <ol class="steps">
     <li><b>You enter them in the browser</b>, never in the terminal — go to <b>dash.quetrex.com/keys</b> and add each project's deploy and runtime secrets there.</li>
-    <li><b>They're stored encrypted</b> and <b>scoped</b> to the people with access to that project. Once saved, they're shown <b>masked</b> (only the last 4 characters) — even to you.</li>
+    <li><b>They're stored encrypted</b> and <b>scoped</b> to the people with access to that project. In the board UI the value is <b>masked</b> (only the last 4 characters shown). Anyone with access to the project — and the skills that need them, like <code>/deploy</code> — can retrieve the full value; masking is a display convenience, not a barrier between project members.</li>
     <li><b>Skills fetch them securely at run time.</b> When a command like <code>/deploy</code> runs, it pulls the secrets it needs in-memory; they're never printed or written to disk.</li>
     <li><b>Rotating a secret?</b> Just re-enter the new value at <b>/keys</b> — the next run picks it up automatically.</li>
   </ol>
