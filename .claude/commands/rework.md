@@ -41,7 +41,6 @@ resolve_auth    || exit 1      # prints "Run /quetrex-login" on failure
 resolve_project || exit 1      # prints "Run /quetrex-init" on failure
 qapi GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1   # validate access
 TASK="$(qapi GET "/api/tasks/$TASK_ID")"            || exit 1
-COMMENTS="$(qapi GET "/api/tasks/$TASK_ID/comments")" || exit 1
 echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL"
 ```
 
@@ -61,16 +60,16 @@ node -e '
 ' "$TASK"
 ```
 
-Read the recent discussion (`$COMMENTS`) the same way — the engine posts the failure reason as a
-comment too:
+Read the recent discussion the same way — comments ship **inside** `$TASK` (the task GET already
+embeds them), and the engine posts the failure reason as a comment too:
 
 ```bash
 node -e '
-  let a; try{a=JSON.parse(process.argv[1])}catch{a=[]}
-  const list=Array.isArray(a)?a:(a.comments||a.data||[]);
+  let o; try{o=JSON.parse(process.argv[1])}catch{o={}}
+  const list=Array.isArray(o.comments)?o.comments:(o.data||[]);
   for(const c of list.slice(-15))
     console.log("• ["+(c.createdAt||"")+"] "+String(c.body||c.text||"").trim());
-' "$COMMENTS"
+' "$TASK"
 ```
 
 **Discover the failed branch / PR** by the task-merge convention. The engine names the unit branch
