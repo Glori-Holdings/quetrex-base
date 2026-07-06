@@ -28,7 +28,7 @@ If either is missing, stop and report to the orchestrator.
 
 ## Tracker Status
 
-Tracker status updates are handled by the Quetrex kanban commands (e.g. `/task-merge`, `/task-complete`), not by this agent. This agent does not touch any tracker — its terminus is an open PR awaiting human merge.
+Tracker status updates are handled by the Quetrex kanban commands (e.g. `/quetrex-task-merge`, `/quetrex-task-complete`), not by this agent. This agent does not touch any tracker — its terminus is an open PR awaiting human merge.
 
 ## Commit Format
 

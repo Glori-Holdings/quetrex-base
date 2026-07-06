@@ -1,5 +1,5 @@
 ---
-description: Deploy this project's app using its vault secrets (Fly.io for v1). Interviews for deploy config on first run, fetches secrets in-memory, runs the deploy token-safely (rolling). Also supports rollback to the previous release. Usage: /deploy [staging|production|rollback]
+description: Deploy this project's app using its vault secrets (Fly.io for v1). Interviews for deploy config on first run, fetches secrets in-memory, runs the deploy token-safely (rolling). Also supports rollback to the previous release. Usage: /quetrex-deploy [staging|production|rollback]
 argument-hint: "[staging | production | rollback]"
 ---
 
@@ -11,7 +11,7 @@ Deploy this project's app using its **vault secrets** from the Quetrex kanban. v
 Forward deploys use a **rolling** strategy — Fly replaces machines one at a time, gated on
 health checks, so a bad release never takes the whole app down at once.
 
-**Rollback:** `/deploy rollback [staging|production]` re-deploys the **previous** successful
+**Rollback:** `/quetrex-deploy rollback [staging|production]` re-deploys the **previous** successful
 release's image instead of building a new one. It lists recent releases, shows which prior
 image it will roll back to, and **confirms with you before acting**. See
 [§8b. Rollback](#8b-rollback--redeploy-the-previous-image-token-safely).
@@ -32,7 +32,7 @@ image it will roll back to, and **confirms with you before acting**. See
 Argument: `$ARGUMENTS` is optional. The first token is either an environment (`staging` /
 `production`) for a normal forward deploy, or the literal `rollback` to roll back to the
 previous release. When the first token is `rollback`, an optional **second** token is the
-environment (`/deploy rollback production`).
+environment (`/quetrex-deploy rollback production`).
 
 ---
 
@@ -316,7 +316,7 @@ _FLY_TOK="$(printf '%s' "$SECRETS_JSON" | node -e '
 ')"
 
 if [ -z "$_FLY_TOK" ]; then
-  echo "No FLY_API_TOKEN in the project vault or this repo's local env files (step 5b checked .env*). Set FLY_API_TOKEN at $QX_KANBAN_URL/keys, then re-run /deploy." >&2
+  echo "No FLY_API_TOKEN in the project vault or this repo's local env files (step 5b checked .env*). Set FLY_API_TOKEN at $QX_KANBAN_URL/keys, then re-run /quetrex-deploy." >&2
   unset SECRETS_JSON _FLY_TOK
   exit 1
 fi
@@ -536,7 +536,7 @@ Report which tasks advanced.
   env do you stop with the "set FLY_API_TOKEN at <kanban>/keys" message.
 - `fly status` unreachable → stop before deploy; scrub vars.
 - Env arg not in config → ask the user to pick a valid environment.
-- **Rollback** (`/deploy rollback [env]`) → skip the runtime-secret allowlist and secret push;
+- **Rollback** (`/quetrex-deploy rollback [env]`) → skip the runtime-secret allowlist and secret push;
   list releases, resolve the previous image, **confirm with the user before acting**, then
   `fly deploy --image <prev> --strategy rolling`. If the previous image can't be resolved,
   show `fly releases` and ask the user to paste the image ref — never guess. Do not advance

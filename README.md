@@ -31,8 +31,8 @@ Logs in to the Quetrex kanban via browser device-flow and stores a per-user API 
 ## Planning Work
 
 ```bash
-/new-task         # Create a Backlog task on the kanban
-/refine-task      # Refine a task into a clear, buildable spec
+/quetrex-task-new         # Create a Backlog task on the kanban
+/quetrex-task-refine      # Refine a task into a clear, buildable spec
 ```
 
 ## The Pipeline
@@ -49,14 +49,13 @@ Each stage is a specialized agent. QA proves green with actual exit codes. The r
 |---|---|
 | `/quetrex-login` | One-time machine login to the Quetrex kanban |
 | `/quetrex-init` | Link a repo to a Quetrex project; set up Verification rules |
-| `/new-task` | Create a Backlog task on the kanban |
-| `/refine-task` | Refine a task into a buildable spec |
-| `/que-task` | Vet, classify, and build a task end to end |
-| `/rework` | Re-plan and re-run a failed task |
-| `/task-merge` | Squash-merge a task's PR with cleanup |
-| `/task-complete` | Mark a deployed task Complete |
-| `/deploy` | Deploy the project's app from vault secrets |
-| `/commit` | Commit uncommitted changes |
+| `/quetrex-task-new` | Create a Backlog task on the kanban |
+| `/quetrex-task-refine` | Refine a task into a buildable spec |
+| `/quetrex-task-build` | Vet, classify, and build a task end to end |
+| `/quetrex-task-rework` | Re-plan and re-run a failed task |
+| `/quetrex-task-merge` | Squash-merge a task's PR with cleanup |
+| `/quetrex-task-complete` | Mark a deployed task Complete |
+| `/quetrex-deploy` | Deploy the project's app from vault secrets |
 | `/quetrex-update` | Check for and apply updates |
 
 ## Updates
