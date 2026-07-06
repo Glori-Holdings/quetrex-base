@@ -28,7 +28,6 @@
     ".claude/skills/qa-verify/",
     ".claude/skills/tab-control/",
     ".claude/skills/worktree-workflow/",
-    ".claude/disabled-skills/",
     ".claude/CLAUDE.md",
     ".claude/settings.json",
     ".claude/statusline-command.sh",

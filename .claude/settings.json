@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash /Users/barnent1/.claude/hooks/workflow-reminder.sh",
+            "command": "bash ~/.claude/hooks/workflow-reminder.sh",
             "timeout": 5000
           }
         ]
@@ -53,7 +53,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash /Users/barnent1/.claude/hooks/enforce-branch.sh",
+            "command": "bash ~/.claude/hooks/enforce-branch.sh",
             "timeout": 5000
           }
         ]
@@ -63,7 +63,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash /Users/barnent1/.claude/hooks/security-check.sh",
+            "command": "bash ~/.claude/hooks/security-check.sh",
             "timeout": 5000
           }
         ]
@@ -75,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash /Users/barnent1/.claude/hooks/auto-format.sh",
+            "command": "bash ~/.claude/hooks/auto-format.sh",
             "timeout": 10000
           }
         ]
