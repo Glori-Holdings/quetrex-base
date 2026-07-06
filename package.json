@@ -3,7 +3,8 @@
   "version": "2.0.1",
   "description": "Quetrex Base — Claude Code base configuration for development teams. Agents, skills, and commands for a complete AI-powered development pipeline.",
   "scripts": {
-    "postinstall": "node install.js"
+    "postinstall": "node install.js",
+    "test": "node test/install.test.js"
   },
   "engines": {
     "node": ">=18"
