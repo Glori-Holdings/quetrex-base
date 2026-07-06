@@ -1,5 +1,5 @@
 ---
-description: Merge a standalone task's PR (squash) with full branch/worktree cleanup, then set the kanban task to merged. Usage: /task-merge SMA-1
+description: Merge a standalone task's PR (squash) with full branch/worktree cleanup, then set the kanban task to merged. Usage: /quetrex-task-merge SMA-1
 argument-hint: <TASK-ID like SMA-1>
 ---
 
@@ -25,7 +25,7 @@ TASK_ID="$(echo "$ARGUMENTS" | tr -d '[:space:]')"
 
 If `TASK_ID` is empty, print usage and stop:
 
-> Usage: `/task-merge SMA-1`
+> Usage: `/quetrex-task-merge SMA-1`
 
 ---
 
@@ -172,7 +172,7 @@ git -C "$REPO_ROOT" fetch --prune origin    # drop the stale origin/$HEADREF rem
 ```bash
 PAYLOAD="$(node -e 'process.stdout.write(JSON.stringify({status:"merged"}))')"
 qapi PATCH "/api/tasks/$TASK_ID" "$PAYLOAD" >/dev/null || {
-  echo "PR #$PRNUM was squash-merged and cleaned up, but updating $TASK_ID to 'merged' on the kanban FAILED. Re-run /task-merge or set its status to merged manually." >&2
+  echo "PR #$PRNUM was squash-merged and cleaned up, but updating $TASK_ID to 'merged' on the kanban FAILED. Re-run /quetrex-task-merge or set its status to merged manually." >&2
   exit 1
 }
 echo "$TASK_ID → merged."

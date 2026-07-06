@@ -275,7 +275,8 @@ step 4):
   `issue-prd`, `issue-rework`, `map-states`, `complete`, `auto-pilot`, `plan-project`,
   `runner`, `deploy-setup`, `create-prd`, `create-rules`, `update-rules`, `execute`,
   `prime`, `plan-feature`, `project-setup`, `quetrex-docs`, `quetrex-setup`, `secrets`,
-  `new-video`.
+  `new-video`,
+  `que-task`, `new-task`, `refine-task`, `rework`, `task-merge`, `task-complete`.
 - Its skill directory name is in the known REMOVED old-Quetrex skill set:
   `domain-capture`, `story-builder`, `agent-browser`, `e2e-test`, `quetrex`,
   `quetrex-create-agent`, `quetrex-create-plugin`.

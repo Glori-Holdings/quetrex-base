@@ -97,7 +97,7 @@ resolve_auth() {
 # qx_binding_path
 #   Print the absolute path of the repo's .quetrex/project.json by walking up from
 #   $PWD — the same walk resolve_project uses. Useful for skills that need to READ
-#   or WRITE non-secret binding fields (e.g. /deploy's deploy config). Prints the
+#   or WRITE non-secret binding fields (e.g. /quetrex-deploy's deploy config). Prints the
 #   path on stdout and returns 0 if found; prints nothing and returns 1 on miss.
 #   Never reads or emits any secret — the binding holds only projectCode/kanbanUrl
 #   (and non-secret deploy config). Token-safe: touches no auth state.
@@ -208,7 +208,7 @@ qapi() {
 }
 
 # ---------------------------------------------------------------------------
-# CONVENIENCE WRAPPERS over qapi (added for /que-task + /rework).
+# CONVENIENCE WRAPPERS over qapi (added for /quetrex-task-build + /quetrex-task-rework).
 #
 # Each helper builds its JSON body with node/JSON.stringify (never echo, never
 # hand-built strings) and routes through qapi, so every one INHERITS qapi's
@@ -272,7 +272,7 @@ qx_create_child() {
 
 # qx_add_dep TASK_ID DEPENDS_ON_ID  -> POST /api/tasks/$ID/dependencies {dependsOnTaskId}
 #   The server is cycle-safe, but the caller still DAG-validates the proposed
-#   graph before any write (see /que-task).
+#   graph before any write (see /quetrex-task-build).
 # shellcheck disable=SC2329
 qx_add_dep() {
   local body
@@ -303,7 +303,7 @@ qx_is_unblocked() {
 }
 
 # ---------------------------------------------------------------------------
-# ENV-CRED AUTO-DETECT helpers (used by /quetrex-init and /deploy).
+# ENV-CRED AUTO-DETECT helpers (used by /quetrex-init and /quetrex-deploy).
 #
 # These let a command discover credentials already on disk in the repo's local
 # env files and import them straight into the project vault WITHOUT ever echoing

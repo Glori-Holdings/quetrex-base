@@ -1,5 +1,5 @@
 ---
-description: Create a new Backlog task on the Quetrex kanban — interactively gather title, description, assignee, and priority, then create it. Does not start work. Usage: /new-task
+description: Create a new Backlog task on the Quetrex kanban — interactively gather title, description, assignee, and priority, then create it. Does not start work. Usage: /quetrex-task-new
 ---
 
 # New Task

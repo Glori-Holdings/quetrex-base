@@ -19,13 +19,13 @@ Skip this if:
 |---|---|
 | First time on this machine | `/quetrex-login` |
 | Link a repo to a project | `/quetrex-init` |
-| Create a task | `/new-task` |
-| Refine a task into a spec | `/refine-task` |
-| Build a task | `/que-task` |
-| Rework a failed task | `/rework` |
-| Merge a task's PR | `/task-merge` |
-| Mark a task complete | `/task-complete` |
-| Deploy | `/deploy` |
+| Create a task | `/quetrex-task-new` |
+| Refine a task into a spec | `/quetrex-task-refine` |
+| Build a task | `/quetrex-task-build` |
+| Rework a failed task | `/quetrex-task-rework` |
+| Merge a task's PR | `/quetrex-task-merge` |
+| Mark a task complete | `/quetrex-task-complete` |
+| Deploy | `/quetrex-deploy` |
 
 ## The Pipeline
 
@@ -41,7 +41,7 @@ architect → developer(s) → QA → reviewer → git-workflow
 - **reviewer** (Opus) reads the full diff for logic errors, security, and architecture violations
 - **git-workflow** creates a squash PR to main
 
-Tracker/issue wiring (fetching tasks, advancing status columns) is provided by the Quetrex kanban commands — `/quetrex-login`, `/quetrex-init`, `/new-task`, `/refine-task`, `/que-task`, `/rework`, `/task-merge`, `/task-complete`. Bind each repo to a Quetrex project with `/quetrex-init`; the generic agent pipeline above then runs the work from plan to PR.
+Tracker/issue wiring (fetching tasks, advancing status columns) is provided by the Quetrex kanban commands — `/quetrex-login`, `/quetrex-init`, `/quetrex-task-new`, `/quetrex-task-refine`, `/quetrex-task-build`, `/quetrex-task-rework`, `/quetrex-task-merge`, `/quetrex-task-complete`. Bind each repo to a Quetrex project with `/quetrex-init`; the generic agent pipeline above then runs the work from plan to PR.
 
 ## Workflow Rules
 
@@ -73,7 +73,7 @@ Run `/quetrex-init` to generate/verify it. QA reads the Verification section fro
 - Use Context7 MCP for current library documentation — never guess at APIs
 - Use agent teams when work touches 3+ files across layers
 - After every correction, save a feedback memory
-- **Fly.io access must always use an explicit per-company API token, never the ambient `fly auth` interactive login.** Keep a separate token per company; the interactive login generally can't see a given company's apps. Before any `fly` command (status/deploy/etc.), source the project's token and pass it inline: `FLY_API_TOKEN="$TOK" fly <cmd> --app <app>`. The token usually lives in that project's `.env.local` (re-grep the var name — it can change). Confirm access with `fly status --app <app>` before deploying.
+- **Fly.io access must always use an explicit per-company API token, never the ambient `fly auth` interactive login.** Keep a separate token per company; the interactive login generally can't see a given company's apps. Before any `fly` command (status/quetrex-deploy/etc.), source the project's token and pass it inline: `FLY_API_TOKEN="$TOK" fly <cmd> --app <app>`. The token usually lives in that project's `.env.local` (re-grep the var name — it can change). Confirm access with `fly status --app <app>` before deploying.
 
 ## For Teammates
 

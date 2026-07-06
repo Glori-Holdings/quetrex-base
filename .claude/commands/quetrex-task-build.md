@@ -1,5 +1,5 @@
 ---
-description: Vet, classify, and build one Quetrex task end to end — a single-unit dev pipeline for a feature/bug, or one-level epic decomposition with a human-approved DAG of child workflows that auto-merge into a per-epic integration branch. Usage: /que-task SMA-1
+description: Vet, classify, and build one Quetrex task end to end — a single-unit dev pipeline for a feature/bug, or one-level epic decomposition with a human-approved DAG of child workflows that auto-merge into a per-epic integration branch. Usage: /quetrex-task-build SMA-1
 argument-hint: <TASK-ID like SMA-1>
 ---
 
@@ -35,7 +35,7 @@ TASK_ID="$(echo "$ARGUMENTS" | tr -d '[:space:]')"
 
 If `TASK_ID` is empty, print usage and stop:
 
-> Usage: `/que-task SMA-1`
+> Usage: `/quetrex-task-build SMA-1`
 
 Source the helper and resolve context in one bash block — the helper owns all auth/access
 messaging; do not reinvent it:
@@ -67,7 +67,7 @@ node -e '
 **Actionability guard.**
 
 - Actionable starting statuses: `backlog`, `queued`. A `needs_clarity` task should go through
-  `/rework` instead — say so and stop.
+  `/quetrex-task-rework` instead — say so and stop.
 - If the task is already `pr_ready` / `merged` / `deployed` / `complete`, say so and **stop**
   (avoid duplicate work).
 - If the task is already `in_progress`:
@@ -76,9 +76,9 @@ node -e '
     exposes child tasks) → this is a **RESUME**, not duplicate work. Skip decomposition +
     approval (those are one-time, already done) and go straight to **DAG dispatch** (Step 3 B.4)
     over the existing children. This is the supported path for draining dependents that a
-    `/rework` of a failed child has since unblocked.
+    `/quetrex-task-rework` of a failed child has since unblocked.
 - If the task is an **epic child** (`parentTaskId` is set), say: "this is a child of
-  `<EPIC-ID>`; run `/que-task` on the epic, or `/rework` on the child" and **stop**. `/que-task`
+  `<EPIC-ID>`; run `/quetrex-task-build` on the epic, or `/quetrex-task-rework` on the child" and **stop**. `/quetrex-task-build`
   operates on standalone tasks and epics, not lone children.
 
 ---
@@ -88,7 +88,7 @@ node -e '
 - Read the task **and the repo code** (Glob / Grep / Read) to ground your understanding of what
   the change actually touches.
 - If the description is unclear or underspecified, **ask the user** sharp clarifying questions
-  (or suggest `/refine-task SMA-1`) and wait. Do **not** guess on genuine gaps.
+  (or suggest `/quetrex-task-refine SMA-1`) and wait. Do **not** guess on genuine gaps.
 - **Classify** the task as **Project / Feature / Bug** and persist the label:
 
 ```bash
@@ -112,7 +112,7 @@ inputs (do not restate the steps):
 
 The PR targets `main`. Dispatch the workflow in the **background**. The engine drives
 `in_progress → pr_ready` (or `needs_clarity` on bounded-loop exhaustion). The human merges later
-with `/task-merge $TASK_ID`. Then go to **Step 4**.
+with `/quetrex-task-merge $TASK_ID`. Then go to **Step 4**.
 
 ### B) PROJECT / EPIC → decompose
 
@@ -228,15 +228,15 @@ Loop:
 - **All children `merged`** → the epic is ready for **ONE human merge**. Open the single
   **integration → main PR** (`feature/<EPIC-ID>` → `main`) now — via the `git-workflow` agent or
   `gh pr create --base main --head feature/<EPIC-ID>` — so the human merge gate has a PR to act on.
-  Then point the user at **`/task-merge <EPIC-ID>`**, which reviews + squash-merges that PR and
+  Then point the user at **`/quetrex-task-merge <EPIC-ID>`**, which reviews + squash-merges that PR and
   sets the epic `merged`. Leave the epic `in_progress` until that PR merges. (Every child branch was
   already deleted on its auto-merge, so `feature/<EPIC-ID>` is the only branch carrying the epic id
-  — no `/task-merge` ambiguity.)
+  — no `/quetrex-task-merge` ambiguity.)
 
 - **Any child `needs_clarity` (or blocked-waiting on one)** → do **NOT** open the integration PR.
   Report exactly which children **failed** (`needs_clarity`) and which are **blocked-waiting** on a
-  failed dependency. The user runs **`/rework <child>`** on each failure; on pass it auto-merges
-  into the integration branch and **unblocks** its dependents. Then re-running **`/que-task
+  failed dependency. The user runs **`/quetrex-task-rework <child>`** on each failure; on pass it auto-merges
+  into the integration branch and **unblocks** its dependents. Then re-running **`/quetrex-task-build
   <EPIC-ID>`** **resumes** the dispatcher (Step 1 resume path) and drains the now-eligible
   dependents. Only when every child is `merged` is the integration → main PR opened. The epic stays
   `in_progress` throughout.
@@ -249,14 +249,14 @@ The heavy work — every unit's DEV PIPELINE — runs in **background** Workflow
 parse their stdout. Report:
 
 - **Single unit:** fire-and-forget — the one workflow title and that it is building toward
-  `pr_ready`; remind the user to `/task-merge $TASK_ID` when the PR is green + approved. Then exit;
+  `pr_ready`; remind the user to `/quetrex-task-merge $TASK_ID` when the PR is green + approved. Then exit;
   the terminal stays free.
 - **Epic:** the **DAG dispatcher itself runs in this session** (it polls the kanban between ticks)
   until the fixpoint in Step 3 B.4. While it runs, report the integration branch,
   the N children + M dependency edges, and which children **started** vs **waiting** (and on what).
   At the fixpoint, report the terminus partition (all `merged` → integration PR opened, hand off to
-  `/task-merge <EPIC-ID>`; else which children are `needs_clarity` / blocked-waiting and the
-  `/rework <child>` → `/que-task <EPIC-ID>` resume path), then exit.
+  `/quetrex-task-merge <EPIC-ID>`; else which children are `needs_clarity` / blocked-waiting and the
+  `/quetrex-task-rework <child>` → `/quetrex-task-build <EPIC-ID>` resume path), then exit.
 
 Point the user to `/workflows` and the board for live progress. Do **not** parse workflow output
 inline.
@@ -268,7 +268,7 @@ inline.
 - Any `qapi` or resolver non-zero exit → the helper already printed the correct user-facing
   message. Just stop; do not add your own auth/access explanation.
 - Non-actionable status, or an epic-child argument → report and stop (per Step 1).
-- Underspecified task → ask sharp questions or suggest `/refine-task`; do not guess.
+- Underspecified task → ask sharp questions or suggest `/quetrex-task-refine`; do not guess.
 - Epic: create **nothing** until the graph is DAG-validated **and** the user explicitly
   approves. One-level decomposition only.
 - A failed child must never cascade: independent siblings keep running, dependents wait, the

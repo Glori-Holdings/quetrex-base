@@ -1,5 +1,5 @@
 ---
-description: Mark a deployed Quetrex task Complete (deployed → complete). Usage: /task-complete SMA-1
+description: Mark a deployed Quetrex task Complete (deployed → complete). Usage: /quetrex-task-complete SMA-1
 argument-hint: <TASK-ID like SMA-1>
 ---
 
@@ -21,7 +21,7 @@ TASK_ID="$(echo "$ARGUMENTS" | tr -d '[:space:]')"
 
 If `TASK_ID` is empty, print usage and stop:
 
-> Usage: `/task-complete SMA-1`
+> Usage: `/quetrex-task-complete SMA-1`
 
 ---
 
