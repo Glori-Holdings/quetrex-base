@@ -8,7 +8,7 @@ const os = require('os');
 const path = require('path');
 const assert = require('assert');
 
-const { install, deepMerge, unionArrays } = require('../install.js');
+const { install, deepMerge, unionArrays, LEGACY_REMOVE } = require('../install.js');
 
 let passed = 0;
 function check(name, fn) {
@@ -81,10 +81,68 @@ check('a file NOT in any prior manifest is never pruned (no RETIRED blind delete
   const src = mkdtemp('qx-src-'); const dest = mkdtemp('qx-dst-');
   write(src, 'commands/quetrex-init.md', '# init');
   // User authored their own command; quetrex never installed it here.
-  write(dest, 'commands/prime.md', 'my personal prime command');
+  // (Must be a non-legacy name — legacy names are actively removed below.)
+  write(dest, 'commands/my-custom.md', 'my personal custom command');
   install(src, dest, { log: silent, stamp: 'U1' });
-  assert.ok(exists(dest, 'commands/prime.md'), 'user file untouched — installer only prunes what it recorded shipping');
-  assert.strictEqual(read(dest, 'commands/prime.md'), 'my personal prime command');
+  assert.ok(exists(dest, 'commands/my-custom.md'), 'user file untouched — installer only prunes what it recorded shipping');
+  assert.strictEqual(read(dest, 'commands/my-custom.md'), 'my personal custom command');
+});
+
+// --- functional: legacy removal --------------------------------------------
+check('a legacy command file present in dest but not shipped is removed and backed up', () => {
+  const src = mkdtemp('qx-src-'); const dest = mkdtemp('qx-dst-');
+  write(src, 'commands/quetrex-init.md', '# init');
+  write(dest, 'commands/runner.md', 'old runner command');
+  assert.ok(LEGACY_REMOVE.includes('commands/runner.md'), 'sanity: runner.md is on the legacy list');
+  const res = install(src, dest, { log: silent, stamp: 'L1' });
+  assert.ok(!exists(dest, 'commands/runner.md'), 'legacy file removed');
+  assert.ok(res.removed.includes('commands/runner.md'));
+  assert.strictEqual(read(dest, '.quetrex-backups/L1/commands/runner.md'), 'old runner command', 'backed up before removal');
+});
+
+check('a legacy skill directory present in dest is removed recursively and backed up', () => {
+  const src = mkdtemp('qx-src-'); const dest = mkdtemp('qx-dst-');
+  write(src, 'commands/quetrex-init.md', '# init');
+  write(dest, 'skills/merge-issue/SKILL.md', 'old merge-issue skill');
+  write(dest, 'skills/merge-issue/nested/extra.md', 'nested file');
+  assert.ok(LEGACY_REMOVE.includes('skills/merge-issue'), 'sanity: merge-issue is on the legacy list');
+  const res = install(src, dest, { log: silent, stamp: 'L2' });
+  assert.ok(!exists(dest, 'skills/merge-issue'), 'legacy skill directory removed');
+  assert.ok(res.removed.includes('skills/merge-issue'));
+  assert.strictEqual(
+    read(dest, '.quetrex-backups/L2/skills/merge-issue/SKILL.md'),
+    'old merge-issue skill',
+    'top-level file backed up',
+  );
+  assert.strictEqual(
+    read(dest, '.quetrex-backups/L2/skills/merge-issue/nested/extra.md'),
+    'nested file',
+    'nested file backed up',
+  );
+});
+
+check('a legacy name still shipped by the current package is protected, not removed', () => {
+  const src = mkdtemp('qx-src-'); const dest = mkdtemp('qx-dst-');
+  // secrets.md is on the legacy list, but this (hypothetical future) version
+  // still ships it — the legacy-removal pass must defer to copiedSet.
+  write(src, 'commands/secrets.md', '# secrets, still shipped');
+  const res = install(src, dest, { log: silent, stamp: 'L3' });
+  assert.ok(exists(dest, 'commands/secrets.md'), 'still-shipped legacy name survives');
+  assert.strictEqual(read(dest, 'commands/secrets.md'), '# secrets, still shipped');
+  assert.ok(!res.removed.includes('commands/secrets.md'), 'not reported as removed');
+});
+
+check('a legacy file that is a symlink in dest is skipped, not removed or backed up', () => {
+  const src = mkdtemp('qx-src-'); const dest = mkdtemp('qx-dst-');
+  const elsewhere = mkdtemp('qx-elsewhere-');
+  write(src, 'commands/quetrex-init.md', '# init');
+  write(elsewhere, 'real.md', 'user real file, linked as legacy name');
+  fs.mkdirSync(path.join(dest, 'commands'), { recursive: true });
+  fs.symlinkSync(path.join(elsewhere, 'real.md'), path.join(dest, 'commands', 'runner.md'));
+  const res = install(src, dest, { log: silent, stamp: 'L4' });
+  assert.ok(fs.lstatSync(path.join(dest, 'commands', 'runner.md')).isSymbolicLink(), 'symlink left untouched');
+  assert.ok(!res.removed.includes('commands/runner.md'), 'symlinked legacy path not reported removed');
+  assert.strictEqual(read(elsewhere, 'real.md'), 'user real file, linked as legacy name', 'link target untouched');
 });
 
 check('settings.json is never pruned even if the package stops shipping it', () => {
@@ -142,7 +200,7 @@ check('missing source dir is a no-op, not a crash', () => {
   const dest = mkdtemp('qx-dst-');
   assert.deepStrictEqual(
     install(path.join(dest, 'nope'), dest, { log: silent, stamp: 'N1' }),
-    { copied: [], pruned: [] },
+    { copied: [], pruned: [], removed: [] },
   );
 });
 

@@ -22,6 +22,56 @@ const UNION_KEYS = new Set(['allow', 'deny', 'ask']);
 const MANIFEST = '.quetrex-manifest.json'; // the set of files this version ships
 const BACKUP_DIR = '.quetrex-backups';     // timestamped copies of anything replaced/removed
 
+// Retired base artifacts — commands and skills that a PRIOR version of THIS
+// package shipped and the current version no longer does. Derived from git
+// history: (every command/skill file ever committed) minus (what HEAD ships).
+// Unlike the manifest-diff prune above (which only removes what a prior install
+// recorded on THIS machine), this is a curated, explicit, auditable list that
+// is actively removed from every destination even when this machine's manifest
+// never mentioned it, so all machines converge onto the lean current base.
+// Files unrelated to base (a user's own commands, artifacts from other tools)
+// are intentionally NOT listed and are never touched. If the package ever
+// reintroduces one of these names, the legacy-removal pass below skips it
+// automatically (see copiedSet check). Removals are backed up first.
+const LEGACY_REMOVE = [
+  // Command files (once shipped, now dropped)
+  'commands/add-runner-project.md',
+  'commands/auto-pilot.md',
+  'commands/complete.md',
+  'commands/create-prd.md',
+  'commands/create-rules.md',
+  'commands/deploy-setup.md',
+  'commands/execute.md',
+  'commands/issue-prd.md',
+  'commands/issue-rework.md',
+  'commands/map-states.md',
+  'commands/new-video.md',
+  'commands/plan-feature.md',
+  'commands/plan-project.md',
+  'commands/prime.md',
+  'commands/project-setup.md',
+  'commands/quetrex-docs.md',
+  'commands/quetrex-setup.md',
+  'commands/runner.md',
+  'commands/secrets.md',
+  'commands/update-rules.md',
+  // Skill directories (once shipped, now dropped)
+  'skills/agent-browser',
+  'skills/deploy',
+  'skills/domain-capture',
+  'skills/e2e-test',
+  'skills/issue-requeue',
+  'skills/merge-issue',
+  'skills/paperclip',
+  'skills/paperclip-create-agent',
+  'skills/paperclip-create-plugin',
+  'skills/para-memory-files',
+  'skills/quetrex',
+  'skills/quetrex-create-agent',
+  'skills/quetrex-create-plugin',
+  'skills/story-builder',
+];
+
 function isPlainObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
@@ -82,10 +132,12 @@ function isSafeRel(relPosix) {
  * Copy the package's .claude tree into destRoot, then prune files a PRIOR
  * install of this package recorded but this version no longer ships — backing
  * each up first. The manifest is the only prune authority: the installer never
- * deletes a file it cannot prove it wrote on this machine. Pure of global state
- * so it can be unit-tested against temp directories.
+ * deletes a file it cannot prove it wrote on this machine. Separately, also
+ * removes the curated LEGACY_REMOVE list (retired old-system artifacts) —
+ * backing each up first — regardless of manifest history. Pure of global
+ * state so it can be unit-tested against temp directories.
  *
- * @returns {{ copied: string[], pruned: string[] }} POSIX relative paths.
+ * @returns {{ copied: string[], pruned: string[], removed: string[] }} POSIX relative paths.
  */
 function install(srcRoot, destRoot, opts = {}) {
   const log = opts.log || console.log;
@@ -93,7 +145,7 @@ function install(srcRoot, destRoot, opts = {}) {
 
   if (!fs.existsSync(srcRoot)) {
     log('quetrex/base: no .claude directory found, skipping install');
-    return { copied: [], pruned: [] };
+    return { copied: [], pruned: [], removed: [] };
   }
 
   const toPosix = (p) => p.split(path.sep).join('/');
@@ -180,6 +232,47 @@ function install(srcRoot, destRoot, opts = {}) {
     for (const rel of prev) removeManagedFile(rel);
   }
 
+  // --- Legacy removal (explicit, curated — not manifest-gated) --------------
+  // Recursively back up every real file under `absDir`, preserving its
+  // relative path under `relDirPosix`, then remove the directory. Symlinked
+  // entries are skipped (never backed up or followed), mirroring the prune
+  // real-file-only rule.
+  const backupAndRemoveDir = (absDir, relDirPosix) => {
+    const walkDir = (curAbs, curRelPosix) => {
+      for (const entry of fs.readdirSync(curAbs, { withFileTypes: true })) {
+        const entryAbs = path.join(curAbs, entry.name);
+        const entryRelPosix = `${curRelPosix}/${entry.name}`;
+        if (entry.isSymbolicLink()) continue;               // never follow/back up a link
+        if (entry.isDirectory()) { walkDir(entryAbs, entryRelPosix); continue; }
+        if (entry.isFile()) backup(entryAbs, entryRelPosix);
+      }
+    };
+    walkDir(absDir, relDirPosix);
+    fs.rmSync(absDir, { recursive: true, force: true });
+  };
+
+  const removed = [];
+  for (const relPosix of LEGACY_REMOVE) {
+    if (copiedSet.has(relPosix)) continue;                  // this version ships it — keep
+    if ([...copiedSet].some((c) => c.startsWith(`${relPosix}/`))) continue; // dir still shipped
+    if (!isSafeRel(relPosix)) continue;                      // reject "../" / absolute
+    if (PROTECTED.has(path.basename(relPosix))) continue;
+    if (NO_PRUNE.has(path.basename(relPosix))) continue;
+    const abs = path.join(destRoot, relPosix.split('/').join(path.sep));
+    if (!within(destRoot, abs)) continue;                     // containment
+    const st = lstatSafe(abs);
+    if (!st) continue;                                        // doesn't exist
+    if (st.isSymbolicLink()) continue;                         // never remove/back up through a link
+    if (st.isFile()) {
+      if (!backup(abs, relPosix)) continue;                    // never delete without a backup
+      fs.rmSync(abs);
+      removed.push(relPosix);
+    } else if (st.isDirectory()) {
+      backupAndRemoveDir(abs, relPosix);
+      removed.push(relPosix);
+    }
+  }
+
   // --- Record the manifest for next time -----------------------------------
   fs.writeFileSync(
     manifestPath,
@@ -188,9 +281,10 @@ function install(srcRoot, destRoot, opts = {}) {
 
   for (const rel of copied) log(`  copied: ${rel}`);
   for (const rel of pruned) log(`  pruned: ${rel}`);
-  if (pruned.length) log(`  (backups saved under ${BACKUP_DIR}/${stamp})`);
+  for (const rel of removed) log(`  removed (legacy): ${rel}`);
+  if (pruned.length || removed.length) log(`  (backups saved under ${BACKUP_DIR}/${stamp})`);
 
-  return { copied: [...copiedSet], pruned };
+  return { copied: [...copiedSet], pruned, removed };
 }
 
 function ensureSecretsEnv(destRoot, log = console.log) {
@@ -219,4 +313,4 @@ if (require.main === module) {
   console.log('quetrex/base: done. Restart Claude Code to load new agents and skills.');
 }
 
-module.exports = { install, ensureSecretsEnv, deepMerge, unionArrays, isPrimitiveArray };
+module.exports = { install, ensureSecretsEnv, deepMerge, unionArrays, isPrimitiveArray, LEGACY_REMOVE };
