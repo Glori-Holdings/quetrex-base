@@ -165,6 +165,66 @@ what changed.
 
 ---
 
+## 4a. Ensure the Learning / LESSONS block (top of project CLAUDE.md)
+
+Every adopted repo's **project** `.claude/CLAUDE.md` must open with the Learning
+protocol so corrections are captured as durable one-line rules. This is
+**non-destructive** and **prepend-only** — it never rewrites or reorders existing
+content; it only inserts the block at the very top when it is absent.
+
+**Target file (resolve strictly, never the global file):**
+
+```bash
+PROJ_RULES="$REPO_ROOT/.claude/CLAUDE.md"
+```
+
+Use this exact `$REPO_ROOT`-anchored path — never a bare/CWD-relative `.claude/CLAUDE.md`
+and **never** the user's global `~/.claude/CLAUDE.md` (same hard-pin guardrail as step 4).
+
+**1. Idempotent check.** If `$PROJ_RULES` already contains a `# Learning` heading, leave
+it untouched and report *"Learning block already present."* Detect with `node` (do not
+`cat`):
+
+```bash
+if [ -f "$PROJ_RULES" ] && node -e '
+  const fs=require("fs");
+  process.exit(/^#\s+Learning\s*$/m.test(fs.readFileSync(process.argv[1],"utf8"))?0:1);
+' "$PROJ_RULES"; then
+  echo "Learning block already present."
+  LEARNING_CHANGED=0
+else
+  LEARNING_CHANGED=1   # absent — prepend below
+fi
+```
+
+**2. Prepend the block** (only when `LEARNING_CHANGED=1`). Read the existing file (if any)
+and write the Learning/LESSONS block followed by the original content — never truncate,
+never reorder. Use a `node` writer so nothing is echoed to the shell:
+
+```bash
+node -e '
+  const fs=require("fs");
+  const file=process.argv[1];
+  let cur="";
+  try { cur=fs.readFileSync(file,"utf8"); } catch {}
+  if (/^#\s+Learning\s*$/m.test(cur)) process.exit(0);   // never duplicate
+  const block=[
+    "# Learning","",
+    "When I correct you or you catch yourself making a mistake, before continuing, add the lesson as a one-line rule under #LESSONS so it never happens again.","",
+    "# LESSONS","",
+    "(Place Lessons Here)","",
+  ].join("\n");
+  fs.mkdirSync(require("path").dirname(file),{recursive:true});
+  fs.writeFileSync(file, block + (cur ? "\n" + cur : ""));
+' "$PROJ_RULES"
+echo "Prepended Learning/LESSONS block to $PROJ_RULES"
+```
+
+Same `$REPO_ROOT` pin and "never the global file" rule as step 4. Record whether 4a
+prepended the block so step 6 stages the file and step 7 reports it.
+
+---
+
 ## 4b. Ensure project Verification rules
 
 The QA agent reads the **project** `.claude/CLAUDE.md` `## Verification` section to know
@@ -431,6 +491,8 @@ Summarize for the user:
   already linked, newly created, or admin-blocked).
 - **Cleaned** — each `CLAUDE.md` file and the exact blocks/lines removed; or
   *"no stale tracker references found"* if nothing matched.
+- **Learning block** — *"prepended"* or *"already present"* for the project
+  `.claude/CLAUDE.md` Learning/LESSONS header.
 - **Verification rules** — *"added"* (with the commands written), *"already present"*, or
   the file path that now carries the `## Verification` section.
 - **Stale project commands** — which flagged command/skill artifacts were removed (by path)
