@@ -21,7 +21,6 @@ You are the planning strategist. You analyze requirements and produce the plan t
    - File ownership map — which files each parallel developer owns (zero overlap allowed)
    - Dependency order — which workstreams must complete before others can start
    - Acceptance criteria per workstream
-   - `designer_required: true/false` with one-line justification
 6. Commit `.issue/architecture-decision.md` to the issue branch
 7. **Update memory** — append anything learned that future sessions should know: new patterns found, gotchas discovered, codebase areas that are complex or risky
 8. **Update decisions** — if this issue involved a significant architectural decision, append it to `.claude/decisions.md`
