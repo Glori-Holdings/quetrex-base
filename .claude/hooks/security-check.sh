@@ -19,20 +19,20 @@ if [ -z "$CONTENT" ]; then
 fi
 
 # Secret patterns — add new services here as needed
-if echo "$CONTENT" | grep -qE \
-  'AKIA[0-9A-Z]{16}|'\
-  '-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY|'\
-  'sk_live_[0-9a-zA-Z]{24,}|'\
-  'sk_test_[0-9a-zA-Z]{24,}|'\
-  'sk-ant-[0-9a-zA-Z-]{20,}|'\
-  'sk-[a-zA-Z0-9]{40,}|'\
-  'ghp_[0-9a-zA-Z]{36}|'\
-  'github_pat_[0-9a-zA-Z_]{59}|'\
-  'xox[bpoas]-[0-9a-zA-Z-]+|'\
-  'lin_api_[0-9a-zA-Z]+|'\
-  'FlyV1 [a-zA-Z0-9+/]+|'\
-  'rnd_[0-9a-zA-Z]{32,}'; then
-  echo '{"decision": "block", "reason": "BLOCKED: Detected hardcoded secret/API key. Use environment variables or ~/.claude/secrets.env instead."}'
+PATTERN='AKIA[0-9A-Z]{16}'
+PATTERN="$PATTERN"'|-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY'
+PATTERN="$PATTERN"'|sk_live_[0-9a-zA-Z]{24,}'
+PATTERN="$PATTERN"'|sk_test_[0-9a-zA-Z]{24,}'
+PATTERN="$PATTERN"'|sk-ant-[0-9a-zA-Z-]{20,}'
+PATTERN="$PATTERN"'|sk-[a-zA-Z0-9]{40,}'
+PATTERN="$PATTERN"'|ghp_[0-9a-zA-Z]{36}'
+PATTERN="$PATTERN"'|github_pat_[0-9a-zA-Z_]{59}'
+PATTERN="$PATTERN"'|xox[bpoas]-[0-9a-zA-Z-]+'
+PATTERN="$PATTERN"'|lin_api_[0-9a-zA-Z]+'
+PATTERN="$PATTERN"'|FlyV1 [a-zA-Z0-9+/]+'
+PATTERN="$PATTERN"'|rnd_[0-9a-zA-Z]{32,}'
+if printf '%s' "$CONTENT" | grep -qE -- "$PATTERN"; then
+  jq -cn '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"Hardcoded secret/API key detected. Use environment variables or ~/.claude/secrets.env instead."}}'
   exit 0
 fi
 
