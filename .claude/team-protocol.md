@@ -23,6 +23,6 @@
 
 ## Validate
 - Each teammate runs the verification chain in `~/.claude/CLAUDE.md` before marking complete
-- Tests are part of the task that owns the code (or hand off to a `test-writer` agent in the same task)
+- Tests are part of the task that owns the code — the developer writes them alongside the implementation
 - Lead runs the same verification chain before opening the PR
 - On failure, send feedback to the responsible teammate

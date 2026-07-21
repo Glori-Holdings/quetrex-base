@@ -55,8 +55,8 @@ background. Its internal stages are the shipped agents in order.
 3. **ARCHITECT** (opus) — produce the implementation plan, a **strict file-ownership map**, and
    **testable acceptance criteria**, written to `.issue/architecture-decision.md` on the branch.
    Decompose the unit into **disjoint developer workstreams** when it warrants parallelism (zero
-   file overlap; overlapping files become a dependency, not parallel work). Flag
-   `designer_required` and, for sensitive surfaces, `security_review_required`.
+   file overlap; overlapping files become a dependency, not parallel work). For
+   sensitive surfaces, flag `security_review_required`.
 
 4. **DEVELOPER(s)** (sonnet, `isolation: worktree`) — implement with tests. When the architect
    decomposed the unit, developers run in **parallel** on disjoint files (sub-branches
