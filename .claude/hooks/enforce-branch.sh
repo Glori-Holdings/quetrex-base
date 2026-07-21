@@ -58,7 +58,7 @@ else
 fi
 
 if [ "$CURRENT_BRANCH" = "main" ] || [ "$CURRENT_BRANCH" = "master" ]; then
-  echo '{"decision": "block", "reason": "HARD-RULE #6: Use worktrees. Cannot commit/push on main."}'
+  jq -cn '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"Never commit or push on main/master — use a feature branch or worktree."}}'
   exit 0
 fi
 

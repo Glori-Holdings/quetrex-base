@@ -27,11 +27,8 @@
       "Bash(git reset --hard*)",
       "Bash(git checkout -- .)",
       "Bash(git clean -f*)",
-      "Bash(git push --force*main*)",
-      "Bash(git push --force*master*)"
-    ],
-    "ask": [
-      "Bash(rm -rf *)"
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)"
     ],
     "defaultMode": "dontAsk"
   },
@@ -53,7 +50,17 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash ~/.claude/hooks/deny-guard.sh",
+            "timeout": 5000
+          },
+          {
+            "type": "command",
             "command": "bash ~/.claude/hooks/enforce-branch.sh",
+            "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/enforce-merge-approval.sh",
             "timeout": 5000
           }
         ]
