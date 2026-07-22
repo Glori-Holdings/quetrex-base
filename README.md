@@ -2,6 +2,13 @@
 
 Claude Code base configuration for development teams. Agents, skills, and commands for a complete AI-powered development pipeline — from task to merged PR — wired to the Quetrex kanban.
 
+> **Successor / current model.** The pipeline engine now ships as the **`quetrex-factory`** plugin (plus per-stack packs) from the private marketplace **`Glori-Holdings/quetrex-plugins`**, installed via Claude Code's native plugin system. Behavior that supersedes older docs anywhere in this repo:
+> - **Merge is auto-gated** by the review agent — a clean review auto-merges; there is no `/quetrex-task-merge`. Only production deploy is manual.
+> - **Update via native `/plugin update`** — there is no `/quetrex-update`.
+> - The team runs **`auto` permission mode**, not `--dangerously-skip-permissions`.
+>
+> The onboarding guide lives in the marketplace repo (`docs/onboarding/`). This repo remains the kanban-integration command layer during the transition.
+
 ## Install
 
 ```bash
