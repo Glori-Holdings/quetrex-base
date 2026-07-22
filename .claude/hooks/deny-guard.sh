@@ -34,9 +34,9 @@ fi
 
 # other irreversible operations
 case "$c" in
-  *"git reset --hard"*) deny "git reset --hard is blocked — stash or commit first." ;;
-  *"git clean -f"*|*"git clean -df"*|*"git clean -fd"*|*"git clean -xf"*|*"git clean -fx"*) deny "git clean -f is blocked (irreversible)." ;;
-  *"git push --force"*|*"git push -f"*|*"--force-with-lease"*) deny "Force-push is blocked — use a PR + branch protection." ;;
+  *"reset --hard"*) deny "git reset --hard is blocked — stash or commit first." ;;
+  *"clean -f"*|*"clean -df"*|*"clean -fd"*|*"clean -xf"*|*"clean -fx"*) deny "git clean -f is blocked (irreversible)." ;;
+  *"push --force"*|*"push -f"*|*"--force-with-lease"*) deny "Force-push is blocked — use a PR + branch protection." ;;
 esac
 
 exit 0
