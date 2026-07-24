@@ -1,0 +1,1 @@
+{"verify":["pnpm exec tsc --noEmit","pnpm exec eslint .","pnpm exec next build","pnpm exec vitest run --reporter=dot"],"verifyQuick":["pnpm exec tsc --noEmit"]}
