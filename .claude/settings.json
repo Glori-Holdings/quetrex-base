@@ -39,7 +39,7 @@
           {
             "type": "command",
             "command": "bash ~/.claude/hooks/workflow-reminder.sh",
-            "timeout": 5000
+            "timeout": 30
           }
         ]
       }
@@ -51,17 +51,17 @@
           {
             "type": "command",
             "command": "bash ~/.claude/hooks/deny-guard.sh",
-            "timeout": 5000
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "bash ~/.claude/hooks/secret-scan.sh",
+            "timeout": 30
           },
           {
             "type": "command",
             "command": "bash ~/.claude/hooks/enforce-branch.sh",
-            "timeout": 5000
-          },
-          {
-            "type": "command",
-            "command": "bash ~/.claude/hooks/enforce-merge-approval.sh",
-            "timeout": 5000
+            "timeout": 30
           }
         ]
       },
@@ -70,8 +70,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/security-check.sh",
-            "timeout": 5000
+            "command": "bash ~/.claude/hooks/secret-scan.sh",
+            "timeout": 30
           }
         ]
       }
@@ -83,7 +83,7 @@
           {
             "type": "command",
             "command": "bash ~/.claude/hooks/auto-format.sh",
-            "timeout": 10000
+            "timeout": 30
           }
         ]
       }
@@ -94,7 +94,7 @@
           {
             "type": "command",
             "command": "bash ~/.claude/hooks/check-quetrex-update.sh",
-            "timeout": 3000
+            "timeout": 30
           }
         ]
       }

@@ -18,6 +18,28 @@ const NO_PRUNE = new Set(['settings.json']);
 // keeps existing-wins, so we never silently mutate other array settings.
 const UNION_KEYS = new Set(['allow', 'deny', 'ask']);
 
+// Quetrex-owned GLOBAL hook scripts (wired into the shipped settings.json
+// template). Matched by basename so a re-install can APPEND a newly-added
+// quetrex hook to an existing settings.json without touching any hook entry
+// the user added themselves (a different basename) and without duplicating
+// one that's already there. verify-gate.sh / merge-gate.sh are deliberately
+// excluded — those are PER-PROJECT gates installed by quetrex-init, never
+// wired into the global settings.
+const GLOBAL_HOOK_SCRIPTS = [
+  'deny-guard.sh',
+  'secret-scan.sh',
+  'enforce-branch.sh',
+  'workflow-reminder.sh',
+  'auto-format.sh',
+  'check-quetrex-update.sh',
+];
+const QUETREX_HOOK_BASENAMES = new Set(GLOBAL_HOOK_SCRIPTS);
+
+// Hook scripts that must exist in the global hooks dir but are NOT wired into
+// the global settings.json — quetrex-init copies them into a project's own
+// .claude/hooks to power the per-project verify-gate / merge-gate chain.
+const PER_PROJECT_HOOK_SCRIPTS = ['verify-gate.sh', 'merge-gate.sh'];
+
 // Bookkeeping files the installer writes into the destination.
 const MANIFEST = '.quetrex-manifest.json'; // the set of files this version ships
 const BACKUP_DIR = '.quetrex-backups';     // timestamped copies of anything replaced/removed
@@ -44,11 +66,89 @@ function unionArrays(existing, incoming) {
   return out;
 }
 
+// Extract the script basename (e.g. "deny-guard.sh") from a hook entry's
+// `command` string (e.g. "bash ~/.claude/hooks/deny-guard.sh"). Returns null
+// if the entry has no recognizable `.sh` command.
+function hookBasename(entry) {
+  const cmd = entry && typeof entry.command === 'string' ? entry.command : '';
+  const m = cmd.match(/([^/\s]+\.sh)\s*$/);
+  return m ? m[1] : null;
+}
+
+function isQuetrexHookEntry(entry) {
+  const base = hookBasename(entry);
+  return base !== null && QUETREX_HOOK_BASENAMES.has(base);
+}
+
+// Reconcile one matcher-group's `hooks` array: APPEND any incoming
+// quetrex-owned hook entry whose basename isn't already present; never touch,
+// remove, reorder, or duplicate an existing entry (quetrex or user-authored).
+function mergeHookEntries(existingHooks, incomingHooks) {
+  const out = existingHooks.slice();
+  const existingBasenames = new Set(existingHooks.map(hookBasename).filter(Boolean));
+  for (const entry of incomingHooks) {
+    if (!isQuetrexHookEntry(entry)) continue; // only quetrex-owned hooks are reconciled
+    const base = hookBasename(entry);
+    if (existingBasenames.has(base)) continue; // already present — never duplicate
+    out.push(entry);
+    existingBasenames.add(base);
+  }
+  return out;
+}
+
+// Shallow-clone a matcher-group, preserving its `hooks` array (or its absence)
+// so an object that never had a `hooks` key doesn't gain one with value
+// undefined (which would make it structurally different from the original).
+function cloneHookGroup(g) {
+  if (!('hooks' in g)) return { ...g };
+  return { ...g, hooks: Array.isArray(g.hooks) ? g.hooks.slice() : g.hooks };
+}
+
+// Merge one event's array of matcher-groups (e.g. hooks.PreToolUse). Groups
+// are matched by their `matcher` field (two groups with no `matcher` at all
+// are treated as the same group, e.g. UserPromptSubmit/Stop). A group with no
+// existing counterpart is appended wholesale (in order); a matched group has
+// its `hooks` array reconciled via mergeHookEntries.
+function mergeHookGroups(existingGroups, incomingGroups) {
+  const out = existingGroups.map(cloneHookGroup);
+  for (const incomingGroup of incomingGroups) {
+    const match = out.find((g) => (g.matcher || undefined) === (incomingGroup.matcher || undefined));
+    if (!match) {
+      out.push(cloneHookGroup(incomingGroup));
+      continue;
+    }
+    if (Array.isArray(match.hooks) && Array.isArray(incomingGroup.hooks)) {
+      match.hooks = mergeHookEntries(match.hooks, incomingGroup.hooks);
+    }
+    // else: shape mismatch — leave the existing group untouched.
+  }
+  return out;
+}
+
+// Merge the whole `hooks` settings key, event-by-event. An event missing from
+// the existing settings is taken wholesale from incoming; an event present in
+// both is reconciled group-by-group so newly-added quetrex hooks reach an
+// existing install without clobbering the user's own hook entries.
+function mergeHooksSetting(existingHooks, incomingHooks) {
+  const result = { ...existingHooks };
+  for (const event of Object.keys(incomingHooks)) {
+    if (Array.isArray(result[event]) && Array.isArray(incomingHooks[event])) {
+      result[event] = mergeHookGroups(result[event], incomingHooks[event]);
+    } else if (!(event in result)) {
+      result[event] = incomingHooks[event];
+    }
+    // else: existing non-array value for this event wins (unexpected shape).
+  }
+  return result;
+}
+
 function deepMerge(target, source) {
   const result = { ...target };
   for (const key of Object.keys(source)) {
     if (key in result) {
-      if (isPlainObject(result[key]) && isPlainObject(source[key])) {
+      if (key === 'hooks' && isPlainObject(result[key]) && isPlainObject(source[key])) {
+        result[key] = mergeHooksSetting(result[key], source[key]);
+      } else if (isPlainObject(result[key]) && isPlainObject(source[key])) {
         result[key] = deepMerge(result[key], source[key]);
       } else if (UNION_KEYS.has(key) && isPrimitiveArray(result[key]) && isPrimitiveArray(source[key])) {
         result[key] = unionArrays(result[key], source[key]);
@@ -149,6 +249,13 @@ function install(srcRoot, destRoot, opts = {}) {
         mergeSettings(srcPath, destPath, relPosix);
       } else {
         writeFresh(destPath, fs.readFileSync(srcPath));
+        // Hook scripts are invoked as `bash <path>` but must still be
+        // executable in their own right — writeFileSync does not preserve
+        // (or require) the source file's mode bits, so force it here rather
+        // than depend on every hook script in the source tree being +x.
+        if (relPosix.startsWith('hooks/') && relPosix.endsWith('.sh')) {
+          try { fs.chmodSync(destPath, 0o755); } catch {}
+        }
       }
       copied.push(relPosix);
     }
@@ -193,6 +300,56 @@ function install(srcRoot, destRoot, opts = {}) {
   return { copied: [...copiedSet], pruned };
 }
 
+/**
+ * Post-install assertion: the enforcement channel must be real, not just
+ * copied bytes. Verifies every global hook script (the ones wired into
+ * settings.json) landed in the dest hooks dir and is executable, that the
+ * per-project gate scripts (verify-gate.sh / merge-gate.sh — copied by
+ * quetrex-init into each project, never wired globally) are present, and
+ * that the merged settings.json still re-parses as valid JSON. A broken
+ * enforcement channel must fail the install loudly, never ship silently.
+ *
+ * @returns {boolean} true iff everything checks out.
+ */
+function assertHooksInstalled(destRoot, log = console.log) {
+  const hooksDir = path.join(destRoot, 'hooks');
+  const problems = [];
+
+  const checkScript = (name, requireExecutable) => {
+    const p = path.join(hooksDir, name);
+    const st = lstatSafe(p);
+    if (!st || !st.isFile()) {
+      problems.push(`missing hook script: hooks/${name}`);
+      return;
+    }
+    if (requireExecutable) {
+      try {
+        fs.accessSync(p, fs.constants.X_OK);
+      } catch {
+        problems.push(`hook script is not executable: hooks/${name} (chmod +x it in the source tree)`);
+      }
+    }
+  };
+
+  for (const name of GLOBAL_HOOK_SCRIPTS) checkScript(name, true);
+  for (const name of PER_PROJECT_HOOK_SCRIPTS) checkScript(name, false);
+
+  const settingsPath = path.join(destRoot, 'settings.json');
+  try {
+    JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+  } catch (e) {
+    problems.push(`settings.json does not re-parse as valid JSON: ${e.message}`);
+  }
+
+  if (problems.length) {
+    log('quetrex/base: INSTALL FAILED — the enforcement channel is broken:');
+    for (const p of problems) log(`  - ${p}`);
+    log('  Fix the issue(s) above and re-run the install; a partially-wired enforcement channel is not shipped.');
+    return false;
+  }
+  return true;
+}
+
 function ensureSecretsEnv(destRoot, log = console.log) {
   const secretsPath = path.join(destRoot, 'secrets.env');
   if (!fs.existsSync(secretsPath)) {
@@ -216,7 +373,17 @@ if (require.main === module) {
   console.log('quetrex/base: installing Claude Code configuration...');
   install(srcRoot, destRoot);
   ensureSecretsEnv(destRoot);
+  if (!assertHooksInstalled(destRoot)) {
+    process.exit(1);
+  }
   console.log('quetrex/base: done. Restart Claude Code to load new agents and skills.');
 }
 
-module.exports = { install, ensureSecretsEnv, deepMerge, unionArrays, isPrimitiveArray };
+module.exports = {
+  install,
+  ensureSecretsEnv,
+  assertHooksInstalled,
+  deepMerge,
+  unionArrays,
+  isPrimitiveArray,
+};
