@@ -25,6 +25,16 @@
 #     missing file is a genuine failure, not a toolchain excuse. Missing tooling
 #     or deps therefore surface as an honest block: the agent installs/fixes
 #     (bounded self-heal) or, at the cap, escalates to the user.
+#   - There is NO fail-open on a missing `jq`. block() always emits a
+#     well-formed {"decision":"block",...} — via jq when present, else via a
+#     manual-escaping fallback — so a missing dependency can never silently
+#     allow a red finish.
+#   - There is NO fail-open on a hook timeout. The whole chain runs against an
+#     internal wall-clock budget (QUETREX_VERIFY_BUDGET, default well under the
+#     external Stop/SubagentStop hook timeout) with each command capped via
+#     `timeout`/`gtimeout` (or a kill-watchdog fallback). Exhausting the budget
+#     is RED, blocked with a clear time-budget reason — the chain can never
+#     run long enough to be killed by the external timeout before it emits.
 #
 # Single source of truth for the chain (in priority order):
 #   1. $ROOT/.quetrex/verify.json  -> .verify[]   (canonical; written by init)
@@ -88,11 +98,41 @@ HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
 QUICK=0
 [ "$EVENT" = "SubagentStop" ] && QUICK=1
 
+# --- fail-closed time budget -------------------------------------------------
+# The chain below runs synchronously inside a Stop (900s) / SubagentStop
+# (600s) hook timeout (wired in quetrex-install-project-gates.sh). If the
+# chain runs long enough for the hook to be killed mid-run, no block is ever
+# emitted -> the finish is silently allowed with the tree unproven (fail-open
+# via timeout). To fail CLOSED instead, every verify command below runs under
+# an internal time budget kept safely under the external hook timeout, with
+# headroom; exhausting it is treated as RED, not skipped. QUETREX_VERIFY_BUDGET
+# (seconds) overrides the default for either event, and lets a single tiny
+# value prove the fail-closed path (e.g. QUETREX_VERIFY_BUDGET=2 with a
+# `sleep 5` command in the chain produces a block).
+BUDGET_DEFAULT=840
+[ "$EVENT" = "SubagentStop" ] && BUDGET_DEFAULT=540
+BUDGET_TOTAL="${QUETREX_VERIFY_BUDGET:-$BUDGET_DEFAULT}"
+case "$BUDGET_TOTAL" in ''|*[!0-9]*) BUDGET_TOTAL="$BUDGET_DEFAULT" ;; esac
+[ "$BUDGET_TOTAL" -gt 0 ] 2>/dev/null || BUDGET_TOTAL="$BUDGET_DEFAULT"
+
 # --- helpers ---------------------------------------------------------------
 
 # Emit a Stop/SubagentStop block and exit 0 (the only honored form).
+# FAIL-CLOSED even when jq is unavailable: if jq were the only path and it is
+# missing, the jq call would fail silently, NOTHING would reach stdout, and
+# `exit 0` would still run -> Stop/SubagentStop treat "exit 0 + no decision
+# JSON" as ALLOW, so every red build would finish as allowed. Mirrors
+# merge-gate.sh's deny(): prefer jq, but if it is unavailable fall back to
+# manual JSON escaping so a well-formed block is ALWAYS emitted.
 block() {
-  jq -cn --arg r "$1" '{decision:"block",reason:$r}'
+  local reason="$1"
+  if command -v jq >/dev/null 2>&1; then
+    jq -cn --arg r "$reason" '{decision:"block",reason:$r}'
+  else
+    local esc
+    esc=$(printf '%s' "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
+    printf '{"decision":"block","reason":"%s"}\n' "$esc"
+  fi
   exit 0
 }
 
@@ -197,9 +237,57 @@ RED=0
 FAILED_CMD=""
 FAILED_TAIL=""
 FAILED_CODE=0
+TIMED_OUT=0
+
+# Run a single command under a wall-clock cap so a hang cannot silently burn
+# through the external hook timeout. Prefers GNU `timeout`/`gtimeout`; if
+# neither is installed, falls back to a background watchdog that SIGKILLs
+# the command when its slice of the budget elapses — the chain must never be
+# allowed to run unbounded regardless of what's on PATH. Sets CMD_OUT/CMD_CODE.
+run_with_cap() {
+  local cmd="$1" cap="$2"
+  local tmo=""
+  if command -v timeout >/dev/null 2>&1; then tmo="timeout"
+  elif command -v gtimeout >/dev/null 2>&1; then tmo="gtimeout"
+  fi
+  if [ -n "$tmo" ]; then
+    CMD_OUT=$( ( cd "$ROOT" && "$tmo" -k 5 "${cap}s" bash -c "$cmd" ) 2>&1 )
+    CMD_CODE=$?
+  else
+    local outfile
+    outfile=$(mktemp "${TMPDIR:-/tmp}/quetrex-verify-out.XXXXXX" 2>/dev/null) || outfile="$QDIR/.verify-out.$$"
+    ( cd "$ROOT" && bash -c "$cmd" ) >"$outfile" 2>&1 &
+    local cpid=$!
+    ( sleep "$cap"; kill -9 "$cpid" 2>/dev/null ) &
+    local wpid=$!
+    wait "$cpid" 2>/dev/null; CMD_CODE=$?
+    kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+    CMD_OUT=$(cat "$outfile" 2>/dev/null)
+    rm -f "$outfile" 2>/dev/null
+  fi
+}
+
+BUDGET_START=$(date +%s)
 
 for cmd in "${CHAIN[@]}"; do
-  out=$( ( cd "$ROOT" && eval "$cmd" ) 2>&1 ); code=$?
+  now=$(date +%s)
+  remaining=$((BUDGET_TOTAL - (now - BUDGET_START)))
+  if [ "$remaining" -le 0 ]; then
+    # The budget was already exhausted by prior commands in this chain -> the
+    # gate fails CLOSED rather than skipping the rest of the chain unproven.
+    code=124
+    out="TIMEOUT: the ${BUDGET_TOTAL}s verification time budget (QUETREX_VERIFY_BUDGET) was exhausted before this command could run."
+    TIMED_OUT=1
+  else
+    run_with_cap "$cmd" "$remaining"
+    code="$CMD_CODE"
+    out="$CMD_OUT"
+    if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+      TIMED_OUT=1
+      out="${out}
+TIMEOUT: this command exceeded its ${remaining}s share of the ${BUDGET_TOTAL}s verification time budget (QUETREX_VERIFY_BUDGET) and was killed."
+    fi
+  fi
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   t20=$(tail20 "$out")
 
@@ -239,13 +327,21 @@ case "$n" in ''|*[!0-9]*) n=0 ;; esac
 n=$((n + 1))
 echo "$n" > "$ATTEMPTS_FILE" 2>/dev/null
 
+# A time-budget kill is called out explicitly so the agent (and the human on
+# escalation) knows this was a fail-closed timeout, not a normal assertion
+# failure, and knows to split/speed up the chain rather than "fix a bug".
+TIMEOUT_NOTE=""
+if [ "$TIMED_OUT" -eq 1 ]; then
+  TIMEOUT_NOTE=" This is a TIME-BUDGET kill: verification exceeded the ${BUDGET_TOTAL}s time budget (QUETREX_VERIFY_BUDGET) — treat as red; split or speed up the chain."
+fi
+
 if [ "$n" -lt "$MAX_ATTEMPTS" ]; then
-  block "$(printf 'VERIFY FAILED (attempt %d/%d): `%s` exited %d.\nYou cannot finish while the verification chain is red. Fix the cause and it will re-run on your next stop.\n\n--- last 20 lines ---\n%s' \
-    "$n" "$MAX_ATTEMPTS" "$FAILED_CMD" "$FAILED_CODE" "$FAILED_TAIL")"
+  block "$(printf 'VERIFY FAILED (attempt %d/%d): `%s` exited %d.%s\nYou cannot finish while the verification chain is red. Fix the cause and it will re-run on your next stop.\n\n--- last 20 lines ---\n%s' \
+    "$n" "$MAX_ATTEMPTS" "$FAILED_CMD" "$FAILED_CODE" "$TIMEOUT_NOTE" "$FAILED_TAIL")"
 fi
 
 # Cap reached -> escalate. Persist a marker the merge gate reads so red code
 # physically cannot merge even once the agent is finally allowed to stop.
 touch "$ESCALATION" 2>/dev/null
-block "$(printf 'ESCALATE: `%s` is STILL red (exit %d) after %d self-heal attempts.\nSTOP self-healing now. Do NOT report this task as done. Surface this failure to the user verbatim, including the output below, and wait for direction.\n\n--- last 20 lines ---\n%s' \
-  "$FAILED_CMD" "$FAILED_CODE" "$MAX_ATTEMPTS" "$FAILED_TAIL")"
+block "$(printf 'ESCALATE: `%s` is STILL red (exit %d) after %d self-heal attempts.%s\nSTOP self-healing now. Do NOT report this task as done. Surface this failure to the user verbatim, including the output below, and wait for direction.\n\n--- last 20 lines ---\n%s' \
+  "$FAILED_CMD" "$FAILED_CODE" "$MAX_ATTEMPTS" "$TIMEOUT_NOTE" "$FAILED_TAIL")"

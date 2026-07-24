@@ -43,7 +43,7 @@ fi
 
 ### Gate 2 — verify ledger: the LAST run of the chain is all green
 
-The ledger is append-only JSONL: one object per command run `{ts, cmd, cwd, exit, tail}`. "Green" means the most recent contiguous run of the verify chain ended with every command at `exit == 0` and was not cut short by a non-zero exit. The simplest sound check: the last line must be `exit == 0`, AND no line after the last green chain start is non-zero. Enforce it concretely:
+The ledger is append-only JSONL: one object per command run `{ts, cmd, cwd, sha, exit, tail}` (`sha` is the commit the run was proven against — merge-gate.sh's GATE 3 requires it to equal HEAD; see §2a below, which re-proves and re-pins it after this stage's own commit moves HEAD). "Green" means the most recent contiguous run of the verify chain ended with every command at `exit == 0` and was not cut short by a non-zero exit. The simplest sound check: the last line must be `exit == 0`, AND no line after the last green chain start is non-zero. Enforce it concretely:
 
 ```bash
 LEDGER="$ROOT/.quetrex/verify-ledger.jsonl"
@@ -117,6 +117,58 @@ EOF
 ```
 
 If pre-commit hooks (secret-scan, deny-guard, enforce-branch) block the commit, DO NOT try to circumvent them (no `--no-verify`, no editing hook files). Report the block verbatim to the orchestrator and stop — a blocked commit is a real signal, not an obstacle.
+
+## 2a. Full-chain sha-pin re-verification — REQUIRED, in THIS worktree's `$ROOT`
+
+HEAD just moved (the commit above). merge-gate.sh's GATE 3 will only allow the
+merge if EVERY command in the current verify chain has its MOST RECENT ledger
+line both `exit == 0` AND `sha == HEAD`. Two things make that untrue right now
+even on a genuinely clean pipeline, and BOTH must be closed here, not assumed
+away:
+
+- QA's ledger lines were proven against the PRE-commit tree/sha — this commit
+  just moved HEAD again, so any earlier sha-pin is now stale.
+- In the mandated worktree flow, the main-agent Stop hook resolves `ROOT` to
+  `CLAUDE_PROJECT_DIR` — the MAIN checkout, not this worktree — so its
+  sha-pinned ledger writes land in the MAIN directory's `.quetrex/`, never in
+  THIS worktree's `.quetrex/verify-ledger.jsonl`, which is the ledger
+  merge-gate.sh actually reads when the merge runs from this worktree. Do NOT
+  rely on that hook to have pinned anything here.
+
+So: re-run the FULL `.verify` chain from `.quetrex/verify.json` once, now, at
+the just-committed HEAD, in THIS `$ROOT`, and append a fresh sha-pinned ledger
+line for every command — the same `{ts,cmd,cwd,sha,exit,tail}` shape QA and
+verify-gate.sh write:
+
+```bash
+HEAD_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+CHAIN_RED=0
+
+while IFS= read -r cmd; do
+  [ -n "$cmd" ] || continue
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  out=$(cd "$ROOT" && eval "$cmd" 2>&1); code=$?
+  tail="$(printf '%s\n' "$out" | tail -20)"
+  jq -cn --arg ts "$ts" --arg cmd "$cmd" --arg cwd "$ROOT" \
+     --arg sha "$HEAD_SHA" --argjson exit "$code" --arg tail "$tail" \
+     '{ts:$ts,cmd:$cmd,cwd:$cwd,sha:$sha,exit:$exit,tail:$tail}' \
+     >> "$ROOT/.quetrex/verify-ledger.jsonl"
+  if [ "$code" -ne 0 ]; then
+    CHAIN_RED=1
+    echo "REFUSED: full-chain re-verification at HEAD ${HEAD_SHA:0:12} failed — \`$cmd\` exited $code."
+    printf '%s\n' "$tail"
+  fi
+done < <(jq -r '.verify[]' "$ROOT/.quetrex/verify.json")
+
+[ "$CHAIN_RED" -eq 0 ] || { echo "Do not push. Do not open a PR."; }   # -> write state.json (§4), report REFUSED, STOP.
+```
+
+If ANY command in this re-run exits non-zero, treat it exactly like any other
+gate failure: write the reason to `state.json` (§4), report REFUSED, and STOP
+— do not push, do not open a PR. QA proving green earlier does not excuse
+proving it again at the actual committed HEAD; a claim of green you did not
+just re-prove at THIS sha is exactly the stale-ledger hole this step exists to
+close. Only when this re-verification is entirely green do you proceed to §3.
 
 ## 3. Push and open the squash PR — never merge
 

@@ -63,13 +63,20 @@ Use this exact pattern for every command so the exit code is never lost to a pip
 
 ```bash
 run() {  # run "<label>" "<command>"
-  local label="$1" cmd="$2" ts out code tail
+  local label="$1" cmd="$2" ts out code tail sha
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   out=$(cd "$ROOT" && eval "$cmd" 2>&1); code=$?
   tail=$(printf '%s\n' "$out" | tail -20)
+  # Every ledger line MUST carry the commit sha it was proven against — this is
+  # the same field verify-gate.sh writes, and the ONLY thing merge-gate.sh's
+  # GATE 3 trusts to decide whether a green run still describes the commit
+  # being merged (a green line for an OLDER commit must never authorize a
+  # merge of a NEWER HEAD). Omitting `sha` here is what let a fully clean
+  # pipeline get denied — GATE 3 saw no sha-pinned green line to trust.
+  sha=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
   jq -cn --arg ts "$ts" --arg cmd "$cmd" --arg cwd "$ROOT" \
-     --argjson exit "$code" --arg tail "$tail" \
-     '{ts:$ts,cmd:$cmd,cwd:$cwd,exit:$exit,tail:$tail}' \
+     --arg sha "$sha" --argjson exit "$code" --arg tail "$tail" \
+     '{ts:$ts,cmd:$cmd,cwd:$cwd,sha:$sha,exit:$exit,tail:$tail}' \
      >> "$ROOT/.quetrex/verify-ledger.jsonl"
   printf '%s → exit %d\n' "$label" "$code"
   return $code
