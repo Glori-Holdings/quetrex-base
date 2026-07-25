@@ -9,7 +9,8 @@ When I correct you or you catch yourself making a mistake, before continuing, ad
 
 # LESSONS
 
-(Place Lessons Here)
+- Customer-facing explainers must show the real machinery (agents' specializations, the architect's PRD-decomposition that kills drift/hallucination, hooks, skills, exact commands), grounded in the actual source files — never shallow marketing gloss, and structured so the reader never hits a boring paragraph before the substance lands.
+- Before explaining or depicting how Quetrex works for the user, re-ground in the CURRENT product model from memory: it is a routine-fired kanban (plan → tap Approve on scope from the phone → automated build → review → auto-merge → manual deploy; needs_human→SMS), where the board is watch-plus-gate-taps. NEVER depict the old "run a terminal command and watch the AI type" model — that is exactly what Quetrex replaces.
 
 ## Welcome Message
 
