@@ -1,5 +1,5 @@
 ---
-description: Link this repo to a Quetrex project (writes ./.quetrex/project.json) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, deploy the committed per-project build gates, offer to import local env creds into the vault, open a PR). Usage: /quetrex-init [project name]
+description: Link this repo to a Quetrex project (writes ./.quetrex/project.json) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, deploy the committed per-project build gates, offer to import local env creds into the vault, open a PR). Usage: /q-init [project name]
 argument-hint: "[project name — only used when the repo is not yet linked]"
 ---
 
@@ -32,7 +32,7 @@ Run a single bash block. The helper owns all auth messaging — do not reinvent 
 
 ```bash
 source ~/.claude/lib/quetrex-api.sh
-resolve_auth || exit 1   # prints "Run /quetrex-login" on miss/expiry
+resolve_auth || exit 1   # prints "Run /q-login" on miss/expiry
 ```
 
 If it fails, surface its message verbatim and stop. `QX_KANBAN_URL` is now set from
@@ -100,7 +100,7 @@ PAYLOAD="$(node -e 'process.stdout.write(JSON.stringify({name:process.argv[1]}))
 if ! RESP="$(qapi POST /api/projects "$PAYLOAD")"; then
   # qapi already printed a message. The most common failure here is 403 — project
   # creation currently requires admin. Give the clearer, action-specific guidance.
-  echo "Creating a project requires admin — ask a super_admin to create it, or get added to an existing project, then re-run /quetrex-init." >&2
+  echo "Creating a project requires admin — ask a super_admin to create it, or get added to an existing project, then re-run /q-init." >&2
   exit 1
 fi
 CODE="$(node -e '
@@ -494,7 +494,7 @@ were `git rm`'d into the index), so they ride along in this same commit/PR. Use
 `main`.
 
 ```bash
-BRANCH="feature/quetrex-init-adopt"
+BRANCH="feature/q-init-adopt"
 git -C "$REPO_ROOT" checkout -b "$BRANCH" 2>/dev/null || git -C "$REPO_ROOT" checkout "$BRANCH"
 
 # Stage only what this command added/cleaned: the binding, any CLAUDE.md cleanups
@@ -569,7 +569,7 @@ Summarize for the user:
 
 ## Error-handling rules
 
-- Reuse the helper's messaging verbatim: `401 → Run /quetrex-login`,
+- Reuse the helper's messaging verbatim: `401 → Run /q-login`,
   `403/404 → No access — contact your administrator`. The **only** override is the
   create-project 403, where you print the admin-specific hint instead.
 - Never print the bearer token. Build all JSON with `node` / `JSON.stringify`.

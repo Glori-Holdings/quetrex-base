@@ -11,7 +11,7 @@ color: orange
 
 You are the terminus of the pipeline. Your only output is a squash-merge PR to `main`, awaiting a human. You do not evaluate code quality yourself and you do not trust anything the orchestrator or any prior agent *told* you in chat. You trust exactly one thing: the on-disk artifacts under `$ROOT/.quetrex/`. A stage passed only if its artifact says so.
 
-You NEVER merge. Merge is a separate, human-gated command (`/quetrex-task-merge`). Your job ends at an open PR.
+You NEVER merge. Merge is a separate, human-gated command (`/q-task-merge`). Your job ends at an open PR.
 
 ## 0. Resolve the repo root (worktree-safe)
 
@@ -176,7 +176,7 @@ close. Only when this re-verification is entirely green do you proceed to §3.
 git -C "$ROOT" push -u origin "$BRANCH"
 ```
 
-Open the PR to `main`. Do NOT pass any auto-merge flag (`--auto`, `--merge`, `--squash`, `--admin` are forbidden here). The PR is opened squash-*intent*; the actual squash merge happens later, by a human via `/quetrex-task-merge`.
+Open the PR to `main`. Do NOT pass any auto-merge flag (`--auto`, `--merge`, `--squash`, `--admin` are forbidden here). The PR is opened squash-*intent*; the actual squash merge happens later, by a human via `/q-task-merge`.
 
 ```bash
 gh pr create --base main --head "$BRANCH" \
@@ -196,7 +196,7 @@ gh pr create --base main --head "$BRANCH" \
 - ESCALATION — absent
 
 ## Merge
-Squash-merge to main, human-approved only via `/quetrex-task-merge`. Do NOT auto-merge.
+Squash-merge to main, human-approved only via `/q-task-merge`. Do NOT auto-merge.
 EOF
 ```
 

@@ -23,7 +23,7 @@ const UNION_KEYS = new Set(['allow', 'deny', 'ask']);
 // quetrex hook to an existing settings.json without touching any hook entry
 // the user added themselves (a different basename) and without duplicating
 // one that's already there. verify-gate.sh / merge-gate.sh are deliberately
-// excluded — those are PER-PROJECT gates installed by quetrex-init, never
+// excluded — those are PER-PROJECT gates installed by q-init, never
 // wired into the global settings.
 const GLOBAL_HOOK_SCRIPTS = [
   'deny-guard.sh',
@@ -36,7 +36,7 @@ const GLOBAL_HOOK_SCRIPTS = [
 const QUETREX_HOOK_BASENAMES = new Set(GLOBAL_HOOK_SCRIPTS);
 
 // Hook scripts that must exist in the global hooks dir but are NOT wired into
-// the global settings.json — quetrex-init copies them into a project's own
+// the global settings.json — q-init copies them into a project's own
 // .claude/hooks to power the per-project verify-gate / merge-gate chain.
 const PER_PROJECT_HOOK_SCRIPTS = ['verify-gate.sh', 'merge-gate.sh'];
 
@@ -305,7 +305,7 @@ function install(srcRoot, destRoot, opts = {}) {
  * copied bytes. Verifies every global hook script (the ones wired into
  * settings.json) landed in the dest hooks dir and is executable, that the
  * per-project gate scripts (verify-gate.sh / merge-gate.sh — copied by
- * quetrex-init into each project, never wired globally) are present, and
+ * q-init into each project, never wired globally) are present, and
  * that the merged settings.json still re-parses as valid JSON. A broken
  * enforcement channel must fail the install loudly, never ship silently.
  *

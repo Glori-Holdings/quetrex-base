@@ -56,12 +56,12 @@ check('deepMerge leaves object-arrays (hooks) to existing-wins', () => {
 // --- functional: install() -------------------------------------------------
 check('fresh install copies tree and writes a manifest', () => {
   const src = mkdtemp('qx-src-'); const dest = mkdtemp('qx-dst-');
-  write(src, 'commands/quetrex-init.md', '# init');
+  write(src, 'commands/q-init.md', '# init');
   write(src, 'agents/qa.md', '# qa');
   const res = install(src, dest, { log: silent, stamp: 'T1' });
-  assert.ok(exists(dest, 'commands/quetrex-init.md') && exists(dest, 'agents/qa.md'));
+  assert.ok(exists(dest, 'commands/q-init.md') && exists(dest, 'agents/qa.md'));
   const manifest = JSON.parse(read(dest, '.quetrex-manifest.json'));
-  assert.deepStrictEqual(manifest.files, ['agents/qa.md', 'commands/quetrex-init.md']);
+  assert.deepStrictEqual(manifest.files, ['agents/qa.md', 'commands/q-init.md']);
   assert.strictEqual(res.pruned.length, 0);
 });
 
@@ -79,7 +79,7 @@ check('manifest diff prunes a dropped file and backs it up', () => {
 
 check('a file NOT in any prior manifest is never pruned (no RETIRED blind delete)', () => {
   const src = mkdtemp('qx-src-'); const dest = mkdtemp('qx-dst-');
-  write(src, 'commands/quetrex-init.md', '# init');
+  write(src, 'commands/q-init.md', '# init');
   // User authored their own command; quetrex never installed it here.
   write(dest, 'commands/prime.md', 'my personal prime command');
   install(src, dest, { log: silent, stamp: 'U1' });
@@ -112,13 +112,13 @@ check('copy replaces a dest symlink instead of writing through it', () => {
   const src = mkdtemp('qx-src-'); const dest = mkdtemp('qx-dst-');
   const elsewhere = mkdtemp('qx-elsewhere-');
   write(elsewhere, 'real.md', 'user real file');
-  write(src, 'commands/quetrex-init.md', 'package content');
+  write(src, 'commands/q-init.md', 'package content');
   fs.mkdirSync(path.join(dest, 'commands'), { recursive: true });
-  fs.symlinkSync(path.join(elsewhere, 'real.md'), path.join(dest, 'commands', 'quetrex-init.md'));
+  fs.symlinkSync(path.join(elsewhere, 'real.md'), path.join(dest, 'commands', 'q-init.md'));
   install(src, dest, { log: silent, stamp: 'SL1' });
   assert.strictEqual(read(elsewhere, 'real.md'), 'user real file', 'symlink target NOT clobbered');
-  assert.strictEqual(read(dest, 'commands/quetrex-init.md'), 'package content', 'link replaced by fresh file');
-  assert.ok(!fs.lstatSync(path.join(dest, 'commands', 'quetrex-init.md')).isSymbolicLink());
+  assert.strictEqual(read(dest, 'commands/q-init.md'), 'package content', 'link replaced by fresh file');
+  assert.ok(!fs.lstatSync(path.join(dest, 'commands', 'q-init.md')).isSymbolicLink());
 });
 
 check('malformed dest settings.json is backed up before merged defaults are written', () => {

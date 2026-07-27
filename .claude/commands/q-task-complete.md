@@ -1,5 +1,5 @@
 ---
-description: Mark a deployed Quetrex task Complete (deployed → complete). Usage: /quetrex-task-complete SMA-1
+description: Mark a deployed Quetrex task Complete (deployed → complete). Usage: /q-task-complete SMA-1
 argument-hint: <TASK-ID like SMA-1>
 ---
 
@@ -21,7 +21,7 @@ TASK_ID="$(echo "$ARGUMENTS" | tr -d '[:space:]')"
 
 If `TASK_ID` is empty, print usage and stop:
 
-> Usage: `/quetrex-task-complete SMA-1`
+> Usage: `/q-task-complete SMA-1`
 
 ---
 
@@ -29,8 +29,8 @@ If `TASK_ID` is empty, print usage and stop:
 
 ```bash
 source ~/.claude/lib/quetrex-api.sh
-resolve_auth    || exit 1      # prints "Run /quetrex-login" on failure
-resolve_project || exit 1      # prints "Run /quetrex-init" on failure
+resolve_auth    || exit 1      # prints "Run /q-login" on failure
+resolve_project || exit 1      # prints "Run /q-init" on failure
 echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL"
 ```
 

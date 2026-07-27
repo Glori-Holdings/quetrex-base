@@ -1,9 +1,9 @@
 # THE DEV PIPELINE — shared engine
 
 This is the single canonical definition of the development pipeline that drives one **unit of
-work** from kanban intake to an open PR. It is the source of truth: `/quetrex-task-build` and `/quetrex-task-rework`
-both reference it and **neither restates the steps**. `/quetrex-task-build` runs it once per standalone
-task and once per epic child; `/quetrex-task-rework` runs the identical engine on re-queue.
+work** from kanban intake to an open PR. It is the source of truth: `/q-task-build` and `/q-task-rework`
+both reference it and **neither restates the steps**. `/q-task-build` runs it once per standalone
+task and once per epic child; `/q-task-rework` runs the identical engine on re-queue.
 
 This is the proven **double-loop** pipeline (inner developer⇄QA loop, outer reviewer loop), run
 end to end by the **Workflow tool** in the **background** so the terminal stays free.
@@ -91,7 +91,7 @@ background. Its internal stages are the shipped agents in order.
 
 10. **Teardown** per `worktree-workflow`: the pipeline leaves **no dangling worktree or sub-branch
     of its own**. The unit branch and its PR remain — merging the PR is a later gate
-    (`/quetrex-task-merge` for a standalone task; the epic DAG's auto-merge into the integration branch
+    (`/q-task-merge` for a standalone task; the epic DAG's auto-merge into the integration branch
     for an epic child).
 
 ---
@@ -103,7 +103,7 @@ background. Its internal stages are the shipped agents in order.
 - `in_progress` → `needs_clarity` — bounded-loop exhaustion, hard blocker, or unanswerable
   ambiguity (step 7), always with an AI-note.
 
-The engine **never** sets `merged` / `deployed` / `complete` — those are human / `/quetrex-task-merge` /
+The engine **never** sets `merged` / `deployed` / `complete` — those are human / `/q-task-merge` /
 epic-DAG gates outside this engine.
 
 ---

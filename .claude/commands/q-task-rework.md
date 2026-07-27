@@ -1,5 +1,5 @@
 ---
-description: Discuss why a failed Quetrex task didn't pass, agree a fix plan, then re-queue and re-run the shared dev pipeline (off the epic integration branch for a child). Usage: /quetrex-task-rework SMA-1
+description: Discuss why a failed Quetrex task didn't pass, agree a fix plan, then re-queue and re-run the shared dev pipeline (off the epic integration branch for a child). Usage: /q-task-rework SMA-1
 argument-hint: <TASK-ID like SMA-1>
 ---
 
@@ -8,7 +8,7 @@ argument-hint: <TASK-ID like SMA-1>
 Take a task that came back from the pipeline (typically `needs_clarity`), understand **why it
 failed**, **discuss the fix with the user until you are confident it will work**, write the agreed
 plan to the kanban, re-queue the task, and re-run **THE DEV PIPELINE** — the **same shared engine**
-`/quetrex-task-build` uses, defined once in `.claude/lib/dev-pipeline.md` and **not restated here**.
+`/q-task-build` uses, defined once in `.claude/lib/dev-pipeline.md` and **not restated here**.
 
 This command is the intake + discussion + re-dispatch front end; the heavy work runs in a
 background Workflow-tool run so the terminal stays free.
@@ -30,22 +30,22 @@ TASK_ID="$(echo "$ARGUMENTS" | tr -d '[:space:]')"
 
 If `TASK_ID` is empty, print usage and stop:
 
-> Usage: `/quetrex-task-rework SMA-1`
+> Usage: `/q-task-rework SMA-1`
 
 Source the helper and resolve context in one bash block — the helper owns all auth/access
 messaging; do not reinvent it:
 
 ```bash
 source ~/.claude/lib/quetrex-api.sh
-resolve_auth    || exit 1      # prints "Run /quetrex-login" on failure
-resolve_project || exit 1      # prints "Run /quetrex-init" on failure
+resolve_auth    || exit 1      # prints "Run /q-login" on failure
+resolve_project || exit 1      # prints "Run /q-init" on failure
 qapi GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1   # validate access
 TASK="$(qapi GET "/api/tasks/$TASK_ID")"            || exit 1
 echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL"
 ```
 
 If any resolver or `qapi` call exits non-zero, the helper already printed the correct message
-(401 → `Run /quetrex-login`; 403/404 → `No access — contact your administrator`; other →
+(401 → `Run /q-login`; 403/404 → `No access — contact your administrator`; other →
 `Quetrex API error (HTTP <code>)`). Just stop.
 
 Read the fields from `$TASK` — including the **AI-notes** the engine left on failure:
@@ -72,7 +72,7 @@ node -e '
 ' "$TASK"
 ```
 
-**Discover the failed branch / PR** by the quetrex-task-merge convention. The engine names the unit branch
+**Discover the failed branch / PR** by the q-task-merge convention. The engine names the unit branch
 `feature/<TASK_ID>-<slug>`, so match the **whole token** — `SMA-1` must not match `SMA-12`:
 
 ```bash
@@ -87,11 +87,11 @@ inspect it with `git diff main...feature/$TASK_ID-<slug>`. Then **read the relev
 (Glob / Grep / Read) around the changed surface so your explanation and fix plan are grounded in
 reality, not just the notes.
 
-**State warning (non-blocking).** `/quetrex-task-rework` expects a task in a rework-expecting state —
+**State warning (non-blocking).** `/q-task-rework` expects a task in a rework-expecting state —
 canonically `needs_clarity`. If `status` is something else (e.g. `pr_ready`, `merged`, `deployed`,
 `complete`, `backlog`, `queued`, or already `in_progress`), **warn clearly**:
 
-> ⚠️ `SMA-1` is in `<status>`, not `needs_clarity` — `/quetrex-task-rework` is meant for tasks the pipeline sent
+> ⚠️ `SMA-1` is in `<status>`, not `needs_clarity` — `/q-task-rework` is meant for tasks the pipeline sent
 > back. Re-running may duplicate in-flight or finished work. Do you want to continue anyway?
 
 and **wait for the user to confirm** before proceeding. Do not auto-continue.
@@ -106,7 +106,7 @@ and **wait for the user to confirm** before proceeding. Do not auto-continue.
 - **Discuss the fix interactively.** Propose a fix plan, then iterate with the user — ask sharp
   questions on any genuine gap, fold in their answers, and refine — until **you are confident the
   fix will actually work**. Do **not** jump straight to re-running the pipeline. This discussion is
-  the whole point of `/quetrex-task-rework`; a re-run without a corrected, agreed plan will just fail again.
+  the whole point of `/q-task-rework`; a re-run without a corrected, agreed plan will just fail again.
 
 ---
 
@@ -131,12 +131,12 @@ qx_task_status "$TASK_ID" queued
 Determine the base branch from `parentTaskId`:
 
 - **Standalone task** (`parentTaskId` empty) → `BASE_BRANCH=main`; the PR targets `main`. The human
-  merges later with `/quetrex-task-merge $TASK_ID`.
+  merges later with `/q-task-merge $TASK_ID`.
 - **Epic child** (`parentTaskId` set, e.g. `SMA-1.2`) → `BASE_BRANCH=feature/<EPIC-ID>` (the
   per-epic integration branch); the PR targets the integration branch. On pass it auto-merges into
   the integration branch and **unblocks** its dependents. Unblocking only flips their readiness — it
   does **not** dispatch them; this command rebuilds the **one** child only. To actually drain the
-  now-eligible dependents, the user **re-runs `/quetrex-task-build <EPIC-ID>`**, which resumes the DAG
+  now-eligible dependents, the user **re-runs `/q-task-build <EPIC-ID>`**, which resumes the DAG
   dispatcher over the existing children (the epic stays `in_progress`). Surface this next step in the
   report.
 
@@ -162,7 +162,7 @@ Dispatch the workflow in the **background**. The engine drives `queued/in_progre
 
 Report what was launched: the workflow title, the base branch, and that it is building toward
 `pr_ready`. For an **epic child**, also state that on pass it auto-merges into `feature/<EPIC-ID>`
-and unblocks its dependents, and that the user should then **re-run `/quetrex-task-build <EPIC-ID>`** to
+and unblocks its dependents, and that the user should then **re-run `/q-task-build <EPIC-ID>`** to
 resume the dispatcher and drain those dependents. Point the user to `/workflows` and the board for
 live progress. Do **not** parse workflow output inline or block the terminal.
 
