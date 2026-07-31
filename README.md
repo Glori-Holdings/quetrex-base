@@ -5,10 +5,21 @@ hooks, and kanban-wired commands that carry a task from written scope to a
 reviewed, merged PR — with the gates enforced by code rather than by asking
 Claude nicely.
 
-> **Current model.** The pipeline engine ships as the **`q`** plugin (plus
-> per-stack packs) from the private marketplace
+> **Current model.** The pipeline engine ships as the **`quetrex-factory`**
+> plugin (plus per-stack packs: `quetrex-nextjs`, `quetrex-python`,
+> `quetrex-rust`, `quetrex-swift`) from the private marketplace
 > **`Glori-Holdings/quetrex-plugins`**, installed through Claude Code's native
-> plugin system. Two consequences that supersede older docs anywhere in this repo:
+> plugin system:
+>
+> ```bash
+> /plugin marketplace add Glori-Holdings/quetrex-plugins
+> /plugin install quetrex-factory@quetrex
+> ```
+>
+> This repo is the **`q`** plugin — the kanban-wired command layer
+> (`/q:task-build`, `/q:init`, `/q:deploy`) that sits on top of that engine. It
+> is distributed via npm, not through the marketplace. Two consequences that
+> supersede older docs anywhere in this repo:
 >
 > - **Merge is gated by artifact, not by a prompt.** A separate review agent
 >   writes `AUTO_MERGE` / `REWORK` / `ESCALATE_HUMAN`, and `merge-gate.sh` allows

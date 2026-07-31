@@ -1,7 +1,7 @@
 {
   "name": "q",
   "version": "2.0.1",
-  "description": "Quetrex — a gated agent pipeline for Claude Code. Specialized agents plan, build, prove and review a task end to end; committed hooks make the gates unskippable. Commands namespace as /q:task-build, /q:init, /q:deploy.",
+  "description": "Quetrex kanban command layer for Claude Code. Wires a Quetrex board to the gated agent pipeline shipped by the quetrex-factory plugin (marketplace: Glori-Holdings/quetrex-plugins), carrying a task from written scope to a reviewed, merged PR. Commands namespace as /q:task-build, /q:init, /q:deploy.",
   "author": {
     "name": "Glen Barnhardt",
     "url": "https://github.com/Glori-Holdings/quetrex-base"
