@@ -29,7 +29,7 @@ npm install -g quetrex-base
 Or install directly from GitHub (works with private repos — requires GitHub access):
 
 ```bash
-npm install -g github:Barnhardt-Enterprises-Inc/quetrex-base
+npm install -g github:Glori-Holdings/quetrex-base
 ```
 
 ## First time on a new machine
