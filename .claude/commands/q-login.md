@@ -1,5 +1,5 @@
 ---
-description: Log in to the Quetrex kanban via browser device-flow and store a per-user API token at ~/.quetrex/auth.json. Run once per machine before /quetrex-init. Usage: /quetrex-login [kanbanUrl]
+description: Log in to the Quetrex kanban via browser device-flow and store a per-user API token at ~/.quetrex/auth.json. Run once per machine before /q-init. Usage: /q-login [kanbanUrl]
 argument-hint: "[kanbanUrl — defaults to https://dash.quetrex.com]"
 ---
 
@@ -128,14 +128,14 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   case "$STATUS" in
     ok)      break ;;
     pending) sleep "$INTERVAL" ;;
-    expired) echo "Login code expired — run /quetrex-login again." >&2; exit 1 ;;
+    expired) echo "Login code expired — run /q-login again." >&2; exit 1 ;;
     denied)  echo "Login was denied in the browser." >&2; exit 1 ;;
-    *)       echo "Login failed — run /quetrex-login again." >&2; exit 1 ;;
+    *)       echo "Login failed — run /q-login again." >&2; exit 1 ;;
   esac
 done
 
 if [ "$STATUS" != "ok" ]; then
-  echo "Login timed out after $MINUTES minutes — run /quetrex-login again." >&2
+  echo "Login timed out after $MINUTES minutes — run /q-login again." >&2
   exit 1
 fi
 
@@ -154,7 +154,7 @@ temp config and never echoes it) to fetch the caller's record and report the ema
 
 ```bash
 source ~/.claude/lib/quetrex-api.sh
-resolve_auth || { echo "Login saved, but auth could not be loaded — run /quetrex-login again." >&2; exit 1; }
+resolve_auth || { echo "Login saved, but auth could not be loaded — run /q-login again." >&2; exit 1; }
 
 ME="$(qapi GET /api/users)" || exit 1   # qapi prints the right message on non-2xx
 EMAIL="$(node -e '

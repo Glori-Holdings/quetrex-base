@@ -16,3 +16,21 @@ node_modules/
 .env
 .env.*
 !.env.example
+
+# Personal, machine-scoped Claude config — never commit (course L2: "local" scope)
+.claude/settings.local.json
+.claude/CLAUDE.local.md
+
+# Quetrex runtime artifacts.
+# Whitelist form on purpose: everything the gates write at runtime is ignored,
+# and only the two PROJECT CONFIG artifacts are tracked. A new runtime artifact
+# is therefore ignored by default instead of leaking into a commit.
+#   tracked : project.json (kanban binding), verify.json (the verify chain)
+#   ignored : verify-ledger.jsonl, verify-attempts, ESCALATION, state.json,
+#             review-verdict.json, security-findings.json, qa-report.json,
+#             plan/, build/
+# git-workflow must stage explicit paths — never `git add -A` — because a
+# commit that sweeps these in moves HEAD out from under a sha-pinned verdict.
+.quetrex/*
+!.quetrex/project.json
+!.quetrex/verify.json

@@ -1,0 +1,15 @@
+# Git-ignored files copied into every worktree Claude Code creates.
+# A worktree never carries ignored files, so without this an agent lands with
+# no environment and cannot tell "the env is missing" from "the code is broken"
+# — it burns its self-heal budget fixing code that was never broken.
+# Dependencies are NOT listed here: they are installed in the worktree, not copied.
+.env
+.env.local
+.env.development
+.env.development.local
+.env.test
+.env.test.local
+.env.production
+.env.production.local
+.claude/settings.local.json
+.claude/CLAUDE.local.md

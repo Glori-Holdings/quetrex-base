@@ -69,8 +69,14 @@ write_ledger_at() {  # write_ledger_at <sha>
     >> "$FIXTURE/.quetrex/verify-ledger.jsonl"
 }
 
-write_verdict_at() {  # write_verdict_at <sha>
-  jq -cn --arg sha "$1" '{verdict:"AUTO_MERGE",sha:$sha,confirmed:[]}' \
+# A verdict from a genuinely clean run. `inputs.nativeSecurityReview` must
+# record that the native /security-review actually EXECUTED ("clean" or
+# "issues"); the gate treats anything else as the reviewer having graded its
+# own homework. An AUTO_MERGE without it is not a mergeable state, so the
+# happy-path fixture has to carry it.
+write_verdict_at() {  # write_verdict_at <sha> [nativeSecurityReview]
+  jq -cn --arg sha "$1" --arg nsr "${2:-clean}" \
+    '{verdict:"AUTO_MERGE",sha:$sha,confirmed:[],inputs:{nativeSecurityReview:$nsr}}' \
     > "$FIXTURE/.quetrex/review-verdict.json"
 }
 
@@ -154,6 +160,24 @@ if [ "$CODE" -eq 0 ] && is_deny "$OUT"; then
   pass "DENY (the fixed defect): pre-fix sha-less ledger still denies a green run"
 else
   fail "DENY(no-sha ledger): expected a deny decision, got exit $CODE stdout: [$OUT]"
+fi
+
+# =============================================================================
+# 5) DENY — everything else is green, but the verdict records that the native
+#    /security-review never actually ran. This is the EXACT state this repo's
+#    own .quetrex/review-verdict.json was in ("not_available_in_env") while
+#    still carrying AUTO_MERGE: an auto-merge with no independent security
+#    pass behind it. The gate must refuse to ship on the reviewer's own say-so.
+# =============================================================================
+write_ledger_at "$HEAD_SHA"
+write_verdict_at "$HEAD_SHA" "not_available_in_env"
+rm -f "$FIXTURE/.quetrex/security-findings.json" "$FIXTURE/.quetrex/ESCALATION"
+
+OUT="$(run_hook "$FIXTURE")"; CODE=$?
+if [ "$CODE" -eq 0 ] && is_deny "$OUT"; then
+  pass "DENY: AUTO_MERGE without an executed native /security-review is denied"
+else
+  fail "DENY(no native security pass): expected a deny decision, got exit $CODE stdout: [$OUT]"
 fi
 
 exit "$FAIL"

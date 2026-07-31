@@ -1,5 +1,5 @@
 ---
-description: Create a new Backlog task on the Quetrex kanban — interactively gather title, description, assignee, and priority, then create it. Does not start work. Usage: /quetrex-task-new
+description: Create a new Backlog task on the Quetrex kanban — interactively gather title, description, assignee, and priority, then create it. Does not start work. Usage: /q-task-new
 ---
 
 # New Task
@@ -17,8 +17,8 @@ Run a single bash block. The helper owns all auth/access messaging — do not re
 
 ```bash
 source ~/.claude/lib/quetrex-api.sh
-resolve_auth    || exit 1      # prints "Run /quetrex-login" on failure
-resolve_project || exit 1      # prints "Run /quetrex-init" on failure
+resolve_auth    || exit 1      # prints "Run /q-login" on failure
+resolve_project || exit 1      # prints "Run /q-init" on failure
 echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL"
 ```
 
@@ -32,7 +32,7 @@ If either resolver fails, surface its message verbatim and stop.
 qapi GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1
 ```
 
-A non-zero exit means `qapi` already printed the correct message (401 → `Run /quetrex-login`,
+A non-zero exit means `qapi` already printed the correct message (401 → `Run /q-login`,
 403/404 → `No access — contact your administrator`, other → `Quetrex API error (HTTP <code>)`).
 Just stop.
 

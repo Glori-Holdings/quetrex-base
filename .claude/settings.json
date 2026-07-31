@@ -27,18 +27,29 @@
       "Bash(git reset --hard*)",
       "Bash(git checkout -- .)",
       "Bash(git clean -f*)",
-      "Bash(git push --force:*)",
       "Bash(git push -f:*)"
     ],
     "defaultMode": "dontAsk"
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/session-state.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/workflow-reminder.sh",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/workflow-reminder.sh\"",
             "timeout": 30
           }
         ]
@@ -50,18 +61,23 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/deny-guard.sh",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/deny-guard.sh\"",
             "timeout": 30
           },
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/secret-scan.sh",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/secret-scan.sh\"",
             "timeout": 30
           },
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/enforce-branch.sh",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/enforce-branch.sh\"",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/merge-gate.sh\"",
+            "timeout": 60
           }
         ]
       },
@@ -70,7 +86,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/secret-scan.sh",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/secret-scan.sh\"",
             "timeout": 30
           }
         ]
@@ -82,7 +98,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/auto-format.sh",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/auto-format.sh\"",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/edit-gate.sh\"",
             "timeout": 30
           }
         ]
@@ -93,8 +114,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/.claude/hooks/check-quetrex-update.sh",
-            "timeout": 30
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/verify-gate.sh\"",
+            "timeout": 900
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/verify-gate.sh\"",
+            "timeout": 600
           }
         ]
       }

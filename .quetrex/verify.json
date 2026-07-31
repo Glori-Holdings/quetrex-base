@@ -1,0 +1,12 @@
+{
+  "verify": [
+    "npm run check:js",
+    "npm run check:sh",
+    "npm run check:json",
+    "npm test"
+  ],
+  "verifyQuick": [
+    "npm run check:js",
+    "npm run check:sh"
+  ]
+}
