@@ -1,0 +1,18 @@
+{
+  "name": "q",
+  "version": "2.0.1",
+  "description": "Quetrex — a gated agent pipeline for Claude Code. Specialized agents plan, build, prove and review a task end to end; committed hooks make the gates unskippable. Commands namespace as /q:task-build, /q:init, /q:deploy.",
+  "author": {
+    "name": "Glen Barnhardt",
+    "url": "https://github.com/Barnhardt-Enterprises-Inc/quetrex-base"
+  },
+  "homepage": "https://github.com/Barnhardt-Enterprises-Inc/quetrex-base",
+  "license": "MIT",
+  "keywords": [
+    "quetrex",
+    "pipeline",
+    "verification",
+    "hooks",
+    "code-review"
+  ]
+}

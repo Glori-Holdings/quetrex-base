@@ -78,14 +78,6 @@ else
   indicator=""
 fi
 
-# --- 4.5. Check for quetrex-base update ---
-update_notice=""
-update_flag="$HOME/.claude/.quetrex-update-available"
-if [ -f "$update_flag" ]; then
-  available_version=$(cat "$update_flag" 2>/dev/null)
-  [ -n "$available_version" ] && update_notice="  ⬆ quetrex-base v${available_version} · /quetrex-update"
-fi
-
 # --- 5. Terminal width ---
 term_width=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
 
@@ -127,13 +119,11 @@ else
   printf "%b\n" "$colored_left"
 fi
 
-# --- 7. Print Line 2: colored bar + percentage + compact indicator + update notice ---
+# --- 7. Print Line 2: colored bar + percentage + compact indicator ---
 pct_label=" ${used_pct}%"
 indicator_len=0
 [ -n "$indicator" ] && indicator_len=${#indicator}
-update_len=0
-[ -n "$update_notice" ] && update_len=${#update_notice}
-label_len=$(( ${#pct_label} + indicator_len + update_len ))
+label_len=$(( ${#pct_label} + indicator_len ))
 
 bar_width=$(( term_width - label_len ))
 [ "$bar_width" -lt 10 ] && bar_width=10
@@ -148,12 +138,10 @@ for ((i=0; i<empty; i++)); do bar_empty+="▱"; done
 
 c_empty="\033[38;2;68;64;60m"
 c_bar="\033[38;2;${bar_r};${bar_g};${bar_b}m"
-c_update="\033[38;2;77;182;172m"
 
-printf "%b%s%b%s%b%s%b%s%b%s%b\n" \
+printf "%b%s%b%s%b%s%b%s%b\n" \
   "$c_bar" "$bar_filled" \
   "$c_empty" "$bar_empty" \
   "$c_bar" "$pct_label" \
   "$c_bar" "$indicator" \
-  "$c_update" "$update_notice" \
   "$c_reset"

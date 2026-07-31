@@ -4,7 +4,10 @@
   "description": "Quetrex Base — Claude Code base configuration for development teams. Agents, skills, and commands for a complete AI-powered development pipeline.",
   "scripts": {
     "postinstall": "node install.js",
-    "test": "node test/install.test.js"
+    "check:js": "node --check install.js && node --check test/install.test.js",
+    "check:sh": "for f in .claude/hooks/*.sh .claude/lib/*.sh .claude/*.sh .claude/skills/*/*.sh .claude/skills/*/scripts/*.sh test/*.sh; do [ -f \"$f\" ] || continue; bash -n \"$f\" || exit 1; done",
+    "check:json": "node -e \"const fs=require('fs');const files=['package.json','.claude/settings.json','.claude/templates/verify.json','.quetrex/verify.json','.claude-plugin/plugin.json','hooks/hooks.json'];for(const f of files){JSON.parse(fs.readFileSync(f,'utf8'))}console.log('ok - '+files.length+' JSON files parse')\"",
+    "test": "node test/install.test.js && bash test/merge-gate.test.sh"
   },
   "engines": {
     "node": ">=18"
@@ -28,11 +31,13 @@
     ".claude/skills/qa-verify/",
     ".claude/skills/tab-control/",
     ".claude/skills/worktree-workflow/",
-    ".claude/CLAUDE.md",
+    ".claude/quetrex-doctrine.md",
     ".claude/settings.json",
+    ".claude/templates/",
     ".claude/statusline-command.sh",
     ".claude/team-protocol.md",
     "install.js",
-    "README.md"
+    "README.md",
+    "SECURITY.md"
   ]
 }

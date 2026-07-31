@@ -18,15 +18,22 @@
 #
 # ALLOW iff ALL of the following hold (read from disk — never from chat):
 #   1. No .quetrex/ESCALATION file (a bounded loop hit its cap).
-#   2. .quetrex/review-verdict.json exists, .verdict == "AUTO_MERGE", and its
+#   2. .quetrex/review-verdict.json exists, .verdict == "AUTO_MERGE", its
 #      .sha == HEAD of the repo (so a verdict for an OLDER commit — i.e. new
-#      commits landed after review — cannot authorize this merge).
+#      commits landed after review — cannot authorize this merge), AND its
+#      .inputs.nativeSecurityReview is "clean" or "issues" (proof the native
+#      security pass actually RAN — the reviewer cannot self-exempt from
+#      independent review and still auto-merge).
 #   3. .quetrex/verify-ledger.jsonl is GREEN: for every command in the current
 #      verify chain, its MOST RECENT ledger entry exited 0 (a never-run or
 #      stale-red command blocks — this closes the stale-green hole).
 #   4. .quetrex/security-findings.json has NO finding with severity "critical"
 #      AND status "open"; if it exists it must be for HEAD (.head_sha == HEAD);
 #      and if the plan set security_review_required:true it MUST exist.
+#   5. Every file in the diff being merged is covered by the architect's
+#      ownership map in .quetrex/plan/<TASK>.json — a developer that edited
+#      outside its lane cannot ship (see GATE 5 for the exemptions and for what
+#      happens when a task ran without a plan).
 #
 # DESIGN AXIOM (from the blueprint): the merge boundary is decided by hooks
 # reading artifacts, never by an agent's prose. A Critical/BLOCK/REWORK from any
@@ -44,6 +51,10 @@
 # (precedence: deny > ask > allow), and a blocking PreToolUse hook runs BEFORE
 # the permission engine — so this fires even under --permission-mode auto,
 # bypassPermissions, or --dangerously-skip-permissions.
+# When jq is absent the JSON form is unavailable, so deny() falls back to the
+# contract's OTHER blocking channel — stderr + exit 2 — rather than hand-rolling
+# JSON escaping that a control character in the reason would malform (a
+# malformed payload is dropped, and a dropped payload reads as ALLOW).
 #
 # FAIL-CLOSED at the ship boundary: if the gate cannot evaluate a real
 # quetrex-managed merge (jq missing, artifacts unreadable), it DENIES and tells
@@ -143,20 +154,28 @@ QDIR="$ROOT/.quetrex"
 { [ -n "$ROOT" ] && [ -d "$QDIR" ]; } || exit 0
 
 # --- deny helper (correct PreToolUse schema; exit 0) -----------------------
-# Falls back to a raw-JSON emit if jq is unavailable, so the ship boundary is
-# never blinded by a missing dependency.
+# With jq: the documented permissionDecision:"deny" object on exit 0.
+#
+# WITHOUT jq: deliberately NO JSON. A hand-rolled escaper is a fail-open in
+# disguise — the reasons this gate emits embed the tail of a failing build, a
+# security finding summary, or an ESCALATION note, all of which routinely carry
+# tabs, carriage returns and ANSI escapes. Those are raw control bytes, illegal
+# unescaped inside a JSON string (RFC 8259 requires U+0000–U+001F to be
+# escaped), so the payload is malformed, the runtime DROPS the undecodable
+# hook output, and "exit 0 + no decision" is read as ALLOW — the merge sails
+# through at exactly the moment the gate meant to stop it. So the fallback uses
+# the other blocking channel the hook contract provides instead: exit 2 is a
+# blocking error whose stderr is fed back to the agent. It blocks the tool call
+# outright and there is no JSON to malform.
 deny() {
   local reason="$1"
   if command -v jq >/dev/null 2>&1; then
     jq -cn --arg r "$reason" \
       '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'
-  else
-    # Minimal manual JSON escaping for the fail-closed path.
-    local esc
-    esc=$(printf '%s' "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
-    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}' "$esc"
+    exit 0
   fi
-  exit 0
+  printf '%s\n' "$reason" >&2
+  exit 2
 }
 
 # FAIL-CLOSED: a real quetrex merge with no jq cannot be evaluated -> deny.
@@ -225,6 +244,34 @@ fi
 if [ -n "$HEAD_SHA" ] && [ "$RV_SHA" != "$HEAD_SHA" ]; then
   deny "MERGE GATE (REWORK): the AUTO_MERGE verdict is for commit ${RV_SHA:0:12}, but HEAD is now ${HEAD_SHA:0:12} — commits landed after review, so the approval is stale. Re-run the review-gate against the current HEAD before merging."
 fi
+
+# --- GATE 2b — the reviewer may not self-exempt from independent review ------
+# reviewer.md's decision rule 4 mandates ESCALATE_HUMAN when the native /review
+# or /security-review "errored or could not run on a non-trivial change". But
+# the agent that decides the verdict is ALSO the agent that reports whether
+# independent review ran — so that rule is self-graded, and it has already been
+# broken in the wild: a live verdict artifact recorded AUTO_MERGE over 18
+# reviewed files with nativeSecurityReview "not_available_in_env" and
+# nativeReview "not_run_no_pr".
+#
+# Mechanize it here. An AUTO_MERGE is only honored when the artifact
+# AFFIRMATIVELY records that the native security pass actually executed:
+#   "clean"  -> it ran and found nothing
+#   "issues" -> it ran and found something the reviewer then adjudicated
+# Anything else — "not_run_no_pr", "not_available_in_env", "skipped", an
+# unrecognized string, or the field/`inputs` object being ABSENT — means no
+# independent security review is on record, so this is not a human-free ship.
+# Absence is treated exactly like an excuse string, on purpose: this file's
+# GATE 4 already establishes that omitting a field must never be a cheaper way
+# past a gate than filling it in honestly. Only AUTO_MERGE is checked; REWORK
+# and ESCALATE_HUMAN already hold the merge above.
+RV_NATIVE_SEC=$(jq -r '(.inputs.nativeSecurityReview // .nativeSecurityReview // empty) | ascii_downcase' "$RV" 2>/dev/null)
+case "$RV_NATIVE_SEC" in
+  clean|issues) : ;;
+  *)
+    deny "MERGE GATE (ESCALATE_HUMAN): the verdict is AUTO_MERGE, but review-verdict.json records inputs.nativeSecurityReview = '${RV_NATIVE_SEC:-<missing>}' — not 'clean' or 'issues'. That means the native /security-review never actually ran (or its result was not recorded), so no INDEPENDENT security pass backs this auto-merge; the reviewer graded its own homework. A human-free merge requires the native security pass to have executed. Re-run the review-gate so /security-review runs against the current HEAD and records 'clean' or 'issues', or have a human decide."
+    ;;
+esac
 
 # ===========================================================================
 # GATE 3 — verify ledger green AND commit-pinned to HEAD (closes stale-green)
@@ -357,6 +404,108 @@ else
   if [ "$OPEN_CRIT" -gt 0 ]; then
     LIST=$(printf '%s' "$FINDINGS" | jq -r '[ .[] | select((.severity // "" | ascii_downcase) == "critical" and (.status // "open" | ascii_downcase) == "open") ] | map("  - \(.category // "?") @ \(.file // "?"):\(.line // "?") — \(.summary // .exploit // "critical finding")") | join("\n")' 2>/dev/null)
     deny "$(printf 'MERGE GATE (REWORK): %s open Critical security finding(s) block this merge:\n%s\nFix the vulnerabilit(y/ies) and re-run the security-reviewer until zero Critical remain open. Human approval CANNOT bypass an open Critical.' "$OPEN_CRIT" "$LIST")"
+  fi
+fi
+
+# ===========================================================================
+# GATE 5 — every changed file is covered by the architect's ownership map
+# ===========================================================================
+# The whole parallel-developer architecture rests on ONE artifact: the
+# architect's zero-overlap file-ownership map (architect.md calls it "the
+# enforceable contract developers are held to"). Until this gate existed, that
+# contract was enforced by nobody — it appeared exactly once downstream, as
+# prose in reviewer.md asking an LLM to notice. A developer that edited outside
+# its lane produced the classic silent failure: a clean summary, an unexpected
+# file, and every other gate green because none of them look at file paths.
+#
+# This gate looks. It reuses $CHANGED — the same diff GATE 4 already computed
+# against the base branch — and asserts each path is claimed either by an
+# explicit `ownership` key or by some workstream's `owns` glob.
+#
+# NO PLAN -> SKIP, NOT FAIL. Deliberate, and the same shape as GATE 4 directly
+# above: GATE 4 reads the plan for security_review_required and, when no plan
+# exists, does not synthesize a failure — it falls back to a floor derived from
+# the diff itself. Here there is no equivalent floor: with no plan there is no
+# ownership map, and "unowned" is undefined rather than violated. TRIVIAL and
+# SIMPLE routes legitimately run without an architect, so failing closed on a
+# missing plan would deny merges for work that never had lanes to stay in —
+# a liveness break, not a safety win. When a plan DOES exist the gate is strict:
+# a plan carrying no ownership map at all is a malformed artifact and escalates.
+#
+# WHICH plan governs is resolved more strictly here than in GATE 4. GATE 4 can
+# afford `ls | head -n1` because its worst case is requiring a security review
+# that was not strictly needed. GATE 5's worst case is denying a clean merge for
+# violating ANOTHER task's lanes, so it refuses to guess: it uses the plan named
+# by state.json, or the single plan on disk, and escalates when several plans
+# exist and nothing says which one this merge is for.
+PLAN5=""
+if [ -n "$TASK" ] && [ -f "$QDIR/plan/$TASK.json" ]; then
+  PLAN5="$QDIR/plan/$TASK.json"
+else
+  PLAN_COUNT=$(ls -1 "$QDIR"/plan/*.json 2>/dev/null | wc -l | tr -d ' ')
+  case "$PLAN_COUNT" in ''|*[!0-9]*) PLAN_COUNT=0 ;; esac
+  if [ "$PLAN_COUNT" -eq 1 ]; then
+    PLAN5=$(ls -1 "$QDIR"/plan/*.json 2>/dev/null | head -n1)
+  elif [ "$PLAN_COUNT" -gt 1 ]; then
+    deny "MERGE GATE (ESCALATE_HUMAN): .quetrex/plan/ holds $PLAN_COUNT plan artifacts and .quetrex/state.json does not name the task this merge is for${TASK:+ (it names '$TASK', but .quetrex/plan/$TASK.json does not exist)}, so the gate cannot tell which file-ownership map governs this diff. It will not guess — checking the diff against the wrong task's lanes would reject clean work. Repair .quetrex/state.json (or remove the stale plans) and re-run the review-gate."
+  fi
+  # PLAN_COUNT == 0 -> no plan artifact at all -> skip, per the note above.
+fi
+
+if [ -n "$PLAN5" ] && [ -f "$PLAN5" ]; then
+  # Does this plan carry an ownership contract at all?
+  OWN_KEYS=$(jq -r '(.ownership // {}) | keys_unsorted[]?' "$PLAN5" 2>/dev/null)
+  OWN_GLOBS=$(jq -r '(.workstreams // []) | .[]? | (.owns // [])[]?' "$PLAN5" 2>/dev/null)
+
+  if [ -z "$OWN_KEYS" ] && [ -z "$OWN_GLOBS" ]; then
+    deny "MERGE GATE (ESCALATE_HUMAN): the plan artifact $(basename "$PLAN5") exists but declares NO file-ownership map (no .ownership entries and no .workstreams[].owns globs). Ownership is the enforceable contract the parallel-developer pipeline depends on, so a plan without it cannot be checked against the diff. The plan is malformed or partial — do not merge. Surface to the user and re-run the architect."
+  fi
+
+  # Paths that are never owned by a workstream and must not trip the gate:
+  #   .quetrex/**  — the control-plane artifacts this very gate reads. They are
+  #                  written by the pipeline itself (plan, ledger, verdict,
+  #                  state), not by a developer working a lane.
+  #   lockfiles    — regenerated as a side effect of any dependency change, by
+  #                  whichever workstream happened to install. Owning them would
+  #                  force a false overlap between otherwise-disjoint lanes.
+  is_exempt_path() {
+    case "$1" in
+      .quetrex/*) return 0 ;;
+    esac
+    case "$(basename "$1")" in
+      package-lock.json|npm-shrinkwrap.json|yarn.lock|pnpm-lock.yaml|bun.lock|bun.lockb) return 0 ;;
+      Cargo.lock|poetry.lock|uv.lock|Pipfile.lock|Gemfile.lock|composer.lock|go.sum|flake.lock|gradle.lockfile|packages.lock.json) return 0 ;;
+    esac
+    return 1
+  }
+
+  # A path is owned if an `ownership` key matches it exactly, or if it matches
+  # any workstream `owns` glob. Bash pattern matching is used unquoted on the
+  # right of `==` so the glob expands; `**` behaves as `*` here and matches
+  # across `/`, which is the intent for a `src/api/**` style lane.
+  is_owned_path() {
+    local p="$1" k g
+    while IFS= read -r k; do
+      [ -n "$k" ] && [ "$k" = "$p" ] && return 0
+    done <<< "$OWN_KEYS"
+    while IFS= read -r g; do
+      [ -z "$g" ] && continue
+      # shellcheck disable=SC2053
+      [[ "$p" == $g ]] && return 0
+    done <<< "$OWN_GLOBS"
+    return 1
+  }
+
+  UNOWNED=""
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    is_exempt_path "$f" && continue
+    is_owned_path "$f" && continue
+    UNOWNED="${UNOWNED}  - ${f}"$'\n'
+  done <<< "$CHANGED"
+
+  if [ -n "$UNOWNED" ]; then
+    deny "$(printf 'MERGE GATE (REWORK): the diff being merged touches file(s) that NO workstream owns in the architect'"'"'s plan (%s):\n%s\nThe ownership map is the contract that keeps parallel developers from colliding — an edit outside every declared lane is unplanned work that no reviewer signed off on. Send this back through the pipeline: either revert the out-of-lane change, or have the architect re-plan so the file is owned by exactly one workstream, then re-run review. (.quetrex/** and lockfiles are exempt and are not listed here.)' "$(basename "$PLAN5")" "$UNOWNED")"
   fi
 fi
 

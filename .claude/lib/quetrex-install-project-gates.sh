@@ -2,14 +2,29 @@
 #
 # quetrex-install-project-gates.sh — deploy the committed per-project build gates.
 #
-# Copies the global verify-gate / merge-gate / secret-scan hook scripts (plus
-# deny-guard and enforce-branch, so every PreToolUse path resolves after a
-# fresh clone) and the seven fat pipeline agents into a project repo's OWN
-# .claude/, wires them into that repo's COMMITTED .claude/settings.json, and
-# ensures .quetrex/verify.json exists. This is what makes the build gates
-# fire both locally AND in any Anthropic cloud routine that clones the repo —
-# a cloud routine only ever sees what is committed, never the operator's
-# global ~/.claude.
+# Copies the global verify-gate / merge-gate / edit-gate / secret-scan hook
+# scripts (plus deny-guard, enforce-branch, auto-format and session-state, so
+# every wired path resolves after a fresh clone) and the seven fat pipeline
+# agents into a project repo's OWN .claude/, wires them into that repo's
+# COMMITTED .claude/settings.json, and ensures .quetrex/verify.json exists.
+# This is what makes the build gates fire both locally AND in any Anthropic
+# cloud routine that clones the repo — a cloud routine only ever sees what is
+# committed, never the operator's global ~/.claude.
+#
+# The wiring here is the mirror of the committed .claude/settings.json in
+# quetrex-base itself. Any hook added or removed there must be added or removed
+# here too, or the gates stop travelling. THE ONE DELIBERATE OMISSION:
+#
+#   workflow-reminder.sh (UserPromptSubmit) is NOT deployed per-project. It is
+#   not a gate — it is a fixed orchestration nudge injected into context on
+#   every prompt. The operator already has it at user scope, and a per-project
+#   copy would inject the identical paragraph twice per prompt with no added
+#   enforcement. Enforcement travels; nudges do not need to.
+#
+# Every OTHER hook wired in quetrex-base's settings.json is wired here, and
+# every script named in a wiring below is copied by step 1 — a wired hook whose
+# script is missing exits 127, which Claude Code treats as non-blocking. That
+# is a silent fail-open, and it is the exact failure this file exists to avoid.
 #
 # Usage:
 #   quetrex-install-project-gates.sh <project-repo-root>
@@ -67,10 +82,12 @@ for target in "$HOOKS_DIR" "$AGENTS_DIR" "$SETTINGS_FILE" "$QUETREX_DIR"; do
 done
 
 # --- 1. gate + guard hook scripts -------------------------------------------
-# verify-gate/merge-gate/secret-scan are the gates themselves; deny-guard and
-# enforce-branch are copied too so the PreToolUse[Bash] wiring below resolves
-# in a fresh clone that has never run the global installer against this repo.
-GATE_SCRIPTS="verify-gate.sh merge-gate.sh secret-scan.sh deny-guard.sh enforce-branch.sh"
+# verify-gate/merge-gate/edit-gate/secret-scan are the gates themselves;
+# deny-guard, enforce-branch, auto-format and session-state are copied too so
+# every wiring below resolves in a fresh clone that has never run the global
+# installer against this repo. This list must stay a superset of every basename
+# wired in step 3.
+GATE_SCRIPTS="verify-gate.sh merge-gate.sh edit-gate.sh secret-scan.sh deny-guard.sh enforce-branch.sh auto-format.sh session-state.sh"
 
 mkdir -p "$HOOKS_DIR"
 COPIED_HOOKS=""
@@ -152,10 +169,11 @@ function basenameOf(command) {
 // Command form fixed per contract: bash "${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/<x>.sh"
 // (the literal ${CLAUDE_PROJECT_DIR:-.} is shell syntax resolved by Claude Code's
 // hook runner at invocation time, not by this node script — hence the \$ escape).
-function hookEntry(name, timeout) {
+function hookEntry(name, timeout, before) {
   return {
     command: `bash "\${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/${name}"`,
     timeout,
+    before,
   };
 }
 
@@ -175,10 +193,17 @@ function ensureNoMatcherGroup(event, entry) {
   return 1;
 }
 
-function ensureMatcherGroup(event, matcher, entries) {
+// `equivalent` lets an event reuse a group whose matcher is a variant of the one
+// we would write (SessionStart went "startup|compact" -> "startup|resume|compact").
+// Without it an upgrade appends a SECOND group and the hook fires twice.
+function ensureMatcherGroup(event, matcher, entries, equivalent) {
   if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
   const arr = settings.hooks[event];
-  let group = arr.find((g) => g && typeof g === "object" && g.matcher === matcher);
+  const sameMatcher = (g) =>
+    g && typeof g === "object" &&
+    (g.matcher === matcher ||
+      (typeof equivalent === "function" && typeof g.matcher === "string" && equivalent(g.matcher)));
+  let group = arr.find(sameMatcher);
   if (!group) {
     group = { matcher, hooks: [] };
     arr.push(group);
@@ -189,12 +214,23 @@ function ensureMatcherGroup(event, matcher, entries) {
     const name = basenameOf(entry.command);
     const already = group.hooks.some((h) => h && typeof h.command === "string" && basenameOf(h.command) === name);
     if (already) continue;
-    group.hooks.push({ type: "command", command: entry.command, timeout: entry.timeout });
+    const item = { type: "command", command: entry.command, timeout: entry.timeout };
+    // Ordering is load-bearing only where declared: auto-format rewrites the file,
+    // edit-gate then checks what the formatter left. On an upgrade that already
+    // wired edit-gate, appending auto-format would invert that, so insert before.
+    const beforeIdx = entry.before
+      ? group.hooks.findIndex((h) => h && typeof h.command === "string" && basenameOf(h.command) === entry.before)
+      : -1;
+    if (beforeIdx >= 0) group.hooks.splice(beforeIdx, 0, item);
+    else group.hooks.push(item);
     added++;
   }
   return added;
 }
 
+// Timeouts are SECONDS. verify-gate derives its whole fail-closed budget from
+// the external timeout, so 900 (Stop) / 600 (SubagentStop) are load-bearing;
+// everything else is a cheap guard at 30-60s.
 let changed = 0;
 changed += ensureNoMatcherGroup("Stop", hookEntry("verify-gate.sh", 900));
 changed += ensureNoMatcherGroup("SubagentStop", hookEntry("verify-gate.sh", 600));
@@ -207,6 +243,23 @@ changed += ensureMatcherGroup("PreToolUse", "Bash", [
 changed += ensureMatcherGroup("PreToolUse", "Write|Edit", [
   hookEntry("secret-scan.sh", 30),
 ]);
+// Edit-time gate: a type error from the first edit must surface now, not at
+// turn end after the full verify chain has been paid for. auto-format runs
+// FIRST (it rewrites the file); edit-gate then checks what the formatter left.
+changed += ensureMatcherGroup("PostToolUse", "Write|Edit", [
+  hookEntry("auto-format.sh", 30, "edit-gate.sh"),
+  hookEntry("edit-gate.sh", 30),
+]);
+// Re-inject durable state after a compact, a resume, and on a fresh start.
+// SessionStart with the `compact` source is the only hook whose output reaches
+// the conversation — PostCompact's does not — and `resume` matters because a
+// resumed multi-hour pipeline needs the same briefing a fresh one gets.
+changed += ensureMatcherGroup(
+  "SessionStart",
+  "startup|resume|compact",
+  [hookEntry("session-state.sh", 30)],
+  (m) => /startup/.test(m) && /compact/.test(m),
+);
 
 fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
 fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");

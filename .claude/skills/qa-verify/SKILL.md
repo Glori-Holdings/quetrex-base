@@ -1,194 +1,59 @@
 ---
 name: qa-verify
 description: >
-  Run the pre-merge QA checklist before any PR is considered complete.
-  Use when finishing implementation work to verify typecheck, lint, build,
-  tests, and — when a rename or removal was involved — prove with unfiltered
-  grep output that zero traces of the old term remain. Never mark a task done
-  without passing this checklist.
+  Prove a change is actually done — run the project's own verify chain, prove no test
+  was weakened to make it pass, scan for leaked secrets, and report PASS/FAIL with the
+  evidence attached. Use whenever a change is finished, before committing, before
+  opening or updating a PR, when asked to "verify my work", "check this", "is this
+  done", or "is this ready to ship" — and whenever a rename or removal needs unfiltered
+  proof that zero traces of the old term remain. Never call work done without it.
+allowed-tools: Bash, Read, Grep, Glob
 ---
 
-# QA Verify Skill
-
-Invoke as `/qa-verify` at the end of any implementation task before marking it done or opening a PR.
+# QA Verify
 
 ## Why this skill exists
 
-Agents were marking rename/removal tasks complete while references remained in
-shell scripts, config files, and directory names that were invisible to
-file-type-filtered searches. This checklist closes that gap by requiring
-unfiltered, repo-wide grep output as proof of completion.
+Agents were marking rename/removal tasks complete while references remained in shell
+scripts, config files, and directory names that were invisible to file-type-filtered
+searches. This closes that gap by requiring unfiltered, repo-wide output as proof.
 
----
+It has since grown a second job that matters more: proving **no test was quietly
+loosened to turn the chain green**. Running the suite and seeing green is not enough —
+a test can be skipped, an assertion deleted, a rule ignored. Done is not "the diff
+looks right." **Done is the gates being run and observed, with the results stated.**
 
-## Pre-Merge Checklist
+## Run it
 
-Run every check in order. A single failure means the task is NOT done.
-
-### 1. Typecheck
-
-```bash
-pnpm run typecheck
-```
-
-Expected: zero errors. Fix all errors before proceeding.
-
-### 2. Lint
+The script does every mechanical check and hardcodes no stack — it resolves the chain
+from `.quetrex/verify.json`, else `.claude/CLAUDE.md` `## Verification`, else the
+manifest, so it runs the right commands in a Node, Python, Rust or Go repo alike.
 
 ```bash
-npx biome check .
+SKILL_DIR="$(dirname "$(ls -1 "${CLAUDE_PLUGIN_ROOT:-/nonexistent}/skills/qa-verify/SKILL.md" \
+  "${CLAUDE_PROJECT_DIR:-.}/.claude/skills/qa-verify/SKILL.md" \
+  "$HOME/.claude/skills/qa-verify/SKILL.md" 2>/dev/null | head -1)")"
+
+bash "$SKILL_DIR/scripts/qa-verify.sh"                       # standard
+bash "$SKILL_DIR/scripts/qa-verify.sh" --term OLDNAME        # + rename/removal proof
+bash "$SKILL_DIR/scripts/qa-verify.sh" --base origin/develop # non-default base
 ```
 
-Expected: zero errors. Run `npx biome check --write .` to auto-fix, then
-re-run the read-only check to confirm.
+## Read its output
 
-### 3. Build
+- Exit `0` = clean · `1` = a check FAILed, the task is not done · `2` = it could not run
+  (no git repo, or no verify chain declared anywhere). **Never read `2` as a pass.**
+- `FAIL` blocks. `WARN` does not block but must be repeated in your report.
+- **`NOT VERIFIED` is the most important block** — copy it verbatim. Stating what you did
+  *not* check is part of the result.
+- Paste the raw summary into the PR body; do not paraphrase. Zero-result output is proof.
 
-```bash
-pnpm run build
-```
+## Failure protocol
 
-Expected: exits 0. Key packages must compile successfully.
+1. Fix it — never by weakening the check — then re-run the script from the top.
+2. A genuinely pre-existing or intended FAIL: annotate the offending line with
+   `qa-verify: allow <reason>` (the script honours it) **and** say so in the PR body.
+   An unexplained annotation is itself a defect.
+3. Exit `2` is a **setup** failure. Report it; never self-heal by inventing commands.
 
-### 4. Tests
-
-```bash
-pnpm test
-```
-
-Expected: all tests pass. Fix or note any pre-existing failures explicitly.
-
----
-
-## Rename / Removal Verification
-
-Run these additional steps whenever the task involved renaming something,
-removing a brand, removing a dependency, or purging any term from the codebase.
-
-Replace `TERM` with the word or phrase being removed (case-insensitive).
-
-### 5. Unfiltered content search
-
-```bash
-grep -ri "TERM" . \
-  | grep -v node_modules \
-  | grep -v pnpm-lock \
-  | grep -v dist \
-  | grep -v ".git/"
-```
-
-**No file-type filters.** This must search `.sh`, `.yml`, `.yaml`, `.json`,
-`.toml`, `.env`, `.md`, `.txt`, Dockerfiles, Makefiles — everything.
-
-Expected: zero results (or only intentional/documented exceptions such as
-LICENSE copyright headers, CHANGELOG entries, or external reference docs).
-Every result must be explained in the PR description.
-
-### 6. Filename search
-
-```bash
-find . -iname "*TERM*" \
-  | grep -v node_modules \
-  | grep -v dist \
-  | grep -v ".git/"
-```
-
-Expected: zero results. Rename or remove any matching files or directories.
-
-### 7. Branch name search
-
-```bash
-git branch -a | grep -i TERM
-```
-
-Expected: zero results. Delete or rename any matching local or remote branches.
-
----
-
-## Security Checks
-
-### 8. No secrets in committed files
-
-```bash
-grep -ri "api_key\|secret\|password\|token" . \
-  | grep -v node_modules \
-  | grep -v pnpm-lock \
-  | grep -v ".git/" \
-  | grep -v ".example\|.sample\|SKILL.md\|README"
-```
-
-Review every result. If a real secret appears outside an `.example` or `.env`
-file that is gitignored, remove it before committing.
-
-### 9. No `any` types in TypeScript
-
-```bash
-grep -rn ": any\b\|as any\b" --include="*.ts" --include="*.tsx" . \
-  | grep -v node_modules \
-  | grep -v dist
-```
-
-Expected: zero results. The project runs TypeScript strict mode.
-
----
-
-## PR Quality
-
-### 10. Feature branch
-
-Confirm the current branch is NOT `main` or `master`:
-
-```bash
-git branch --show-current
-```
-
-### 11. Conventional commits
-
-All commits on the branch must follow Conventional Commits format:
-`type(scope): description` — e.g. `feat:`, `fix:`, `chore:`, `refactor:`.
-
-### 12. PR description includes verification output
-
-The PR body must include:
-
-- The actual terminal output from the unfiltered grep (step 5), showing zero
-  results or explicitly annotated exceptions.
-- The actual output from the filename search (step 6).
-- Confirmation that typecheck, lint, build, and tests all passed.
-
-Paste the raw output — do not paraphrase it. Zero-result output is valid proof.
-
----
-
-## Quick-Run Script
-
-A helper script at `scripts/qa-verify.sh` automates steps 1–7 and prints a
-PASS/FAIL summary. Run it as:
-
-```bash
-# Standard pre-merge check
-bash scripts/qa-verify.sh
-
-# With rename/removal verification
-bash scripts/qa-verify.sh --term TERM
-
-# Via pnpm
-pnpm qa
-pnpm qa -- --term TERM
-```
-
-The script exits non-zero if any check fails. Always fix failures before
-marking the task done.
-
----
-
-## Failure Protocol
-
-If any check fails:
-
-1. Fix the issue immediately — do not defer it.
-2. Re-run the full checklist from the top.
-3. Do not mark the task `done` or open the PR until the checklist passes clean.
-4. If a check cannot be fixed (e.g., a pre-existing test failure unrelated to
-   your change), document it explicitly in the PR description with evidence that
-   it pre-exists your change.
+Per-check rationale and the annotation contract: [reference.md](reference.md).

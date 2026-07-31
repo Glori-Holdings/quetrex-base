@@ -25,10 +25,13 @@
 #     missing file is a genuine failure, not a toolchain excuse. Missing tooling
 #     or deps therefore surface as an honest block: the agent installs/fixes
 #     (bounded self-heal) or, at the cap, escalates to the user.
-#   - There is NO fail-open on a missing `jq`. block() always emits a
-#     well-formed {"decision":"block",...} — via jq when present, else via a
-#     manual-escaping fallback — so a missing dependency can never silently
-#     allow a red finish.
+#   - There is NO fail-open on a missing `jq`. With jq, block() emits a
+#     well-formed {"decision":"block",...} on exit 0. WITHOUT jq it does not
+#     hand-roll JSON escaping (a failing build's stderr carries tabs/CRs/ANSI
+#     that would malform the payload, and a malformed payload is DROPPED and
+#     read as ALLOW); it prints the reason to stderr and exits 2 — the hook
+#     contract's other blocking channel, which has no JSON to malform. Either
+#     way a missing dependency can never silently allow a red finish.
 #   - There is NO fail-open on a hook timeout. The whole chain runs against an
 #     internal wall-clock budget (QUETREX_VERIFY_BUDGET, default well under the
 #     external Stop/SubagentStop hook timeout) with each command capped via
@@ -41,6 +44,12 @@
 #      On SubagentStop, if .verifyQuick[] is present and non-empty it is used
 #      instead (a QUICK per-subagent chain) — a strict SUBSET that still blocks
 #      red; it never weakens the gate below the full chain when unconfigured.
+#      Subset-ness is MECHANICALLY ENFORCED here, not assumed: every
+#      verifyQuick entry must be a byte-for-byte member of verify[]. verify.json
+#      is a customer-editable file, so an unchecked verifyQuick would be an
+#      arbitrary REPLACEMENT for the chain (`verifyQuick:["true"]` passes every
+#      SubagentStop). On any mismatch the quick chain is discarded, the FULL
+#      verify[] chain runs, and the block reason says why.
 #   2. $ROOT/.claude/CLAUDE.md      "## Verification" fenced command block
 #   3. autodetect (package.json scripts / Makefile / pyproject / go.mod / Cargo)
 # If none resolves, there is nothing to gate -> allow finish (exit 0).
@@ -95,7 +104,11 @@ ESCALATION="$QDIR/ESCALATION"
 HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
 
 # On SubagentStop we may run a QUICK subset chain if the project defines one.
+# QUICK_NOTE is set when a declared verifyQuick was REJECTED for not being a
+# subset of verify[]; it is appended to any block reason so the operator sees
+# why the full chain ran.
 QUICK=0
+QUICK_NOTE=""
 [ "$EVENT" = "SubagentStop" ] && QUICK=1
 
 # --- fail-closed time budget -------------------------------------------------
@@ -121,19 +134,27 @@ case "$BUDGET_TOTAL" in ''|*[!0-9]*) BUDGET_TOTAL="$BUDGET_DEFAULT" ;; esac
 # FAIL-CLOSED even when jq is unavailable: if jq were the only path and it is
 # missing, the jq call would fail silently, NOTHING would reach stdout, and
 # `exit 0` would still run -> Stop/SubagentStop treat "exit 0 + no decision
-# JSON" as ALLOW, so every red build would finish as allowed. Mirrors
-# merge-gate.sh's deny(): prefer jq, but if it is unavailable fall back to
-# manual JSON escaping so a well-formed block is ALWAYS emitted.
+# JSON" as ALLOW, so every red build would finish as allowed.
+#
+# The no-jq fallback deliberately emits NO JSON. A hand-rolled escaper is a
+# fail-open in disguise: the string being escaped is the tail of a FAILING
+# BUILD's stderr, which routinely carries tabs, carriage returns, ANSI escapes
+# and other raw control bytes that are illegal unescaped inside a JSON string.
+# One of those produces malformed JSON, the runtime drops the undecodable
+# payload, and "exit 0 + no decision" is read as ALLOW — exactly the red-finish
+# this function exists to prevent. So instead of trying (and silently failing)
+# to build JSON without jq, the fallback uses the OTHER blocking channel the
+# hook contract provides: exit 2 is a blocking error whose stderr is fed back
+# to the agent. There is no JSON to malform, so it cannot degrade to allow.
+# jq stays the primary path because it produces the richer `reason` form.
 block() {
   local reason="$1"
   if command -v jq >/dev/null 2>&1; then
     jq -cn --arg r "$reason" '{decision:"block",reason:$r}'
-  else
-    local esc
-    esc=$(printf '%s' "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
-    printf '{"decision":"block","reason":"%s"}\n' "$esc"
+    exit 0
   fi
-  exit 0
+  printf '%s\n' "$reason" >&2
+  exit 2
 }
 
 # Last-20-lines of a captured output.
@@ -148,10 +169,34 @@ resolve_from_verify_json() {
   [ -f "$f" ] || return 1
   # Prefer .verifyQuick[] on SubagentStop when it is present and non-empty;
   # otherwise the full .verify[] chain. Never weaken to quick when unconfigured.
+  #
+  # SUBSET IS ENFORCED, NOT ASSUMED. verify.json lives in the CUSTOMER's repo,
+  # so verifyQuick is an untrusted input on the finish path. Without this check
+  # `"verifyQuick": ["true"]` — or any command not in the full chain — would
+  # pass every SubagentStop, turning the quick chain into an arbitrary
+  # replacement for the gate rather than a narrowing of it. A quick chain may
+  # only ever be a SUBSET of verify[]: every entry must be a member of
+  # verify[], byte-for-byte. On ANY mismatch (a foreign command, a non-array
+  # verify, a missing verify) we do NOT trust it — we run the FULL verify[]
+  # chain instead and say so in the block reason, so the misconfiguration is
+  # visible rather than silently weakening the gate.
   local sel='.verify'
   if [ "$QUICK" -eq 1 ] \
      && jq -e '.verifyQuick | type == "array" and length > 0' "$f" >/dev/null 2>&1; then
-    sel='.verifyQuick'
+    if jq -e '
+          ((.verify // null) | type) == "array"
+          and ((.verifyQuick - .verify) | length) == 0
+        ' "$f" >/dev/null 2>&1; then
+      sel='.verifyQuick'
+    else
+      local foreign
+      foreign=$(jq -r '
+          (.verifyQuick - ((.verify // []) | if type == "array" then . else [] end))
+          | map("`" + (. | tostring) + "`") | join(", ")
+        ' "$f" 2>/dev/null)
+      QUICK_NOTE=$(printf '\n\nNOTE: .quetrex/verify.json declares a `verifyQuick` chain that is NOT a subset of `verify` (offending entr(y/ies): %s). A quick chain may only NARROW the full chain, never introduce commands it does not contain, so verifyQuick was IGNORED and the FULL `verify` chain was run. Fix verify.json so every verifyQuick entry appears verbatim in verify.' \
+        "${foreign:-<unparseable>}")
+    fi
   fi
   jq -e "$sel | type == \"array\" and length > 0" "$f" >/dev/null 2>&1 || return 1
   while IFS= read -r line; do
@@ -166,13 +211,24 @@ resolve_from_claude_md() {
   # Extract commands from fenced code blocks that fall under a heading whose
   # text contains "Verification". Awk state machine: track "in verification
   # section" and "inside a fenced block".
+  #
+  # RULE ORDER IS LOAD-BEARING. The fence toggle MUST be evaluated first, and
+  # the heading rule MUST be gated on !infence. A shell comment inside the
+  # fenced block starts with `#` and therefore matches the heading pattern; if
+  # the heading rule ran first it would set insec=0 and `next`, silently
+  # ENDING the section mid-chain and truncating every command below the
+  # comment. That is a fail-open: a subset of the chain runs, reports green,
+  # and is written to the ledger, which merge-gate.sh then reads as
+  # authoritative for the WHOLE chain. With the fence evaluated first and the
+  # heading rule gated on !infence, an in-fence `#` line falls through to the
+  # emit rule, which skips it as a comment and keeps the section open.
   local extracted
   extracted=$(awk '
-    /^#{1,6}[[:space:]]/ {
+    /^[[:space:]]*```/ { infence = !infence; next }
+    (!infence && $0 ~ /^#{1,6}[[:space:]]/) {
       insec = (tolower($0) ~ /verification/) ? 1 : 0
       next
     }
-    /^[[:space:]]*```/ { infence = !infence; next }
     (insec && infence) {
       line = $0
       sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
@@ -336,12 +392,12 @@ if [ "$TIMED_OUT" -eq 1 ]; then
 fi
 
 if [ "$n" -lt "$MAX_ATTEMPTS" ]; then
-  block "$(printf 'VERIFY FAILED (attempt %d/%d): `%s` exited %d.%s\nYou cannot finish while the verification chain is red. Fix the cause and it will re-run on your next stop.\n\n--- last 20 lines ---\n%s' \
-    "$n" "$MAX_ATTEMPTS" "$FAILED_CMD" "$FAILED_CODE" "$TIMEOUT_NOTE" "$FAILED_TAIL")"
+  block "$(printf 'VERIFY FAILED (attempt %d/%d): `%s` exited %d.%s\nYou cannot finish while the verification chain is red. Fix the cause and it will re-run on your next stop.\n\n--- last 20 lines ---\n%s%s' \
+    "$n" "$MAX_ATTEMPTS" "$FAILED_CMD" "$FAILED_CODE" "$TIMEOUT_NOTE" "$FAILED_TAIL" "$QUICK_NOTE")"
 fi
 
 # Cap reached -> escalate. Persist a marker the merge gate reads so red code
 # physically cannot merge even once the agent is finally allowed to stop.
 touch "$ESCALATION" 2>/dev/null
-block "$(printf 'ESCALATE: `%s` is STILL red (exit %d) after %d self-heal attempts.%s\nSTOP self-healing now. Do NOT report this task as done. Surface this failure to the user verbatim, including the output below, and wait for direction.\n\n--- last 20 lines ---\n%s' \
-  "$FAILED_CMD" "$FAILED_CODE" "$MAX_ATTEMPTS" "$TIMEOUT_NOTE" "$FAILED_TAIL")"
+block "$(printf 'ESCALATE: `%s` is STILL red (exit %d) after %d self-heal attempts.%s\nSTOP self-healing now. Do NOT report this task as done. Surface this failure to the user verbatim, including the output below, and wait for direction.\n\n--- last 20 lines ---\n%s%s' \
+  "$FAILED_CMD" "$FAILED_CODE" "$MAX_ATTEMPTS" "$TIMEOUT_NOTE" "$FAILED_TAIL" "$QUICK_NOTE")"

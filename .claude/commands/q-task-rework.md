@@ -1,5 +1,5 @@
 ---
-description: Discuss why a failed Quetrex task didn't pass, agree a fix plan, then re-queue and re-run the shared dev pipeline (off the epic integration branch for a child). Usage: /q-task-rework SMA-1
+description: Discuss why a failed Quetrex task didn't pass, agree a fix plan, apply non-blocking nits with /code-review --fix instead of rebuilding for them, then re-queue and re-run the shared dev pipeline (off the epic integration branch for a child). Usage: /q-task-rework SMA-1
 argument-hint: <TASK-ID like SMA-1>
 ---
 
@@ -41,7 +41,14 @@ resolve_auth    || exit 1      # prints "Run /q-login" on failure
 resolve_project || exit 1      # prints "Run /q-init" on failure
 qapi GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1   # validate access
 TASK="$(qapi GET "/api/tasks/$TASK_ID")"            || exit 1
-echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL"
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+# Branch prefix: NEVER hardcode "feature/". A repo whose push rules cannot be loosened
+# sets "branchPrefix": "claude/" in .quetrex/project.json, and every branch below follows.
+BRANCH_PREFIX="$(_qx_json_get "$REPO_ROOT/.quetrex/project.json" branchPrefix 2>/dev/null || echo 'feature/')"
+[ -n "$BRANCH_PREFIX" ] || BRANCH_PREFIX="feature/"
+
+echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL   branchPrefix=$BRANCH_PREFIX"
 ```
 
 If any resolver or `qapi` call exits non-zero, the helper already printed the correct message
@@ -72,20 +79,21 @@ node -e '
 ' "$TASK"
 ```
 
-**Discover the failed branch / PR** by the q-task-merge convention. The engine names the unit branch
-`feature/<TASK_ID>-<slug>`, so match the **whole token** — `SMA-1` must not match `SMA-12`:
+**Discover the failed branch / PR.** The engine names the unit branch
+`${BRANCH_PREFIX}<TASK_ID>-<slug>`, so match the **whole token** — `SMA-1` must not match
+`SMA-12`:
 
 ```bash
-# Whole-token match: branch is exactly feature/SMA-1 or starts with feature/SMA-1-<slug>.
+# Whole-token match: branch is exactly <prefix>SMA-1 or starts with <prefix>SMA-1-<slug>.
 gh pr list --state all --json number,headRefName,state,url \
-  --jq ".[] | select(.headRefName == \"feature/$TASK_ID\" or (.headRefName | startswith(\"feature/$TASK_ID-\")))" \
+  --jq ".[] | select(.headRefName == \"${BRANCH_PREFIX}$TASK_ID\" or (.headRefName | startswith(\"${BRANCH_PREFIX}$TASK_ID-\")))" \
   2>/dev/null || true
 ```
 
 If a PR is found, read its diff for grounding (`gh pr diff <number>`); if only a branch exists,
-inspect it with `git diff main...feature/$TASK_ID-<slug>`. Then **read the relevant repo code**
-(Glob / Grep / Read) around the changed surface so your explanation and fix plan are grounded in
-reality, not just the notes.
+inspect it with `git diff main...${BRANCH_PREFIX}$TASK_ID-<slug>`. Then **read the relevant repo
+code** (Glob / Grep / Read) around the changed surface so your explanation and fix plan are
+grounded in reality, not just the notes.
 
 **State warning (non-blocking).** `/q-task-rework` expects a task in a rework-expecting state —
 canonically `needs_clarity`. If `status` is something else (e.g. `pr_ready`, `merged`, `deployed`,
@@ -110,6 +118,50 @@ and **wait for the user to confirm** before proceeding. Do not auto-continue.
 
 ---
 
+## Step 2b — Nit fast path (`/code-review --fix`) — before you re-queue anything
+
+Most reworks carry a mix: one real defect plus a handful of naming / minor-style /
+opportunistic-cleanup findings. `reviewer.md` calls those **non-blocking quality nits** and
+they explicitly do **not** block `AUTO_MERGE`. Spinning the whole pipeline for them — or
+letting them consume a `review_iter` on the next pass — is waste. Handle them here.
+
+**1. Triage every finding into two tiers.**
+
+| Tier | What it is |
+|---|---|
+| **BLOCKING** | correctness, security, an architecture / file-ownership violation, a red verify command, an unmet acceptance criterion |
+| **NIT** | naming, minor style, dead code, opportunistic cleanup — anything the reviewer itself would report without blocking |
+
+**When in doubt it is BLOCKING.** Never downgrade a finding to NIT to reach the fast path;
+that is the one way this step can do damage.
+
+**2. Apply the nit tier locally** in the failed unit's worktree — a working-tree edit, no
+pipeline run:
+
+```bash
+/code-review --fix
+```
+
+Review what it changed before accepting it; `--fix` is a convenience, not an authority.
+
+**3. Branch on the triage.**
+
+- **Any BLOCKING finding** → continue to **Step 3**. The nit fixes ride into the same
+  re-run, so the rebuilt change does not re-surface them and the reviewer spends its
+  iteration on the real defect.
+- **Zero BLOCKING findings** (the whole rework was trivia) → do **not** spin the pipeline.
+  Commit the fixes on the existing unit branch, then re-run **the gates**: the verify chain
+  to proven green (the `qa-verify` skill), and a fresh reviewer pass pinned to the new HEAD.
+  Skip Steps 3–4.
+
+**This is a gate re-run, not a gate skip.** HEAD moved, so `merge-gate.sh` still requires a
+green ledger *and* an `AUTO_MERGE` verdict whose `.sha` equals the new HEAD. Nothing in this
+step produces either; it only avoids rebuilding code that was already correct. If the fresh
+reviewer pass returns `REWORK` or `ESCALATE_HUMAN`, the fast path was wrong — go to Step 3
+and run the full pipeline.
+
+---
+
 ## Step 3 — Persist the agreed plan + re-queue
 
 Once you and the user agree on the fix, record it on the kanban and move the task to `queued` so
@@ -130,15 +182,18 @@ qx_task_status "$TASK_ID" queued
 
 Determine the base branch from `parentTaskId`:
 
-- **Standalone task** (`parentTaskId` empty) → `BASE_BRANCH=main`; the PR targets `main`. The human
-  merges later with `/q-task-merge $TASK_ID`.
-- **Epic child** (`parentTaskId` set, e.g. `SMA-1.2`) → `BASE_BRANCH=feature/<EPIC-ID>` (the
-  per-epic integration branch); the PR targets the integration branch. On pass it auto-merges into
-  the integration branch and **unblocks** its dependents. Unblocking only flips their readiness — it
-  does **not** dispatch them; this command rebuilds the **one** child only. To actually drain the
-  now-eligible dependents, the user **re-runs `/q-task-build <EPIC-ID>`**, which resumes the DAG
-  dispatcher over the existing children (the epic stays `in_progress`). Surface this next step in the
-  report.
+- **Standalone task** (`parentTaskId` empty) → `BASE_BRANCH=main`; the PR targets `main`. Its
+  terminus is an open PR, and whether that PR merges is decided by the reviewer's verdict and
+  enforced by `merge-gate.sh` — `AUTO_MERGE` pinned to HEAD with a green ledger permits the
+  squash merge; `REWORK` / `ESCALATE_HUMAN` holds it. There is **no `/q-task-merge` command**;
+  do not tell the user to run one.
+- **Epic child** (`parentTaskId` set, e.g. `SMA-1.2`) → `BASE_BRANCH=${BRANCH_PREFIX}<EPIC-ID>`
+  (the per-epic integration branch); the PR targets the integration branch. On pass it auto-merges
+  into the integration branch and **unblocks** its dependents. Unblocking only flips their
+  readiness — it does **not** dispatch them; this command rebuilds the **one** child only. To
+  actually drain the now-eligible dependents, the user **re-runs `/q-task-build <EPIC-ID>`**, which
+  resumes the DAG dispatcher over the existing children (the epic stays `in_progress`). Surface
+  this next step in the report.
 
 Then:
 
@@ -150,7 +205,8 @@ with:
 
 - `TASK_ID` = `$TASK_ID`
 - `TASK_TITLE` = the task title
-- `BASE_BRANCH` = `main` (standalone) or `feature/<EPIC-ID>` (epic child), as decided above
+- `BASE_BRANCH` = `main` (standalone) or `${BRANCH_PREFIX}<EPIC-ID>` (epic child), as decided above
+- `BRANCH_PREFIX` = `$BRANCH_PREFIX`
 - `WORKFLOW_TITLE` = `"$TASK_ID · <title> (rework)"`
 
 Dispatch the workflow in the **background**. The engine drives `queued/in_progress → pr_ready`
@@ -161,8 +217,12 @@ Dispatch the workflow in the **background**. The engine drives `queued/in_progre
 ## Step 5 — Report (do not block the terminal)
 
 Report what was launched: the workflow title, the base branch, and that it is building toward
-`pr_ready`. For an **epic child**, also state that on pass it auto-merges into `feature/<EPIC-ID>`
-and unblocks its dependents, and that the user should then **re-run `/q-task-build <EPIC-ID>`** to
+`pr_ready`. If the **nit fast path** (Step 2b) was taken, report that instead: which findings were
+triaged NIT, that `/code-review --fix` applied them with no pipeline run, and the result of the
+verify-chain and reviewer gate re-runs — never imply the gates were skipped.
+
+For an **epic child**, also state that on pass it auto-merges into `${BRANCH_PREFIX}<EPIC-ID>` and
+unblocks its dependents, and that the user should then **re-run `/q-task-build <EPIC-ID>`** to
 resume the dispatcher and drain those dependents. Point the user to `/workflows` and the board for
 live progress. Do **not** parse workflow output inline or block the terminal.
 
@@ -176,6 +236,9 @@ live progress. Do **not** parse workflow output inline or block the terminal.
   silently re-run a `pr_ready` / `merged` / finished task.
 - Always discuss to confidence before re-queuing — a re-run without a corrected, agreed plan just
   reproduces the failure.
+- Never downgrade a finding to NIT to reach the Step 2b fast path, and never let that fast path
+  skip the verify chain or the reviewer verdict — it skips the *rebuild*, not the gates.
+- Never hardcode `feature/` — construct every branch from `$BRANCH_PREFIX`.
 - Reference the shared engine in `.claude/lib/dev-pipeline.md`; do **not** restate its steps here.
 - Never print or echo the bearer token. Never run `set -x` / `curl -v` around `qapi`. Build every
   JSON payload with `node` / `JSON.stringify`, never `echo`.

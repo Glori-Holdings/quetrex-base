@@ -114,7 +114,6 @@
     <tr><td><code>/q-task-build&nbsp;SMA-1</code></td><td>Queues a task and starts the work. An agent reviews the task and the code, asks anything unclear, then builds it (see Part 5). The board moves it to <b>In&nbsp;Progress</b>, then <b>PR&nbsp;Ready</b>.</td></tr>
     <tr><td><code>/q-task-rework&nbsp;SMA-1</code></td><td>For a task that needs another pass. It explains what went wrong, talks the fix through with you, notes the plan on the task, and re-runs the work.</td></tr>
     <tr><td><code>/q-task-complete&nbsp;SMA-1</code></td><td>Marks a deployed task as <b>Complete</b> after you've confirmed it.</td></tr>
-    <tr><td><code>/q-task-merge&nbsp;SMA-1</code></td><td>Merges the task's pull request and cleans up — no leftover branches or worktrees.</td></tr>
     <tr><td><code>/q-deploy</code></td><td>Deploys the project.</td></tr>
   </table>
 
@@ -125,7 +124,7 @@
     <tr><td>Queued</td><td>Picked up with <code>/q-task-build</code>; about to be worked.</td></tr>
     <tr><td>In Progress</td><td>An agent workflow is actively building it.</td></tr>
     <tr><td>PR Ready</td><td>Work done; a pull request is open for review.</td></tr>
-    <tr><td>Merged</td><td>The PR has been merged with <code>/q-task-merge</code>.</td></tr>
+    <tr><td>Merged</td><td>The PR has been merged. There is no merge command: a hook checks the review verdict and the proof-of-green on disk for the exact commit being merged, and only then lets the merge through.</td></tr>
     <tr><td>Deployed</td><td>Released with <code>/q-deploy</code>.</td></tr>
     <tr><td>Needs Clarity</td><td>The agent couldn't finish and left a note explaining why — pick it up with <code>/q-task-rework</code>.</td></tr>
     <tr><td>Complete</td><td>Confirmed done with <code>/q-task-complete</code>.</td></tr>

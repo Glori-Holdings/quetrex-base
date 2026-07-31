@@ -1,5 +1,5 @@
 ---
-description: Link this repo to a Quetrex project (writes ./.quetrex/project.json) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, deploy the committed per-project build gates, offer to import local env creds into the vault, open a PR). Usage: /q-init [project name]
+description: Link this repo to a Quetrex project (writes ./.quetrex/project.json with its branchPrefix) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, deploy the committed per-project build gates, union in the permissions the pipeline needs, generate .worktreeinclude, offer /install-github-app, offer to import local env creds into the vault, open a PR). Usage: /q-init [project name]
 argument-hint: "[project name — only used when the repo is not yet linked]"
 ---
 
@@ -14,11 +14,14 @@ This command is **non-destructive**: it only ever ADDs `.quetrex/project.json`,
 auto-cleans stale tracker references from `CLAUDE.md`, and deploys the committed
 per-project build gates (step 4d) — the `verify-gate.sh`/`merge-gate.sh`/`secret-scan.sh`
 hooks, the seven fat pipeline agents, and `.quetrex/verify.json`, merged (never clobbered)
-into `.claude/settings.json`. It never overwrites or silently deletes existing `.claude/`,
-`CLAUDE.md` body content, commands, other settings/hooks, or any git/Claude history. The
-**only** removals are stale old-Quetrex project commands/skills, and only the specific
-ones the user **confirms** (step 4c) — never auto-deleted. Secrets are never prompted for
-here — they live at `dash.quetrex.com/keys`.
+into `.claude/settings.json`. It also **unions in** the permissions the pipeline needs
+(4e), writes a `.worktreeinclude` so worktrees are actually runnable (4f), and **offers**
+`/install-github-app` (4g). It never overwrites or silently deletes existing `.claude/`,
+`CLAUDE.md` body content, commands, other settings/hooks, or any git/Claude history, and
+it never removes or narrows a permission the repo already had. The **only** removals are
+stale old-Quetrex project commands/skills, and only the specific ones the user
+**confirms** (step 4c) — never auto-deleted. Secrets are never prompted for here — they
+live at `dash.quetrex.com/keys`.
 
 **Token safety:** never echo or print the bearer token. The helper's `qapi` injects
 it via a `0600` temp config and never exposes it. Build all JSON with
@@ -118,10 +121,46 @@ echo "Created project $CODE"
 mkdir -p "$REPO_ROOT/.quetrex"
 node -e '
   const fs=require("fs");
-  const [path, projectCode, kanbanUrl] = process.argv.slice(1);
-  fs.writeFileSync(path, JSON.stringify({projectCode, kanbanUrl}, null, 2) + "\n");
-' "$REPO_ROOT/.quetrex/project.json" "$CODE" "$QX_KANBAN_URL"
-echo "Wrote binding: $REPO_ROOT/.quetrex/project.json → $CODE"
+  const [path, projectCode, kanbanUrl, branchPrefix] = process.argv.slice(1);
+  fs.writeFileSync(path, JSON.stringify({projectCode, kanbanUrl, branchPrefix}, null, 2) + "\n");
+' "$REPO_ROOT/.quetrex/project.json" "$CODE" "$QX_KANBAN_URL" "$BRANCH_PREFIX"
+echo "Wrote binding: $REPO_ROOT/.quetrex/project.json → $CODE (branchPrefix=$BRANCH_PREFIX)"
+```
+
+See **3d** for how `$BRANCH_PREFIX` is chosen — decide it before writing the binding.
+
+**d. Choose `branchPrefix` — do not hardcode `feature/`.**
+
+Every branch the pipeline creates is built from this value. It exists because an
+**Anthropic cloud routine starts from a fresh clone of the default branch and can only
+push to `claude/`-prefixed branches** unless that restriction is loosened per repo. Nothing
+else in the workflow breaks under that restriction — worktrees, local sub-branch commits,
+merging sub-branches locally, basing off an integration branch and diffing `main...HEAD` all
+survive. **Only the push breaks — and with no push there is no PR, so the pipeline has no
+terminus.**
+
+```bash
+BRANCH_PREFIX="feature/"   # default
+```
+
+Ask the user only when it matters, and give them the real trade-off:
+
+> This repo's branches will be named `feature/<task>`. If you plan to run Quetrex builds
+> as cloud routines and you **cannot** loosen the branch restriction on this repo, choose
+> `claude/` instead — routines can only push to `claude/*` by default. Loosening the repo
+> is the better option where you have the access, because the restriction is a real
+> guardrail against an autonomous run touching `main`.
+
+Accept only a value ending in `/`. On an **already-linked** repo (step 2a), if
+`branchPrefix` is absent from the binding, add it with the default rather than re-prompting
+— every consumer already defaults to `feature/`, so this is a pure backfill:
+
+```bash
+node -e '
+  const fs=require("fs"); const f=process.argv[1];
+  const o=JSON.parse(fs.readFileSync(f,"utf8"));
+  if(!o.branchPrefix){ o.branchPrefix="feature/"; fs.writeFileSync(f, JSON.stringify(o,null,2)+"\n"); console.log("backfilled branchPrefix=feature/"); }
+' "$BIND"
 ```
 
 ---
@@ -299,14 +338,26 @@ node -e '
   const fresh=(cur.trim()==="");
   const lines=[];
   if (fresh) lines.push(`# Project: ${process.argv[1].split("/").slice(-3,-2)[0]||"this project"}`,"");
-  lines.push("## Verification","Run in this order — all must pass before any PR:");
-  steps.forEach((s,i)=>lines.push(`${i+1}. \`${s}\``));
+  lines.push("## Verification","Run in this order — all must pass before any PR:","");
+  // Emit a FENCED block, one bare command per line. verify-gate.sh and the
+  // qa-verify skill both extract the chain from the fence under this heading;
+  // a prose list of backticked items is not what they parse. Never emit a
+  // comment inside the fence — the extractors read those lines verbatim.
+  // (The fence marker is built from char codes so this snippet can itself live
+  // inside a fenced block without closing it.)
+  const FENCE = String.fromCharCode(96,96,96);
+  lines.push(FENCE + "bash");
+  steps.forEach(s=>lines.push(s));
+  lines.push(FENCE);
   const sep = (cur && !cur.endsWith("\n")) ? "\n\n" : (cur ? "\n" : "");
   fs.mkdirSync(require("path").dirname(file),{recursive:true});
   fs.writeFileSync(file, cur + sep + lines.join("\n") + "\n");
 ' "$PROJ_RULES" "${CONFIRMED_STEPS[@]}"
 echo "Wrote ## Verification to $PROJ_RULES"
 ```
+
+The same confirmed list is the seed for `.quetrex/verify.json` (step 4d) — the machine-readable
+chain that takes precedence over this section. This block is the human-readable fallback.
 
 Same `$REPO_ROOT` pin and "never the global file" rule as step 4. Record whether 4b
 created or appended so step 6 stages the file and step 7 reports it.
@@ -399,15 +450,24 @@ bash ~/.claude/lib/quetrex-install-project-gates.sh "$REPO_ROOT"
 
 This deploys, idempotently:
 
-- `.claude/hooks/verify-gate.sh`, `merge-gate.sh`, `secret-scan.sh`, `deny-guard.sh`,
-  `enforce-branch.sh` — copied in and made executable.
+- `.claude/hooks/verify-gate.sh`, `merge-gate.sh`, `edit-gate.sh`, `secret-scan.sh`,
+  `deny-guard.sh`, `enforce-branch.sh`, `auto-format.sh`, `session-state.sh` — copied in
+  and made executable. That is every hook the wiring below references; a wired hook whose
+  script is absent exits 127, which Claude Code treats as non-blocking (a silent
+  fail-open), so the copy list and the wiring list are kept identical by construction.
+  `workflow-reminder.sh` is deliberately **not** deployed per-project — it is a context
+  nudge, not a gate, and the operator already has it at user scope.
 - `.claude/agents/architect.md`, `developer.md`, `qa.md`, `reviewer.md`,
   `security-reviewer.md`, `git-workflow.md`, `database-architect.md` — the seven fat
   pipeline agents, so cloud routines run the same agents as a local session.
 - `.claude/settings.json` — merged (never clobbered) to wire `verify-gate.sh` on
-  `Stop`/`SubagentStop` and `deny-guard.sh`/`secret-scan.sh`/`enforce-branch.sh`/
-  `merge-gate.sh` on the relevant `PreToolUse` matchers, using
-  `$CLAUDE_PROJECT_DIR`-relative paths so they resolve in a fresh clone.
+  `Stop` (900s) / `SubagentStop` (600s); `deny-guard.sh`/`secret-scan.sh`/
+  `enforce-branch.sh`/`merge-gate.sh` on `PreToolUse` `Bash`; `secret-scan.sh` on
+  `PreToolUse` `Write|Edit`; `auto-format.sh` then `edit-gate.sh` on `PostToolUse`
+  `Write|Edit` (that order is load-bearing — the gate checks what the formatter left);
+  and `session-state.sh` on `SessionStart` `startup|resume|compact`. All with
+  `$CLAUDE_PROJECT_DIR`-relative paths so they resolve in a fresh clone, and all with
+  **second**-scale timeouts.
 - `.quetrex/verify.json` — seeded from the committed Next.js template on first run only
   (never overwritten once present), giving QA and `verify-gate.sh` the exact verify chain
   to run.
@@ -418,6 +478,125 @@ silently continue past a failed gate deployment.
 
 Track that this step ran (and whether it changed anything) so step 6 stages the result
 and step 7 reports it.
+
+---
+
+## 4e. Merge the pipeline's required permissions into project settings
+
+**Why this is the only channel that works.** A plugin can ship hooks (`hooks/hooks.json`)
+and per-agent `permissionMode` in frontmatter, but **a plugin cannot ship a
+`permissions.allow` block** — Claude Code honours only two keys from a plugin's
+`settings.json`. The pipeline's terminal stage runs `git push` and `gh pr create`, and
+neither is a "filesystem bash command" that `acceptEdits` covers. Without an allow-list,
+those calls prompt — and in an unattended run there is no one to answer, so **the pipeline
+hangs at the last step with the work already done.** Writing the allow-list into the
+customer's own project settings is what survives plugin packaging.
+
+Merge — never clobber — into `$REPO_ROOT/.claude/settings.json`. Union with whatever is
+already there, preserve every other key, and write only if something was actually added:
+
+```bash
+node -e '
+  const fs=require("fs"), path=require("path");
+  const file=process.argv[1];
+  const need=[
+    "Bash(git push:*)","Bash(gh pr:*)","Bash(git worktree:*)","Bash(git checkout:*)",
+    "Bash(git merge:*)","Bash(git diff:*)","Bash(git rev-parse:*)","Bash(git add:*)",
+    "Bash(git commit:*)","Bash(jq:*)","Bash(mkdir:*)","Write","Edit"
+  ];
+  let o={};
+  try { o=JSON.parse(fs.readFileSync(file,"utf8")); } catch {}
+  o.permissions = o.permissions || {};
+  const cur = Array.isArray(o.permissions.allow) ? o.permissions.allow : [];
+  const added = need.filter(n => !cur.includes(n));
+  if (!added.length) { console.log("permissions.allow already covers the pipeline."); process.exit(0); }
+  o.permissions.allow = cur.concat(added);
+  fs.mkdirSync(path.dirname(file), {recursive:true});
+  fs.writeFileSync(file, JSON.stringify(o, null, 2) + "\n");
+  console.log("Added " + added.length + " pipeline permission(s): " + added.join(", "));
+' "$REPO_ROOT/.claude/settings.json"
+```
+
+**Never remove or narrow an entry the repo already had**, and never touch
+`permissions.deny` or `permissions.ask` — those are the customer's. This step only ever
+adds. Note in the report that these are *additions to the customer's own settings*, so
+they are visible and revocable by them.
+
+---
+
+## 4f. Generate `.worktreeinclude`
+
+**Why:** `git worktree` checks out **tracked files only**. Every developer in the pipeline
+runs in a worktree, and `node_modules/` and `.env*` are git-ignored — so without this an
+agent lands in a tree with no deps and no env, and must still make the build exit 0. It
+burns all three bounded self-heal attempts "fixing" code that was never broken, and the
+artefacts of that flailing are hardcoded credentials and weakened tests. This file is the
+cheapest fix in the adoption.
+
+The file list is already known: step 5b's `qx_env_scan` enumerates this repo's env files.
+If 5b has not run yet, call `qx_env_scan "$REPO_ROOT"` here — it is read-only and safe to
+run twice. **Take only the FILE column** (the masked-value column never leaves that step):
+
+```bash
+ENV_FILES=()
+while IFS=$'\t' read -r ENVFILE _RAW _CANON _MASK; do
+  [ -n "$ENVFILE" ] || continue
+  ENV_FILES+=("${ENVFILE#$REPO_ROOT/}")
+done <<< "$(qx_env_scan "$REPO_ROOT")"
+```
+
+Write the union of those, plus any local Claude settings, **append-only and idempotent** —
+never drop an entry the user added:
+
+```bash
+WTI="$REPO_ROOT/.worktreeinclude"
+# ENV_FILES = the FILE column of qx_env_scan output (see 5b), de-duplicated and made
+# repo-relative. Add local-only config that every worktree also needs.
+node -e '
+  const fs=require("fs");
+  const [file, ...cands] = process.argv.slice(1);
+  let cur=""; try { cur=fs.readFileSync(file,"utf8"); } catch {}
+  const have=new Set(cur.split("\n").map(s=>s.trim()).filter(Boolean));
+  const add=cands.filter(c=>c && !have.has(c));
+  if(!add.length){ console.log(".worktreeinclude already current."); process.exit(0); }
+  const header = cur ? "" :
+    "# Git-ignored paths every worktree needs. Listing a path here does NOT commit it.\n" +
+    "# NOTE: the harness applies this to the worktrees IT creates; a manual\n" +
+    "# `git worktree add` must copy these itself (see the worktree-workflow skill).\n";
+  fs.writeFileSync(file, header + cur + (cur && !cur.endsWith("\n") ? "\n" : "") + add.join("\n") + "\n");
+  console.log("Added to .worktreeinclude: " + add.join(", "));
+' "$WTI" ".env" ".env.local" ".claude/settings.local.json" "${ENV_FILES[@]}"
+```
+
+Only list paths that actually exist in this repo — a phantom entry is noise the copy step
+has to skip every time. **Never list a path that is tracked in git** (it is already in the
+worktree) and never list a directory of build output.
+
+---
+
+## 4g. Offer `/install-github-app` (ask, never run unprompted)
+
+The GitHub Action path (`anthropics/claude-code-action@v1`) is how a check runs in CI
+rather than inside the agent that wrote the code — the only reviewer whose exit status the
+pipeline cannot self-report. Setting it up starts with `/install-github-app`, which needs
+**repo admin** and walks through installing the GitHub app and setting the API key secret.
+
+Detect whether it is already in place and offer it once:
+
+```bash
+gh api "repos/$(git -C "$REPO_ROOT" remote get-url origin | sed -E 's#.*[:/]([^/]+/[^/]+?)(\.git)?$#\1#')/installation" >/dev/null 2>&1 \
+  && echo "Claude GitHub app: already installed." \
+  || echo "Claude GitHub app: not installed."
+```
+
+If not installed, say:
+
+> To run Quetrex's checks in CI on every PR, install the Claude GitHub app with
+> `/install-github-app` (needs repo admin). Want to do that now? It is optional — the
+> local gates work without it.
+
+**Do not run `/install-github-app` without an explicit yes**, and do not block adoption on
+it. If they decline, record it and move on.
 
 ---
 
@@ -494,7 +673,8 @@ were `git rm`'d into the index), so they ride along in this same commit/PR. Use
 `main`.
 
 ```bash
-BRANCH="feature/q-init-adopt"
+# Use the project's own prefix — a repo pinned to "claude/" cannot push a feature/ branch.
+BRANCH="${BRANCH_PREFIX}q-init-adopt"
 git -C "$REPO_ROOT" checkout -b "$BRANCH" 2>/dev/null || git -C "$REPO_ROOT" checkout "$BRANCH"
 
 # Stage only what this command added/cleaned: the binding, any CLAUDE.md cleanups
@@ -504,14 +684,21 @@ git -C "$REPO_ROOT" checkout -b "$BRANCH" 2>/dev/null || git -C "$REPO_ROOT" che
 git -C "$REPO_ROOT" add .quetrex/project.json 2>/dev/null || true
 [ -f "$REPO_ROOT/CLAUDE.md" ]        && git -C "$REPO_ROOT" add CLAUDE.md 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/CLAUDE.md" ] && git -C "$REPO_ROOT" add .claude/CLAUDE.md 2>/dev/null || true
+# EVERY hook the installer wires must be staged. A wired hook whose script is
+# not committed exits 127 in a fresh clone (a cloud routine), and Claude Code
+# treats any exit other than 0 or 2 as non-blocking — a silent fail-open. This
+# list must stay identical to GATE_SCRIPTS in quetrex-install-project-gates.sh.
 git -C "$REPO_ROOT" add .claude/hooks/verify-gate.sh .claude/hooks/merge-gate.sh \
-  .claude/hooks/secret-scan.sh .claude/hooks/deny-guard.sh .claude/hooks/enforce-branch.sh \
+  .claude/hooks/edit-gate.sh .claude/hooks/secret-scan.sh .claude/hooks/deny-guard.sh \
+  .claude/hooks/enforce-branch.sh .claude/hooks/auto-format.sh \
+  .claude/hooks/session-state.sh \
   2>/dev/null || true
 git -C "$REPO_ROOT" add .claude/agents/architect.md .claude/agents/developer.md \
   .claude/agents/qa.md .claude/agents/reviewer.md .claude/agents/security-reviewer.md \
   .claude/agents/git-workflow.md .claude/agents/database-architect.md 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/settings.json" ] && git -C "$REPO_ROOT" add .claude/settings.json 2>/dev/null || true
 [ -f "$REPO_ROOT/.quetrex/verify.json" ]  && git -C "$REPO_ROOT" add .quetrex/verify.json 2>/dev/null || true
+[ -f "$REPO_ROOT/.worktreeinclude" ]      && git -C "$REPO_ROOT" add .worktreeinclude 2>/dev/null || true
 
 if git -C "$REPO_ROOT" diff --cached --quiet; then
   echo "Nothing to commit — repo already adopted."
@@ -560,6 +747,16 @@ Summarize for the user:
   hooks/agents were (re)deployed, how many new hook entries were wired into
   `.claude/settings.json`, and whether `.quetrex/verify.json` was written or already
   present.
+- **Branch prefix** — the value recorded in the binding (`feature/` by default), and, if it
+  is not `claude/`, the one-line note that cloud routines need the repo's branch restriction
+  loosened to push it.
+- **Permissions** — which pipeline entries were added to the customer's own
+  `.claude/settings.json` `permissions.allow` (or *"already covered"*), stated as additions
+  they can see and revoke. Nothing was removed or narrowed.
+- **Worktree environment** — the `.worktreeinclude` entries written (or *"already
+  current"*), and the note that they are git-ignored paths copied into worktrees, never
+  committed.
+- **GitHub app** — installed already / offered and accepted / offered and declined.
 - **Secrets** — which local env creds were imported into the vault (by CANON name +
   masked last-4, never values), and the `dash.quetrex.com/keys` reminder for any missing
   ones.
@@ -575,11 +772,18 @@ Summarize for the user:
 - Never print the bearer token. Build all JSON with `node` / `JSON.stringify`.
 - Idempotent: re-running on a linked repo never re-creates the binding and never
   prompts for a name — it re-verifies access and can re-clean / re-PR.
-- Non-destructive: the files this command creates are `.quetrex/project.json` and the
-  build-gate artifacts from step 4d (`.claude/hooks/{verify-gate,merge-gate,secret-scan,
-  deny-guard,enforce-branch}.sh`, the seven fat `.claude/agents/*.md`, and
-  `.quetrex/verify.json`); `CLAUDE.md` edits only excise stale tracker blocks, never
-  wholesale rewrites; `.claude/settings.json` is merged, never clobbered. The only
-  removals are user-confirmed stale old-Quetrex project commands/skills (step 4c) —
-  never auto-deleted, never anything in the global `~/.claude` (step 4d only ever *reads*
-  from `~/.claude`, it never writes there).
+- Non-destructive: the files this command creates are `.quetrex/project.json`, the
+  build-gate artifacts from step 4d (`.claude/hooks/{verify-gate,merge-gate,edit-gate,
+  secret-scan,deny-guard,enforce-branch,auto-format,session-state}.sh`, the seven fat
+  `.claude/agents/*.md`, and
+  `.quetrex/verify.json`), and `.worktreeinclude` (step 4f); `CLAUDE.md` edits only excise
+  stale tracker blocks, never wholesale rewrites; `.claude/settings.json` is merged, never
+  clobbered, and step 4e only ever **adds** to `permissions.allow` — it never removes or
+  narrows an entry, and never touches `permissions.deny`/`ask`. The only removals are
+  user-confirmed stale old-Quetrex project commands/skills (step 4c) — never auto-deleted,
+  never anything in the global `~/.claude` (step 4d only ever *reads* from `~/.claude`, it
+  never writes there).
+- Never hardcode `feature/`: `branchPrefix` is chosen in step 3d, recorded in the binding,
+  and used for this command's own adoption branch and by every downstream command.
+- `/install-github-app` is **offered**, never run unprompted, and adoption never blocks on
+  it.

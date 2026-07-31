@@ -4,6 +4,7 @@ description: Planning strategist. Produces the implementation plan — a zero-ov
 tools: Read, Grep, Glob, Write
 model: opus
 effort: high
+maxTurns: 40
 color: green
 ---
 
