@@ -10,7 +10,7 @@
 #
 # OWNER ACTION: make "verify chain" a REQUIRED status check on the default
 # branch (Settings -> Branches -> branch protection). Until it is required, a
-# red run is only advisory. See HANDOFF.md.
+# red run is only advisory.
 name: verify
 
 on:

@@ -36,8 +36,6 @@
     ".claude/templates/",
     ".claude/statusline-command.sh",
     ".claude/team-protocol.md",
-    "install.js",
-    "README.md",
-    "SECURITY.md"
+    "install.js"
   ]
 }

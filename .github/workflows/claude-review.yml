@@ -22,7 +22,7 @@
 # ############################################################################
 #
 # OWNER ACTION: run /install-github-app once (needs repo admin) and set the
-# ANTHROPIC_API_KEY secret, or this workflow cannot start. See HANDOFF.md.
+# ANTHROPIC_API_KEY secret, or this workflow cannot start.
 name: claude-review
 
 on:
