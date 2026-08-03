@@ -156,10 +156,12 @@ temp config and never echoes it) to fetch the caller's record and report the ema
 source ~/.claude/lib/quetrex-api.sh
 resolve_auth || { echo "Login saved, but auth could not be loaded — run /q-login again." >&2; exit 1; }
 
-ME="$(qapi GET /api/users)" || exit 1   # qapi prints the right message on non-2xx
+ME="$(qapi GET /api/users/me)" || exit 1   # the CALLER'S OWN record (bound to this token), not a list
 EMAIL="$(node -e '
   let s=process.argv[1]; let o; try{o=JSON.parse(s)}catch{process.exit(1)}
-  const u = Array.isArray(o) ? o[0] : (o.user || o);
+  // /api/users/me returns the caller identity object directly ({id,name,email,image}).
+  // Never take users[0] of a list — that names whoever is first, not the caller.
+  const u = (o && o.user) ? o.user : o;
   if(!u || !u.email){process.exit(1)}
   process.stdout.write(String(u.email))
 ' "$ME")" || { echo "Login saved, but could not confirm identity."; exit 0; }
@@ -167,7 +169,7 @@ EMAIL="$(node -e '
 echo "Logged in as $EMAIL"
 ```
 
-If `/api/users` returns a non-2xx, `qapi` already printed the correct message — just stop.
+If `/api/users/me` returns a non-2xx, `qapi` already printed the correct message — just stop.
 If the body parses but has no email, report `Login saved, but could not confirm identity.`
 and exit `0` (the token is still valid and on disk).
 
