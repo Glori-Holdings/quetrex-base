@@ -3,7 +3,7 @@ description: Vet, classify, and build one Quetrex task end to end. Splits at the
 argument-hint: <TASK-ID like SMA-1> [--build-only | --tick]
 ---
 
-# q-task-build
+# quetrex:task-build
 
 Take one kanban task from intake to open PR(s), in **two halves split at the human scope gate**:
 

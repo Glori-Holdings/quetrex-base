@@ -166,11 +166,38 @@ check('no command sources a lib from ~/.claude (the plugin ships bin/quetrex-api
   }
 });
 
+// --- 4b. zero references to the retired per-project gate installer, in ANY
+// invocation form (not just `source`) — a `bash ~/.claude/lib/...` call or a
+// bare mention is just as broken in a fresh clone as `source` was.
+check('no command invokes or references ~/.claude/lib in any form (the per-project gate-copy is retired)', () => {
+  const dir = path.join(REPO_ROOT, '.claude', 'commands');
+  for (const f of fs.readdirSync(dir)) {
+    const body = read(`.claude/commands/${f}`);
+    assert.ok(!/bash\s+~\/\.claude\/lib/.test(body),
+      `${f} still invokes a lib via bash ~/.claude/lib — the per-project gate-copy is retired; the quetrex-factory plugin pin delivers the guards instead`);
+    assert.ok(!/~\/\.claude\/lib/.test(body),
+      `${f} still references ~/.claude/lib in some form — a plugin never seeds that path, and the per-project gate-copy it used to run is retired`);
+  }
+});
+
 // --- 5. not one legacy /q-<cmd> reference survives, anywhere ----------------
 check('zero /q-<cmd> command references remain repo-wide', () => {
   const hits = gitGrep(LEGACY_CMD_RE, ['.', ':(exclude).quetrex-backups', ':(exclude).quetrex/plan']);
   assert.deepStrictEqual(hits, [],
     'every legacy command reference must be rewritten to /quetrex:*:\n' + hits.join('\n'));
+});
+
+// --- 5b. a BROAD /q-<anything> scan across .claude/ — the specific-verb
+// regex above only matches the exact known verbs (init, login, task-new, …)
+// and a glob-style reference like `/q-task-*` slips past it untouched
+// because "task-*" is not one of the enumerated verbs. This assertion
+// catches any `/q-<lowercase-letters>` reference anywhere under .claude/,
+// verb list or not, so that class of miss cannot recur.
+check('zero broad /q-<anything> command references remain under .claude/ (catches glob forms like /q-task-*)', () => {
+  const BROAD_LEGACY_RE = '/' + 'q-[a-z]';
+  const hits = gitGrep(BROAD_LEGACY_RE, ['.claude', ':(exclude).quetrex-backups', ':(exclude).quetrex/plan']);
+  assert.deepStrictEqual(hits, [],
+    'every legacy /q-<verb> reference under .claude/ (including glob-style mentions like /q-task-*) must be rewritten to /quetrex:*:\n' + hits.join('\n'));
 });
 
 // --- 6. the npm installer is fully retired ---------------------------------

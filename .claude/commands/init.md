@@ -1,5 +1,5 @@
 ---
-description: Link this repo to a Quetrex project (writes ./.quetrex/project.json with its branchPrefix) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, deploy the committed per-project build gates, union in the permissions the pipeline needs, generate .worktreeinclude, offer /install-github-app, offer to import local env creds into the vault, open a PR). Usage: /quetrex:init [project name]
+description: Link this repo to a Quetrex project (writes ./.quetrex/project.json with its branchPrefix) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, pin the quetrex-factory engine in enabledPlugins so its build gates run locally and in cloud routines, union in the permissions the pipeline needs, generate .worktreeinclude, offer /install-github-app, offer to import local env creds into the vault, open a PR). Usage: /quetrex:init [project name]
 argument-hint: "[project name — only used when the repo is not yet linked]"
 ---
 
@@ -11,12 +11,13 @@ re-create the binding and never prompt for a name. If it is **not linked**, crea
 the project (or surface the admin-only guidance on 403) and write the binding.
 
 This command is **non-destructive**: it only ever ADDs `.quetrex/project.json`,
-auto-cleans stale tracker references from `CLAUDE.md`, and deploys the committed
-per-project build gates (step 4d) — the `verify-gate.sh`/`merge-gate.sh`/`secret-scan.sh`
-hooks, the seven fat pipeline agents, and `.quetrex/verify.json`, merged (never clobbered)
-into `.claude/settings.json`. It also **unions in** the permissions the pipeline needs
-(4e), writes a `.worktreeinclude` so worktrees are actually runnable (4f), and **offers**
-`/install-github-app` (4g). It never overwrites or silently deletes existing `.claude/`,
+auto-cleans stale tracker references from `CLAUDE.md`, and pins the `quetrex-factory`
+plugin in `enabledPlugins` (step 4h) — the build engine that ships the
+`verify-gate.sh`/`merge-gate.sh`/`secret-scan.sh` hooks and the fat pipeline agents, so
+they run **both locally and in cloud routines** with no per-project copy required. It
+also **unions in** the permissions the pipeline needs (4e), writes a `.worktreeinclude`
+so worktrees are actually runnable (4f), and **offers** `/install-github-app` (4g). It
+never overwrites or silently deletes existing `.claude/`,
 `CLAUDE.md` body content, commands, other settings/hooks, or any git/Claude history, and
 it never removes or narrows a permission the repo already had. The **only** removals are
 stale old-Quetrex project commands/skills, and only the specific ones the user
@@ -356,7 +357,7 @@ node -e '
 echo "Wrote ## Verification to $PROJ_RULES"
 ```
 
-The same confirmed list is the seed for `.quetrex/verify.json` (step 4d) — the machine-readable
+The same confirmed list is also the seed for `.quetrex/verify.json` — the machine-readable
 chain that takes precedence over this section. This block is the human-readable fallback.
 
 Same `$REPO_ROOT` pin and "never the global file" rule as step 4. Record whether 4b
@@ -425,59 +426,6 @@ done
 
 Track exactly what was removed vs kept so step 6 includes the removals and step 7 reports
 them.
-
----
-
-## 4d. Deploy the committed per-project build gates
-
-**Why:** the real gate scripts (`verify-gate.sh`, `merge-gate.sh`, `secret-scan.sh`, plus
-`deny-guard.sh`/`enforce-branch.sh`) and the seven fat pipeline agents live in the
-operator's **global** `~/.claude`. A local Claude Code session already sees them there —
-but any **Anthropic cloud routine** only ever sees what is **committed to this repo**; it
-clones the repo and never touches the operator's machine. Without this step the gates
-would silently no-op in the cloud (no `.claude/hooks/verify-gate.sh` to run, no wiring in
-`.claude/settings.json` to call it). Running this step makes the build gates fire
-**both locally and in cloud routines**, from the same committed source.
-
-This is the same non-destructive adoption this command already performs: it only ever
-copies the specific quetrex hook/agent files and merges the specific quetrex hook entries
-into `.claude/settings.json` — it never touches any other hook, permission, or setting
-already in the repo.
-
-```bash
-bash ~/.claude/lib/quetrex-install-project-gates.sh "$REPO_ROOT"
-```
-
-This deploys, idempotently:
-
-- `.claude/hooks/verify-gate.sh`, `merge-gate.sh`, `edit-gate.sh`, `secret-scan.sh`,
-  `deny-guard.sh`, `enforce-branch.sh`, `auto-format.sh`, `session-state.sh` — copied in
-  and made executable. That is every hook the wiring below references; a wired hook whose
-  script is absent exits 127, which Claude Code treats as non-blocking (a silent
-  fail-open), so the copy list and the wiring list are kept identical by construction.
-  `workflow-reminder.sh` is deliberately **not** deployed per-project — it is a context
-  nudge, not a gate, and the operator already has it at user scope.
-- `.claude/agents/architect.md`, `developer.md`, `qa.md`, `reviewer.md`,
-  `security-reviewer.md`, `git-workflow.md`, `database-architect.md` — the seven fat
-  pipeline agents, so cloud routines run the same agents as a local session.
-- `.claude/settings.json` — merged (never clobbered) to wire `verify-gate.sh` on
-  `Stop` (900s) / `SubagentStop` (600s); `deny-guard.sh`/`secret-scan.sh`/
-  `enforce-branch.sh`/`merge-gate.sh` on `PreToolUse` `Bash`; `secret-scan.sh` on
-  `PreToolUse` `Write|Edit`; `auto-format.sh` then `edit-gate.sh` on `PostToolUse`
-  `Write|Edit` (that order is load-bearing — the gate checks what the formatter left);
-  and `session-state.sh` on `SessionStart` `startup|resume|compact`. All with
-  `$CLAUDE_PROJECT_DIR`-relative paths so they resolve in a fresh clone, and all with
-  **second**-scale timeouts.
-- `.quetrex/verify.json` — seeded from the committed Next.js template on first run only
-  (never overwritten once present), giving QA and `verify-gate.sh` the exact verify chain
-  to run.
-
-A non-zero exit means the helper already printed the exact cause (e.g. the global
-install is missing a required hook/agent) — surface it verbatim and stop; do not
-silently continue past a failed gate deployment.
-
-Track that this step ran (and whether it changed anything) so step 6 stages the result
-and step 7 reports it.
 
 ---
 
@@ -827,36 +775,25 @@ a credential that was just imported.
 ## 6. Commit the additions — PR if possible, else local
 
 Follow the `worktree-workflow` conventions. Stage **only** the additions/cleanups:
-`.quetrex/project.json` plus any `CLAUDE.md` edits made in step 4, and the build gates
-deployed in step 4d. The confirmed stale removals from step 4c are already staged (they
-were `git rm`'d into the index), so they ride along in this same commit/PR. Use
+`.quetrex/project.json` plus any `CLAUDE.md` edits made in step 4. The build gates
+(`verify-gate.sh`/`merge-gate.sh`/`secret-scan.sh` and the fat pipeline agents) are
+delivered by the `quetrex-factory` plugin pin (4h) — this command never copies hook or
+agent files into the repo. The confirmed stale removals from step 4c are already staged
+(they were `git rm`'d into the index), so they ride along in this same commit/PR. Use
 `git -C "$REPO_ROOT"` so the enforce-branch hook sees the branch rather than blocking on
 `main`.
 
 ```bash
 # Use the project's own prefix — a repo pinned to "claude/" cannot push a feature/ branch.
-BRANCH="${BRANCH_PREFIX}q-init-adopt"
+BRANCH="${BRANCH_PREFIX}quetrex-init-adopt"
 git -C "$REPO_ROOT" checkout -b "$BRANCH" 2>/dev/null || git -C "$REPO_ROOT" checkout "$BRANCH"
 
 # Stage only what this command added/cleaned: the binding, any CLAUDE.md cleanups
-# (step 4), the project Verification rules created/appended in step 4b, and the
-# committed build gates deployed in step 4d (hooks + fat agents + settings.json wiring +
-# .quetrex/verify.json). Each `add` is a no-op if that path has nothing new to stage.
+# (step 4), and the project Verification rules created/appended in step 4b. Each
+# `add` is a no-op if that path has nothing new to stage.
 git -C "$REPO_ROOT" add .quetrex/project.json 2>/dev/null || true
 [ -f "$REPO_ROOT/CLAUDE.md" ]        && git -C "$REPO_ROOT" add CLAUDE.md 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/CLAUDE.md" ] && git -C "$REPO_ROOT" add .claude/CLAUDE.md 2>/dev/null || true
-# EVERY hook the installer wires must be staged. A wired hook whose script is
-# not committed exits 127 in a fresh clone (a cloud routine), and Claude Code
-# treats any exit other than 0 or 2 as non-blocking — a silent fail-open. This
-# list must stay identical to GATE_SCRIPTS in quetrex-install-project-gates.sh.
-git -C "$REPO_ROOT" add .claude/hooks/verify-gate.sh .claude/hooks/merge-gate.sh \
-  .claude/hooks/edit-gate.sh .claude/hooks/secret-scan.sh .claude/hooks/deny-guard.sh \
-  .claude/hooks/enforce-branch.sh .claude/hooks/auto-format.sh \
-  .claude/hooks/session-state.sh \
-  2>/dev/null || true
-git -C "$REPO_ROOT" add .claude/agents/architect.md .claude/agents/developer.md \
-  .claude/agents/qa.md .claude/agents/reviewer.md .claude/agents/security-reviewer.md \
-  .claude/agents/git-workflow.md .claude/agents/database-architect.md 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/settings.json" ] && git -C "$REPO_ROOT" add .claude/settings.json 2>/dev/null || true
 [ -f "$REPO_ROOT/.quetrex/verify.json" ]  && git -C "$REPO_ROOT" add .quetrex/verify.json 2>/dev/null || true
 [ -f "$REPO_ROOT/.worktreeinclude" ]      && git -C "$REPO_ROOT" add .worktreeinclude 2>/dev/null || true
@@ -870,8 +807,8 @@ else
   git -C "$REPO_ROOT" commit -m "chore: adopt repo into Quetrex project $CODE
 
 Add .quetrex/project.json binding, clean stale tracker references, ensure project
-Verification rules, and deploy the committed per-project build gates (hooks + fat
-agents + .quetrex/verify.json) so they fire locally and in cloud routines." >/dev/null
+Verification rules, and pin the quetrex-factory engine in enabledPlugins so its
+build gates run locally and in cloud routines." >/dev/null
 
   # Open a PR only if there is a remote AND gh is available.
   if git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1 && command -v gh >/dev/null 2>&1; then
@@ -879,7 +816,7 @@ agents + .quetrex/verify.json) so they fire locally and in cloud routines." >/de
     PR_URL="$(gh pr create --repo "$(git -C "$REPO_ROOT" remote get-url origin)" \
       --head "$BRANCH" \
       --title "chore: adopt repo into Quetrex project $CODE" \
-      --body "Links this repo to Quetrex project \`$CODE\` (adds \`.quetrex/project.json\`), cleans stale tracker references from CLAUDE.md, and deploys the committed per-project build gates (hooks + fat agents + .quetrex/verify.json) so they fire locally and in cloud routines. Non-destructive: no existing config or history was overwritten." 2>/dev/null)"
+      --body "Links this repo to Quetrex project \`$CODE\` (adds \`.quetrex/project.json\`), cleans stale tracker references from CLAUDE.md, and pins the quetrex-factory engine in enabledPlugins so its build gates run locally and in cloud routines. Non-destructive: no existing config or history was overwritten." 2>/dev/null)"
     if [ -n "$PR_URL" ]; then
       echo "Opened PR: $PR_URL"
     else
@@ -907,10 +844,6 @@ Summarize for the user:
   the file path that now carries the `## Verification` section.
 - **Stale project commands** — which flagged command/skill artifacts were removed (by path)
   vs kept, or *"no stale project commands found"* if nothing matched.
-- **Build gates** — the summary printed by `quetrex-install-project-gates.sh`: which
-  hooks/agents were (re)deployed, how many new hook entries were wired into
-  `.claude/settings.json`, and whether `.quetrex/verify.json` was written or already
-  present.
 - **Branch prefix** — the value recorded in the binding (`feature/` by default), and, if it
   is not `claude/`, the one-line note that cloud routines need the repo's branch restriction
   loosened to push it.
@@ -944,17 +877,17 @@ Summarize for the user:
 - Never print the bearer token. Build all JSON with `node` / `JSON.stringify`.
 - Idempotent: re-running on a linked repo never re-creates the binding and never
   prompts for a name — it re-verifies access and can re-clean / re-PR.
-- Non-destructive: the files this command creates are `.quetrex/project.json`, the
-  build-gate artifacts from step 4d (`.claude/hooks/{verify-gate,merge-gate,edit-gate,
-  secret-scan,deny-guard,enforce-branch,auto-format,session-state}.sh`, the seven fat
-  `.claude/agents/*.md`, and
-  `.quetrex/verify.json`), and `.worktreeinclude` (step 4f); `CLAUDE.md` edits only excise
-  stale tracker blocks, never wholesale rewrites; `.claude/settings.json` is merged, never
-  clobbered, and step 4e only ever **adds** to `permissions.allow` — it never removes or
-  narrows an entry, and never touches `permissions.deny`/`ask`. The only removals are
-  user-confirmed stale old-Quetrex project commands/skills (step 4c) — never auto-deleted,
-  never anything in the global `~/.claude` (step 4d only ever *reads* from `~/.claude`, it
-  never writes there).
+- Non-destructive: the only files this command creates are `.quetrex/project.json`,
+  `.worktreeinclude` (step 4f), and `.mcp.json` (step 4i, merged — never clobbering an
+  existing MCP server entry); `CLAUDE.md` edits only excise stale tracker blocks, never
+  wholesale rewrites; `.claude/settings.json` is merged, never clobbered — step 4e only
+  ever **adds** to `permissions.allow` and step 4h only ever adds/updates the
+  `enabledPlugins` pin, never removing or narrowing an entry, and never touching
+  `permissions.deny`/`ask`. The only removals are user-confirmed stale old-Quetrex
+  project commands/skills (step 4c) — never auto-deleted, never anything in the global
+  `~/.claude`. The build gates (`verify-gate.sh`/`merge-gate.sh`/`secret-scan.sh` and the
+  fat pipeline agents) are delivered by the `quetrex-factory` plugin pin (4h), never
+  copied into the repo — this command never writes a hook or agent file.
 - Never hardcode `feature/`: `branchPrefix` is chosen in step 3d, recorded in the binding,
   and used for this command's own adoption branch and by every downstream command.
 - `/install-github-app` is **offered**, never run unprompted, and adoption never blocks on

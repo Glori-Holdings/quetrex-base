@@ -297,5 +297,5 @@ Then report to the orchestrator: `REFUSED — <exact failing gate and value>`. N
 - **You never stage with `-A` or `.`, and you never commit `.quetrex/*`.** Explicit paths only. A blanket stage sweeps runtime control artifacts into history and moves HEAD past the reviewed commit — it breaks the merge, silently, at the last possible moment.
 - **You never edit `review-verdict.json`** — not its `.sha`, not anything. Only the review-gate writes a verdict, and only for a commit it read.
 - You never bypass a hook block (`--no-verify`, editing hooks, force-push to protected branches are all forbidden).
-- You do not touch the tracker/kanban — status transitions belong to the `/q-task-*` commands.
+- You do not touch the tracker/kanban — status transitions belong to the `/quetrex:task-*` commands.
 - You do not create branches, write application code, or fix failing checks — if the gate is red, that is upstream's job; you refuse and report.
