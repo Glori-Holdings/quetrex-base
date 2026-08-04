@@ -242,6 +242,68 @@ else
   fail "arming should still add its own entries (qpin=$QPIN2, kanban=$KANBAN2)"
 fi
 
+# ---------------------------------------------------------------------------
+# 5. Missing arguments — usage + exit 2, never a silent no-op.
+# ---------------------------------------------------------------------------
+USAGE_OUT="$("$ARM" 2>&1)"; RC_USAGE=$?
+if [ "$RC_USAGE" -eq 2 ]; then
+  pass "invoking with no arguments exits 2 (usage error)"
+else
+  fail "invoking with no arguments should exit 2 (got rc=$RC_USAGE)"
+fi
+if printf '%s' "$USAGE_OUT" | grep -qi 'usage: quetrex-arm'; then
+  pass "invoking with no arguments prints usage"
+else
+  fail "invoking with no arguments should print a usage message (got: $USAGE_OUT)"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Marketplace unreachable — fails OPEN on the factory pin, never writes a
+#    bogus/floating value, still enables quetrex@quetrex, and still exits 0.
+#    This is the exact branch AC5's "never true" guarantee depends on: a
+#    regression here could silently degrade to writing `true` (or crashing)
+#    the moment the marketplace manifest is unreachable, which is precisely
+#    when a fresh /quetrex:init is most likely to hit it (offline, DNS
+#    hiccup, GitHub raw outage).
+# ---------------------------------------------------------------------------
+REPO3="$WORK/repo3"
+mkdir -p "$REPO3"
+
+UNREACHABLE_OUT="$(QX_ARM_MARKET_URL="file://$WORK/does-not-exist.json" "$ARM" "$REPO3" "$KANBAN_URL" 2>&1)"
+RC_UNREACHABLE=$?
+
+if [ "$RC_UNREACHABLE" -eq 0 ]; then
+  pass "unreachable marketplace still exits 0 (fails open on the pin, not on the run)"
+else
+  fail "unreachable marketplace should still exit 0 (got rc=$RC_UNREACHABLE, output: $UNREACHABLE_OUT)"
+fi
+
+QPIN3="$(json_get "$REPO3/.claude/settings.json" 'enabledPlugins.quetrex@quetrex')"
+if [ "$QPIN3" = "true" ]; then
+  pass "unreachable marketplace still enables quetrex@quetrex"
+else
+  fail "unreachable marketplace should still enable quetrex@quetrex (got: $QPIN3)"
+fi
+
+FPIN3_RAW="$(node -e '
+  const fs = require("fs");
+  let o = {};
+  try { o = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
+  const has = Object.prototype.hasOwnProperty.call(o.enabledPlugins || {}, "quetrex-factory@quetrex");
+  process.stdout.write(has ? JSON.stringify(o.enabledPlugins["quetrex-factory@quetrex"]) : "ABSENT");
+' "$REPO3/.claude/settings.json")"
+if [ "$FPIN3_RAW" = "ABSENT" ]; then
+  pass "unreachable marketplace defers the factory pin entirely (no key written, never true)"
+else
+  fail "unreachable marketplace must not write any quetrex-factory@quetrex value (got: $FPIN3_RAW)"
+fi
+
+if printf '%s' "$UNREACHABLE_OUT" | grep -qi 'marketplace unreachable'; then
+  pass "unreachable marketplace warns on stderr/stdout"
+else
+  fail "unreachable marketplace should warn about the deferred pin (got: $UNREACHABLE_OUT)"
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "quetrex-arm.test.sh: all checks passed"
