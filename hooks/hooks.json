@@ -8,6 +8,11 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/session-state.sh\"",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/quetrex-update-check.sh\"",
+            "timeout": 15
           }
         ]
       }
@@ -23,47 +28,10 @@
         ]
       }
     ],
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/deny-guard.sh\"",
-            "timeout": 30
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/secret-scan.sh\"",
-            "timeout": 30
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/enforce-branch.sh\"",
-            "timeout": 30
-          }
-        ]
-      },
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/secret-scan.sh\"",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
     "PostToolUse": [
       {
         "matcher": "Write|Edit",
         "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/auto-format.sh\"",
-            "timeout": 30
-          },
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/edit-gate.sh\"",

@@ -1,5 +1,5 @@
 ---
-description: Log in to the Quetrex kanban via browser device-flow and store a per-user API token at ~/.quetrex/auth.json. Run once per machine before /q-init. Usage: /q-login [kanbanUrl]
+description: Log in to the Quetrex kanban via browser device-flow and store a per-user API token at ~/.quetrex/auth.json. Run once per machine before /quetrex:init. Usage: /quetrex:login [kanbanUrl]
 argument-hint: "[kanbanUrl — defaults to https://dash.quetrex.com]"
 ---
 
@@ -8,7 +8,7 @@ argument-hint: "[kanbanUrl — defaults to https://dash.quetrex.com]"
 Authenticate this machine to the Quetrex kanban using the browser **device flow**, then
 store a per-user API token at `~/.quetrex/auth.json` (mode `600`). This is the only skill
 that legitimately handles the raw token — it runs **before** auth exists, so it does **not**
-call `resolve_auth` for gating. It uses raw `curl` for the device flow and writes the token
+gate on existing auth. It uses raw `curl` for the device flow and writes the token
 straight to disk without ever printing it.
 
 **Token safety is the prime directive.** The raw token only ever flows
@@ -128,14 +128,14 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   case "$STATUS" in
     ok)      break ;;
     pending) sleep "$INTERVAL" ;;
-    expired) echo "Login code expired — run /q-login again." >&2; exit 1 ;;
+    expired) echo "Login code expired — run /quetrex:login again." >&2; exit 1 ;;
     denied)  echo "Login was denied in the browser." >&2; exit 1 ;;
-    *)       echo "Login failed — run /q-login again." >&2; exit 1 ;;
+    *)       echo "Login failed — run /quetrex:login again." >&2; exit 1 ;;
   esac
 done
 
 if [ "$STATUS" != "ok" ]; then
-  echo "Login timed out after $MINUTES minutes — run /q-login again." >&2
+  echo "Login timed out after $MINUTES minutes — run /quetrex:login again." >&2
   exit 1
 fi
 
@@ -149,14 +149,15 @@ After this block `~/.quetrex/auth.json` exists at mode `600` with
 
 ## 5. Confirm identity without printing the token
 
-Now that auth exists, source the helper and use `qapi` (which injects the bearer via a `0600`
-temp config and never echoes it) to fetch the caller's record and report the email.
+Now that auth exists, use the `quetrex-api` tool (shipped on the plugin's PATH — it injects the
+bearer via a `0600` temp config and never echoes it) to fetch the caller's record and report the
+email.
 
 ```bash
-source ~/.claude/lib/quetrex-api.sh
-resolve_auth || { echo "Login saved, but auth could not be loaded — run /q-login again." >&2; exit 1; }
+# Confirm auth loaded (suppress the tool's own message so only the login-specific one shows).
+quetrex-api kanban-url >/dev/null 2>&1 || { echo "Login saved, but auth could not be loaded — run /quetrex:login again." >&2; exit 1; }
 
-ME="$(qapi GET /api/users/me)" || exit 1   # the CALLER'S OWN record (bound to this token), not a list
+ME="$(quetrex-api GET /api/users/me)" || exit 1   # the CALLER'S OWN record (bound to this token), not a list
 EMAIL="$(node -e '
   let s=process.argv[1]; let o; try{o=JSON.parse(s)}catch{process.exit(1)}
   // /api/users/me returns the caller identity object directly ({id,name,email,image}).
@@ -169,7 +170,7 @@ EMAIL="$(node -e '
 echo "Logged in as $EMAIL"
 ```
 
-If `/api/users/me` returns a non-2xx, `qapi` already printed the correct message — just stop.
+If `/api/users/me` returns a non-2xx, `quetrex-api` already printed the correct message — just stop.
 If the body parses but has no email, report `Login saved, but could not confirm identity.`
 and exit `0` (the token is still valid and on disk).
 
@@ -180,6 +181,6 @@ and exit `0` (the token is still valid and on disk).
 - Never echo/print the bearer token or the success response body. No `set -x`, no `curl -v`.
 - Distinguish the outcomes with specific one-line messages: expired, denied, generic failure,
   timeout, and network/unreachable.
-- This skill does **not** call `resolve_auth` for gating — it sources the helper only **after**
+- This skill does **not** gate on existing auth — it calls the `quetrex-api` tool only **after**
   writing `auth.json`, for the confirmation step.
 - `~/.quetrex` is mode `700`; `~/.quetrex/auth.json` is mode `600`.

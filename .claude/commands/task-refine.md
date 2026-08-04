@@ -1,5 +1,5 @@
 ---
-description: Refine a Quetrex task into a clear, buildable spec — an interactive dialog grounded in the repo code, then writes the sharpened description back to the kanban. Does not change status or start work. Usage: /q-task-refine SMA-1
+description: Refine a Quetrex task into a clear, buildable spec — an interactive dialog grounded in the repo code, then writes the sharpened description back to the kanban. Does not change status or start work. Usage: /quetrex:task-refine SMA-1
 argument-hint: <TASK-ID like SMA-1>
 ---
 
@@ -23,32 +23,32 @@ TASK_ID="$(echo "$ARGUMENTS" | tr -d '[:space:]')"
 
 If `TASK_ID` is empty, print usage and stop:
 
-> Usage: `/q-task-refine SMA-1`
+> Usage: `/quetrex:task-refine SMA-1`
 
 ---
 
-## 2. Source the helper and resolve context
+## 2. Resolve context via the `quetrex-api` tool
 
-Run a single bash block. The helper owns all auth/access messaging — do not reinvent it.
+Run a single bash block. The `quetrex-api` tool (shipped on the plugin's PATH) owns all
+auth/access messaging — do not reinvent it.
 
 ```bash
-source ~/.claude/lib/quetrex-api.sh
-resolve_auth    || exit 1      # prints "Run /q-login" on failure
-resolve_project || exit 1      # prints "Run /q-init" on failure
+QX_KANBAN_URL="$(quetrex-api kanban-url)"     || exit 1   # prints "Run /quetrex:login" on failure
+QX_PROJECT_CODE="$(quetrex-api project-code)" || exit 1   # prints "Run /quetrex:init" on failure
 echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL"
 ```
 
-If either resolver fails, surface its message verbatim and stop. Do not continue.
+If either call fails, surface its message verbatim and stop. Do not continue.
 
 ---
 
 ## 3. Validate project access
 
 ```bash
-qapi GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1
+quetrex-api GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1
 ```
 
-A non-zero exit means `qapi` already printed the correct message (401 → `Run /q-login`,
+A non-zero exit means `quetrex-api` already printed the correct message (401 → `Run /quetrex:login`,
 403/404 → `No access — contact your administrator`, other → `Quetrex API error (HTTP <code>)`).
 Just stop.
 
@@ -59,7 +59,7 @@ Just stop.
 The argument is a human identifier (e.g. `SMA-1`), so resolve it to the task record:
 
 ```bash
-qapi GET "/api/tasks?project=$QX_PROJECT_CODE"
+quetrex-api GET "/api/tasks?project=$QX_PROJECT_CODE"
 ```
 
 From the returned list, find the entry whose identifier matches `TASK_ID`. Capture its
@@ -67,7 +67,7 @@ internal `id`, plus the current `title`, `description`, `type`, and `status`. Fo
 record (so the draft is grounded in everything already known), then fetch:
 
 ```bash
-qapi GET "/api/tasks/$ID"
+quetrex-api GET "/api/tasks/$ID"
 ```
 
 If no entry matches `TASK_ID`, tell the user the identifier isn't in this project and stop.
@@ -93,7 +93,7 @@ Propose a DRAFT improved spec to the user as markdown with these sections:
 - **Likely-affected files** — concrete repo paths from step 5
 - **Edge cases** — failure modes, empty states, auth/permission, concurrency
 - *(optional)* **Suggested type** — Project / Feature / Bug, clearly marked as a
-  suggestion only. Classification is **not** this command's job — it stays with `/q-task-build`.
+  suggestion only. Classification is **not** this command's job — it stays with `/quetrex:task-build`.
 
 Then ITERATE: ask the user to accept or tweak. Keep revising until they **explicitly
 accept**. Do not proceed to write anything back until they do.
@@ -109,18 +109,18 @@ safely — never echo or print the token.
 ```bash
 # Update the task description with the accepted spec.
 PAYLOAD="$(node -e 'process.stdout.write(JSON.stringify({description:process.argv[1]}))' "$SPEC")"
-qapi PATCH "/api/tasks/$ID" "$PAYLOAD" >/dev/null || exit 1
+quetrex-api PATCH "/api/tasks/$ID" "$PAYLOAD" >/dev/null || exit 1
 
 # Post an audit-trail comment.
 USER_NAME="$(git config user.name 2>/dev/null || echo "$USER")"
 DATE="$(date +%Y-%m-%d)"
 CPAYLOAD="$(node -e 'process.stdout.write(JSON.stringify({body:process.argv[1]}))' "Spec refined by $USER_NAME on $DATE")"
-qapi POST "/api/tasks/$ID/comments" "$CPAYLOAD" >/dev/null || exit 1
+quetrex-api POST "/api/tasks/$ID/comments" "$CPAYLOAD" >/dev/null || exit 1
 ```
 
 If the optional **Suggested type** was accepted as a hint, you may include it in the PATCH
 payload as a suggestion field — but do not treat that as a classification. Final
-classification stays with `/q-task-build`.
+classification stays with `/quetrex:task-build`.
 
 ---
 
@@ -131,13 +131,13 @@ Tell the user:
 - the "Spec refined by …" comment was posted.
 
 Then remind them that the task's column/status was **not** changed and that classification
-stays with `/q-task-build`. Do **not** start any implementation work.
+stays with `/quetrex:task-build`. Do **not** start any implementation work.
 
 ---
 
 ## Error-handling rules
 
-- Any `qapi` or resolver non-zero exit → the helper already printed the correct user-facing
+- Any `quetrex-api` or resolver non-zero exit → the helper already printed the correct user-facing
   message. Just stop; do not add your own auth/access explanation.
-- Never print or echo the bearer token. Never run `set -x` around `qapi`.
+- Never print or echo the bearer token. Never run `set -x` around `quetrex-api`.
 - This command never changes task status and never begins implementation.

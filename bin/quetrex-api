@@ -1,33 +1,31 @@
+#!/usr/bin/env bash
 # shellcheck shell=bash
 #
-# quetrex-api.sh — shared API foundation for Quetrex terminal skills.
+# quetrex-api — self-contained, token-safe API client for the Quetrex plugin's
+# slash commands. Shipped in the plugin's bin/ directory, which Claude Code adds
+# to PATH, so commands invoke it BY NAME (never by sourcing a lib):
 #
-# SOURCE, do not execute:
-#     source ~/.claude/lib/quetrex-api.sh
+#     quetrex-api GET  /api/users/me
+#     quetrex-api POST /api/tasks "$JSON_BODY"
+#     quetrex-api project-code
+#     quetrex-api task-status SMA-1 in_progress
 #
-# Provides three functions consumed by every Phase 2 skill:
-#     resolve_auth     — load + validate machine auth, set QX_KANBAN_URL + _QX_TOKEN
-#     resolve_project  — find the repo's project binding, set QX_PROJECT_CODE
-#     qapi             — token-safe curl wrapper for the kanban API
+# It is a single EXECUTABLE (not a sourced library): in a plugin slash-command
+# bash environment ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA} are UNSET, so a
+# command cannot `source` a lib by path — but the plugin's bin/ is on PATH, so
+# this tool is callable by name. All the logic the commands used to get from
+# `source ~/.claude/lib/quetrex-api.sh` is inlined here.
 #
 # ---------------------------------------------------------------------------
-# CONTRACTS (consumed here, never written here — owned by /quetrex:login and
+# CONTRACTS (read here, never written here — owned by /quetrex:login and
 # /quetrex:init). Two JSON files, two shapes:
 #
 #   AUTH — machine level, outside any repo:  ~/.quetrex/auth.json
-#     {
-#       "kanbanUrl":  "https://dash.quetrex.com",
-#       "token":      "<per-user bearer token>",
-#       "expiresAt":  "<iso8601>"
-#     }
-#   Written by /quetrex:login. `token` is the per-user api_token minted by the
-#   kanban device-flow. Read here via resolve_auth.
+#     { "kanbanUrl": "...", "token": "<per-user bearer>", "expiresAt": "<iso8601>" }
+#   Written by /quetrex:login. Read here via resolve_auth.
 #
 #   PROJECT BINDING — committed per repo:  ./.quetrex/project.json
-#     {
-#       "projectCode": "SMA",
-#       "kanbanUrl":   "https://dash.quetrex.com"
-#     }
+#     { "projectCode": "SMA", "kanbanUrl": "..." }
 #   Written by /quetrex:init, committed. Read here via resolve_project, which
 #   walks up the directory tree from $PWD to find it.
 #
@@ -38,20 +36,16 @@
 #   NEVER passed on a command line (so it cannot appear in `ps aux`), and is
 #   NEVER exposed by `curl -v` or a shell `set -x` trace. It lives only in
 #   _QX_TOKEN (in-process) and, transiently, in a 0600 temp curl config file
-#   that is removed with an explicit `rm` the instant curl returns (no trap —
-#   see qapi for why; zsh has no RETURN pseudo-signal). Do not add `set -x`,
-#   `-v`, or `echo "$_QX_TOKEN"` anywhere in this file or in callers, and do
-#   not replace the explicit `rm` with a trap.
+#   that is removed with an explicit `rm` the instant curl returns. Do not add
+#   `set -x`, `-v`, or `echo "$_QX_TOKEN"` anywhere in this file.
 #
+# Requirements: curl and node (>=18). No jq / python3 dependency.
 # ---------------------------------------------------------------------------
+
 # Module-level state (set by the resolvers, read by qapi):
 #     QX_KANBAN_URL    base URL (source of truth = auth.json)
 #     QX_PROJECT_CODE  project code from project.json
 #     _QX_TOKEN        bearer token (underscore = "private"; never echoed)
-#
-# Requirements: curl (present on macOS/Linux) and node (>=18, guaranteed by the
-# package `engines`). No jq / python3 dependency — JSON + date math use node.
-# ---------------------------------------------------------------------------
 
 # _qx_json_get <file> <dot.path>
 #   Print one field value from a JSON file. Exit 1 if the file is unreadable,
@@ -96,11 +90,8 @@ resolve_auth() {
 
 # qx_binding_path
 #   Print the absolute path of the repo's .quetrex/project.json by walking up from
-#   $PWD — the same walk resolve_project uses. Useful for skills that need to READ
-#   or WRITE non-secret binding fields (e.g. /quetrex:deploy's deploy config). Prints the
-#   path on stdout and returns 0 if found; prints nothing and returns 1 on miss.
-#   Never reads or emits any secret — the binding holds only projectCode/kanbanUrl
-#   (and non-secret deploy config). Token-safe: touches no auth state.
+#   $PWD. Prints the path on stdout and returns 0 if found; prints nothing and
+#   returns 1 on miss. Never reads or emits any secret; touches no auth state.
 qx_binding_path() {
   local dir="$PWD"
   while [ "$dir" != "/" ]; do
@@ -133,8 +124,6 @@ resolve_project() {
     return 1
   fi
 
-  # consumed by skill callers, not internally — hence the disable.
-  # shellcheck disable=SC2034
   QX_PROJECT_CODE="$(_qx_json_get "$f" projectCode)" || { echo "Run /quetrex:init" >&2; return 1; }
 
   # auth's kanbanUrl wins; only fall back to the binding if auth set nothing.
@@ -146,19 +135,16 @@ resolve_project() {
 }
 
 # qapi <METHOD> <PATH> [json_body]
-#   Token-safe curl wrapper. Requires resolve_auth (and usually resolve_project)
-#   to have run first.
+#   Token-safe curl wrapper. Requires resolve_auth to have run first.
 #     - injects the bearer via a 0600 temp curl config file (-K), so the token
 #       never appears in argv/stdout/logs; that config file is wiped the instant
-#       curl returns (explicit rm — portable across bash and zsh; zsh's `trap`
-#       has no RETURN pseudo-signal, so we never rely on a trap for the wipe).
+#       curl returns (explicit rm — portable across bash and zsh).
 #     - 401      -> "Run /quetrex:login" (stderr), return 1
 #     - 403/404  -> "No access — contact your administrator" (stderr), return 1
 #     - other non-2xx -> "Quetrex API error (HTTP <code>)" (stderr), return 1
 #     - 2xx      -> prints the JSON response body to stdout, return 0
 qapi() {
-  # NOTE: do not name a local `path` — zsh ties lowercase `path` to $PATH and
-  # would clobber command lookup inside this function. Use `endpoint`.
+  # NOTE: do not name a local `path` — zsh ties lowercase `path` to $PATH.
   local method="$1" endpoint="$2" body="${3:-}"
   local url="${QX_KANBAN_URL}${endpoint}"
   local cfg bodyf code rc=1
@@ -208,26 +194,19 @@ qapi() {
 }
 
 # ---------------------------------------------------------------------------
-# CONVENIENCE WRAPPERS over qapi (added for /quetrex:task-build + /quetrex:task-rework).
-#
-# Each helper builds its JSON body with node/JSON.stringify (never echo, never
-# hand-built strings) and routes through qapi, so every one INHERITS qapi's
-# token safety: the bearer is never echoed, logged, or placed on argv. Call
-# resolve_auth (and, where a helper uses QX_PROJECT_CODE, resolve_project)
-# first. These are consumed by command callers, not within this file — hence the
-# per-function SC2329 disables marking them as "never invoked here".
+# CONVENIENCE WRAPPERS over qapi. Each builds its JSON body with
+# node/JSON.stringify (never echo, never hand-built strings) and routes through
+# qapi, INHERITING qapi's token safety.
 # ---------------------------------------------------------------------------
 
 # qx_task_status TASK_ID STATUS  -> PATCH /api/tasks/$ID {status}
-# shellcheck disable=SC2329
 qx_task_status() {
   local body
   body="$(node -e 'process.stdout.write(JSON.stringify({status:process.argv[1]}))' "$2")" || return 1
   qapi PATCH "/api/tasks/$1" "$body" >/dev/null
 }
 
-# qx_task_ainote TASK_ID NOTE  -> PATCH /api/tasks/$ID {aiNotes}  (AI-notes are PATCH)
-# shellcheck disable=SC2329
+# qx_task_ainote TASK_ID NOTE  -> PATCH /api/tasks/$ID {aiNotes}
 qx_task_ainote() {
   local body
   body="$(node -e 'process.stdout.write(JSON.stringify({aiNotes:process.argv[1]}))' "$2")" || return 1
@@ -235,15 +214,13 @@ qx_task_ainote() {
 }
 
 # qx_task_comment TASK_ID BODY  -> POST /api/tasks/$ID/comments {body}
-# shellcheck disable=SC2329
 qx_task_comment() {
   local body
   body="$(node -e 'process.stdout.write(JSON.stringify({body:process.argv[1]}))' "$2")" || return 1
   qapi POST "/api/tasks/$1/comments" "$body" >/dev/null
 }
 
-# qx_task_type TASK_ID TYPE  -> PATCH /api/tasks/$ID {type}  (classification label)
-# shellcheck disable=SC2329
+# qx_task_type TASK_ID TYPE  -> PATCH /api/tasks/$ID {type}
 qx_task_type() {
   local body
   body="$(node -e 'process.stdout.write(JSON.stringify({type:process.argv[1]}))' "$2")" || return 1
@@ -254,7 +231,7 @@ qx_task_type() {
 #   POST /api/tasks {parentTaskId, projectCode, title, description}. Prints the
 #   new child's human identifier (CODE-N.C) on stdout; returns 1 on failure.
 #   Requires QX_PROJECT_CODE (resolve_project). EPIC_ID is the parent's human id.
-# shellcheck disable=SC2329,SC2016
+# shellcheck disable=SC2016
 qx_create_child() {
   local body resp
   body="$(node -e '
@@ -271,9 +248,6 @@ qx_create_child() {
 }
 
 # qx_add_dep TASK_ID DEPENDS_ON_ID  -> POST /api/tasks/$ID/dependencies {dependsOnTaskId}
-#   The server is cycle-safe, but the caller still DAG-validates the proposed
-#   graph before any write (see /quetrex:task-build).
-# shellcheck disable=SC2329
 qx_add_dep() {
   local body
   body="$(node -e 'process.stdout.write(JSON.stringify({dependsOnTaskId:process.argv[1]}))' "$2")" || return 1
@@ -281,11 +255,6 @@ qx_add_dep() {
 }
 
 # qx_is_unblocked TASK_ID  -> exit 0 if ready to start, 1 if still blocked.
-#   Readiness predicate for the DAG dispatch. Prefers the server's isBlocked
-#   flag on the task record; falls back to checking that every dependency's
-#   status is in DONE_FOR_UNBLOCKING = {merged, deployed, complete}. Re-poll
-#   after each child auto-merge to refill the ready set.
-# shellcheck disable=SC2329
 qx_is_unblocked() {
   local task
   task="$(qapi GET "/api/tasks/$1")" || return 1
@@ -304,27 +273,17 @@ qx_is_unblocked() {
 
 # ---------------------------------------------------------------------------
 # ENV-CRED AUTO-DETECT helpers (used by /quetrex:init and /quetrex:deploy).
-#
-# These let a command discover credentials already on disk in the repo's local
-# env files and import them straight into the project vault WITHOUT ever echoing
-# a secret value. The single security invariant: a secret VALUE is only ever
-# read inside node, straight from the file, and handed to qapi as a JSON body —
-# it never appears on this file's argv (as a value), on stdout, or in any log.
-# The only value-derived output is a masked last-4 tail. Token-safe: inherits
-# qapi's bearer protection. Consumed by command callers, not here — SC2329.
+# A secret VALUE is only ever read inside node, straight from the file, and
+# handed to qapi as a JSON body — it never appears on argv (as a value), on
+# stdout, or in any log. The only value-derived output is a masked last-4 tail.
 # ---------------------------------------------------------------------------
 
 # qx_env_scan DIR
 #   Scan DIR for .env, .env.local and .env.* (skipping *.example / *.sample) and
 #   print one tab-separated line per relevant credential discovered:
 #       <FILE>\t<RAWNAME>\t<CANON>\t****<last4>
-#   FILE = absolute env-file path, RAWNAME = the key as written in the file,
-#   CANON = the vault's canonical name (e.g. FLY_TOKEN -> FLY_API_TOKEN), and a
-#   MASKED tail (last 4 chars) only. The full secret VALUE is NEVER printed. All
-#   parsing happens in node; the file is never cat/echo'd. On a variant/canonical
-#   collision (e.g. both FLY_TOKEN and FLY_API_TOKEN present) the canonical wins
-#   and the variant is skipped. Later definitions win (mirrors dotenv).
-# shellcheck disable=SC2329,SC2016
+#   The full secret VALUE is NEVER printed. All parsing happens in node.
+# shellcheck disable=SC2016
 qx_env_scan() {
   node -e '
     const fs=require("fs"), path=require("path");
@@ -374,12 +333,10 @@ qx_env_scan() {
 
 # qx_secret_put_from_env ENVFILE RAWNAME CANON
 #   Read RAWNAME's value straight from ENVFILE inside node, build the JSON body
-#   {name:CANON, value:<value>} with JSON.stringify, and PUT it to the project
-#   vault via qapi. The secret VALUE is sourced inside node from the file and is
-#   never passed as a shell-visible argv value, never echoed, never logged — only
-#   the non-secret ENVFILE / RAWNAME / CANON are passed in. Requires
-#   QX_PROJECT_CODE (resolve_project). Returns non-zero on failure.
-# shellcheck disable=SC2329
+#   {name:CANON, value:<value>} and PUT it to the project vault via qapi. The
+#   secret VALUE is sourced inside node and never passed as a shell-visible argv
+#   value, never echoed, never logged. Requires QX_PROJECT_CODE (resolve_project).
+# shellcheck disable=SC2016
 qx_secret_put_from_env() {
   local body rc
   body="$(node -e '
@@ -405,3 +362,54 @@ qx_secret_put_from_env() {
   unset body
   return "$rc"
 }
+
+# ---------------------------------------------------------------------------
+# DISPATCH — the executable entry point. First arg is either an HTTP method
+# (raw authenticated call) or a named subcommand.
+# ---------------------------------------------------------------------------
+_qx_usage() {
+  cat >&2 <<'EOF'
+usage:
+  quetrex-api <GET|POST|PUT|PATCH|DELETE> <path> [json-body]
+  quetrex-api json-get <file> <dot.path>
+  quetrex-api kanban-url
+  quetrex-api project-code
+  quetrex-api binding-path
+  quetrex-api env-scan <dir>
+  quetrex-api secret-put <envfile> <rawname> <canon>
+  quetrex-api task-status <task-id> <status>
+  quetrex-api task-ainote <task-id> <note>
+  quetrex-api task-comment <task-id> <body>
+  quetrex-api task-type <task-id> <type>
+  quetrex-api create-child <epic-id> <title> <desc>
+  quetrex-api add-dep <task-id> <depends-on-id>
+  quetrex-api is-unblocked <task-id>
+EOF
+}
+
+_qx_main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+    GET|POST|PUT|PATCH|DELETE)
+      resolve_auth || return 1
+      qapi "$@"
+      ;;
+    json-get)     shift; _qx_json_get "$@" ;;
+    kanban-url)   resolve_auth    || return 1; printf '%s\n' "$QX_KANBAN_URL" ;;
+    project-code) resolve_project || return 1; printf '%s\n' "$QX_PROJECT_CODE" ;;
+    binding-path) qx_binding_path ;;
+    env-scan)     shift; qx_env_scan "$@" ;;
+    secret-put)   shift; resolve_auth || return 1; resolve_project || return 1; qx_secret_put_from_env "$@" ;;
+    task-status)  shift; resolve_auth || return 1; qx_task_status "$@" ;;
+    task-ainote)  shift; resolve_auth || return 1; qx_task_ainote "$@" ;;
+    task-comment) shift; resolve_auth || return 1; qx_task_comment "$@" ;;
+    task-type)    shift; resolve_auth || return 1; qx_task_type "$@" ;;
+    create-child) shift; resolve_auth || return 1; resolve_project || return 1; qx_create_child "$@" ;;
+    add-dep)      shift; resolve_auth || return 1; qx_add_dep "$@" ;;
+    is-unblocked) shift; resolve_auth || return 1; qx_is_unblocked "$@" ;;
+    ""|-h|--help|help) _qx_usage; return 2 ;;
+    *) echo "quetrex-api: unknown command '$cmd'" >&2; _qx_usage; return 2 ;;
+  esac
+}
+
+_qx_main "$@"

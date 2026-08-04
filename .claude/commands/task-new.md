@@ -1,5 +1,5 @@
 ---
-description: Create a new Backlog task on the Quetrex kanban — interactively gather title, description, assignee, and priority, then create it. Does not start work. Usage: /q-task-new
+description: Create a new Backlog task on the Quetrex kanban — interactively gather title, description, assignee, and priority, then create it. Does not start work. Usage: /quetrex:task-new
 ---
 
 # New Task
@@ -11,28 +11,28 @@ access can run it.
 
 ---
 
-## 1. Source the helper and resolve context
+## 1. Resolve context via the `quetrex-api` tool
 
-Run a single bash block. The helper owns all auth/access messaging — do not reinvent it.
+Run a single bash block. The `quetrex-api` tool (shipped on the plugin's PATH) owns all
+auth/access messaging — do not reinvent it.
 
 ```bash
-source ~/.claude/lib/quetrex-api.sh
-resolve_auth    || exit 1      # prints "Run /q-login" on failure
-resolve_project || exit 1      # prints "Run /q-init" on failure
+QX_KANBAN_URL="$(quetrex-api kanban-url)"     || exit 1   # prints "Run /quetrex:login" on failure
+QX_PROJECT_CODE="$(quetrex-api project-code)" || exit 1   # prints "Run /quetrex:init" on failure
 echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL"
 ```
 
-If either resolver fails, surface its message verbatim and stop.
+If either call fails, surface its message verbatim and stop.
 
 ---
 
 ## 2. Validate project access
 
 ```bash
-qapi GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1
+quetrex-api GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1
 ```
 
-A non-zero exit means `qapi` already printed the correct message (401 → `Run /q-login`,
+A non-zero exit means `quetrex-api` already printed the correct message (401 → `Run /quetrex:login`,
 403/404 → `No access — contact your administrator`, other → `Quetrex API error (HTTP <code>)`).
 Just stop.
 
@@ -52,7 +52,7 @@ allowed. Capture into `DESC`.
 pick-list:
 
 ```bash
-USERS="$(qapi GET "/api/users")" || exit 1
+USERS="$(quetrex-api GET "/api/users")" || exit 1
 node -e '
   let a; try{a=JSON.parse(process.argv[1])}catch{process.exit(1)}
   const list=Array.isArray(a)?a:(a.users||[]);
@@ -94,7 +94,7 @@ PAYLOAD="$(node -e '
   if(aiNotes)    o.aiNotes=aiNotes;
   process.stdout.write(JSON.stringify(o));
 ' "$QX_PROJECT_CODE" "$TITLE" "$DESC" "$PRIORITY" "$ASSIGNEE_ID" "$AINOTES")"
-RESP="$(qapi POST /api/tasks "$PAYLOAD")" || exit 1
+RESP="$(quetrex-api POST /api/tasks "$PAYLOAD")" || exit 1
 ```
 
 Parse the new task's human identifier from the response (prefer `identifier`; else compose
@@ -126,8 +126,8 @@ picks it up.
 
 ## Error-handling rules
 
-- Any `qapi` or resolver non-zero exit → the helper already printed the correct user-facing
+- Any `quetrex-api` or resolver non-zero exit → the helper already printed the correct user-facing
   message. Just stop; do not add your own auth/access explanation.
 - Empty title → re-prompt. Bad priority → re-prompt. Empty/forbidden user list → unassigned.
-- Never print or echo the bearer token. Never run `set -x` around `qapi`.
+- Never print or echo the bearer token. Never run `set -x` around `quetrex-api`.
 - Build every JSON payload with `node` / `JSON.stringify`, never `echo`.

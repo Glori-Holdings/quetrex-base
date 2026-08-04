@@ -1,5 +1,5 @@
 ---
-description: Link this repo to a Quetrex project (writes ./.quetrex/project.json with its branchPrefix) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, deploy the committed per-project build gates, union in the permissions the pipeline needs, generate .worktreeinclude, offer /install-github-app, offer to import local env creds into the vault, open a PR). Usage: /q-init [project name]
+description: Link this repo to a Quetrex project (writes ./.quetrex/project.json with its branchPrefix) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, pin the quetrex-factory engine in enabledPlugins so its build gates run locally and in cloud routines, union in the permissions the pipeline needs, generate .worktreeinclude, offer /install-github-app, offer to import local env creds into the vault, open a PR). Usage: /quetrex:init [project name]
 argument-hint: "[project name — only used when the repo is not yet linked]"
 ---
 
@@ -11,19 +11,20 @@ re-create the binding and never prompt for a name. If it is **not linked**, crea
 the project (or surface the admin-only guidance on 403) and write the binding.
 
 This command is **non-destructive**: it only ever ADDs `.quetrex/project.json`,
-auto-cleans stale tracker references from `CLAUDE.md`, and deploys the committed
-per-project build gates (step 4d) — the `verify-gate.sh`/`merge-gate.sh`/`secret-scan.sh`
-hooks, the seven fat pipeline agents, and `.quetrex/verify.json`, merged (never clobbered)
-into `.claude/settings.json`. It also **unions in** the permissions the pipeline needs
-(4e), writes a `.worktreeinclude` so worktrees are actually runnable (4f), and **offers**
-`/install-github-app` (4g). It never overwrites or silently deletes existing `.claude/`,
+auto-cleans stale tracker references from `CLAUDE.md`, and pins the `quetrex-factory`
+plugin in `enabledPlugins` (step 4h) — the build engine that ships the
+`verify-gate.sh`/`merge-gate.sh`/`secret-scan.sh` hooks and the fat pipeline agents, so
+they run **both locally and in cloud routines** with no per-project copy required. It
+also **unions in** the permissions the pipeline needs (4e), writes a `.worktreeinclude`
+so worktrees are actually runnable (4f), and **offers** `/install-github-app` (4g). It
+never overwrites or silently deletes existing `.claude/`,
 `CLAUDE.md` body content, commands, other settings/hooks, or any git/Claude history, and
 it never removes or narrows a permission the repo already had. The **only** removals are
 stale old-Quetrex project commands/skills, and only the specific ones the user
 **confirms** (step 4c) — never auto-deleted. Secrets are never prompted for here — they
 live at `dash.quetrex.com/keys`.
 
-**Token safety:** never echo or print the bearer token. The helper's `qapi` injects
+**Token safety:** never echo or print the bearer token. The helper's `quetrex-api` injects
 it via a `0600` temp config and never exposes it. Build all JSON with
 `node` / `JSON.stringify`, never with `echo`. No `set -x`, no `curl -v`.
 
@@ -31,11 +32,11 @@ it via a `0600` temp config and never exposes it. Build all JSON with
 
 ## 1. Resolve auth
 
-Run a single bash block. The helper owns all auth messaging — do not reinvent it.
+Run a single bash block. The `quetrex-api` tool (shipped on the plugin's PATH) owns all auth
+messaging — do not reinvent it.
 
 ```bash
-source ~/.claude/lib/quetrex-api.sh
-resolve_auth || exit 1   # prints "Run /q-login" on miss/expiry
+QX_KANBAN_URL="$(quetrex-api kanban-url)" || exit 1   # prints "Run /quetrex:login" on miss/expiry
 ```
 
 If it fails, surface its message verbatim and stop. `QX_KANBAN_URL` is now set from
@@ -45,7 +46,7 @@ If it fails, surface its message verbatim and stop. `QX_KANBAN_URL` is now set f
 
 ## 2. Detect an existing binding
 
-Walk up from `$PWD` for `.quetrex/project.json` (the same walk `resolve_project`
+Walk up from `$PWD` for `.quetrex/project.json` (the same walk `quetrex-api project-code`
 performs). Also locate the repo root (the directory containing `.git`) for later
 staging.
 
@@ -68,12 +69,12 @@ Do **not** re-create the binding and do **not** prompt for a name or POST
 `/api/projects`. Read the code, announce it, and verify access:
 
 ```bash
-CODE="$(_qx_json_get "$BIND" projectCode)" || { echo "Binding is unreadable — fix or remove $BIND and re-run." >&2; exit 1; }
+CODE="$(quetrex-api json-get "$BIND" projectCode)" || { echo "Binding is unreadable — fix or remove $BIND and re-run." >&2; exit 1; }
 echo "This repo is linked to project $CODE"
-qapi GET "/api/projects/$CODE" >/dev/null || exit 1   # helper prints 401→login, 403/404→no access
+quetrex-api GET "/api/projects/$CODE" >/dev/null || exit 1   # helper prints 401→login, 403/404→no access
 ```
 
-A non-zero `qapi` exit means the helper already printed the correct message — stop.
+A non-zero `quetrex-api` exit means the helper already printed the correct message — stop.
 On success, proceed to **step 4 (adoption)** so re-runs still clean stale refs and
 can open a PR if anything changed.
 
@@ -100,10 +101,10 @@ project be called?"* Capture their answer into `NAME` before continuing.
 
 ```bash
 PAYLOAD="$(node -e 'process.stdout.write(JSON.stringify({name:process.argv[1]}))' "$NAME")"
-if ! RESP="$(qapi POST /api/projects "$PAYLOAD")"; then
-  # qapi already printed a message. The most common failure here is 403 — project
+if ! RESP="$(quetrex-api POST /api/projects "$PAYLOAD")"; then
+  # quetrex-api already printed a message. The most common failure here is 403 — project
   # creation currently requires admin. Give the clearer, action-specific guidance.
-  echo "Creating a project requires admin — ask a super_admin to create it, or get added to an existing project, then re-run /q-init." >&2
+  echo "Creating a project requires admin — ask a super_admin to create it, or get added to an existing project, then re-run /quetrex:init." >&2
   exit 1
 fi
 CODE="$(node -e '
@@ -356,7 +357,7 @@ node -e '
 echo "Wrote ## Verification to $PROJ_RULES"
 ```
 
-The same confirmed list is the seed for `.quetrex/verify.json` (step 4d) — the machine-readable
+The same confirmed list is also the seed for `.quetrex/verify.json` — the machine-readable
 chain that takes precedence over this section. This block is the human-readable fallback.
 
 Same `$REPO_ROOT` pin and "never the global file" rule as step 4. Record whether 4b
@@ -428,59 +429,6 @@ them.
 
 ---
 
-## 4d. Deploy the committed per-project build gates
-
-**Why:** the real gate scripts (`verify-gate.sh`, `merge-gate.sh`, `secret-scan.sh`, plus
-`deny-guard.sh`/`enforce-branch.sh`) and the seven fat pipeline agents live in the
-operator's **global** `~/.claude`. A local Claude Code session already sees them there —
-but any **Anthropic cloud routine** only ever sees what is **committed to this repo**; it
-clones the repo and never touches the operator's machine. Without this step the gates
-would silently no-op in the cloud (no `.claude/hooks/verify-gate.sh` to run, no wiring in
-`.claude/settings.json` to call it). Running this step makes the build gates fire
-**both locally and in cloud routines**, from the same committed source.
-
-This is the same non-destructive adoption this command already performs: it only ever
-copies the specific quetrex hook/agent files and merges the specific quetrex hook entries
-into `.claude/settings.json` — it never touches any other hook, permission, or setting
-already in the repo.
-
-```bash
-bash ~/.claude/lib/quetrex-install-project-gates.sh "$REPO_ROOT"
-```
-
-This deploys, idempotently:
-
-- `.claude/hooks/verify-gate.sh`, `merge-gate.sh`, `edit-gate.sh`, `secret-scan.sh`,
-  `deny-guard.sh`, `enforce-branch.sh`, `auto-format.sh`, `session-state.sh` — copied in
-  and made executable. That is every hook the wiring below references; a wired hook whose
-  script is absent exits 127, which Claude Code treats as non-blocking (a silent
-  fail-open), so the copy list and the wiring list are kept identical by construction.
-  `workflow-reminder.sh` is deliberately **not** deployed per-project — it is a context
-  nudge, not a gate, and the operator already has it at user scope.
-- `.claude/agents/architect.md`, `developer.md`, `qa.md`, `reviewer.md`,
-  `security-reviewer.md`, `git-workflow.md`, `database-architect.md` — the seven fat
-  pipeline agents, so cloud routines run the same agents as a local session.
-- `.claude/settings.json` — merged (never clobbered) to wire `verify-gate.sh` on
-  `Stop` (900s) / `SubagentStop` (600s); `deny-guard.sh`/`secret-scan.sh`/
-  `enforce-branch.sh`/`merge-gate.sh` on `PreToolUse` `Bash`; `secret-scan.sh` on
-  `PreToolUse` `Write|Edit`; `auto-format.sh` then `edit-gate.sh` on `PostToolUse`
-  `Write|Edit` (that order is load-bearing — the gate checks what the formatter left);
-  and `session-state.sh` on `SessionStart` `startup|resume|compact`. All with
-  `$CLAUDE_PROJECT_DIR`-relative paths so they resolve in a fresh clone, and all with
-  **second**-scale timeouts.
-- `.quetrex/verify.json` — seeded from the committed Next.js template on first run only
-  (never overwritten once present), giving QA and `verify-gate.sh` the exact verify chain
-  to run.
-
-A non-zero exit means the helper already printed the exact cause (e.g. the global
-install is missing a required hook/agent) — surface it verbatim and stop; do not
-silently continue past a failed gate deployment.
-
-Track that this step ran (and whether it changed anything) so step 6 stages the result
-and step 7 reports it.
-
----
-
 ## 4e. Merge the pipeline's required permissions into project settings
 
 **Why this is the only channel that works.** A plugin can ship hooks (`hooks/hooks.json`)
@@ -533,8 +481,8 @@ burns all three bounded self-heal attempts "fixing" code that was never broken, 
 artefacts of that flailing are hardcoded credentials and weakened tests. This file is the
 cheapest fix in the adoption.
 
-The file list is already known: step 5b's `qx_env_scan` enumerates this repo's env files.
-If 5b has not run yet, call `qx_env_scan "$REPO_ROOT"` here — it is read-only and safe to
+The file list is already known: step 5b's `quetrex-api env-scan` enumerates this repo's env files.
+If 5b has not run yet, call `quetrex-api env-scan "$REPO_ROOT"` here — it is read-only and safe to
 run twice. **Take only the FILE column** (the masked-value column never leaves that step):
 
 ```bash
@@ -542,7 +490,7 @@ ENV_FILES=()
 while IFS=$'\t' read -r ENVFILE _RAW _CANON _MASK; do
   [ -n "$ENVFILE" ] || continue
   ENV_FILES+=("${ENVFILE#$REPO_ROOT/}")
-done <<< "$(qx_env_scan "$REPO_ROOT")"
+done <<< "$(quetrex-api env-scan "$REPO_ROOT")"
 ```
 
 Write the union of those, plus any local Claude settings, **append-only and idempotent** —
@@ -550,7 +498,7 @@ never drop an entry the user added:
 
 ```bash
 WTI="$REPO_ROOT/.worktreeinclude"
-# ENV_FILES = the FILE column of qx_env_scan output (see 5b), de-duplicated and made
+# ENV_FILES = the FILE column of quetrex-api env-scan output (see 5b), de-duplicated and made
 # repo-relative. Add local-only config that every worktree also needs.
 node -e '
   const fs=require("fs");
@@ -600,6 +548,168 @@ it. If they decline, record it and move on.
 
 ---
 
+## 4h. Pin the Quetrex engine in `enabledPlugins`
+
+Cloud routines and every teammate read which engine to run from the **committed**
+`.claude/settings.json` `enabledPlugins`, not from any one machine's local plugin cache.
+Write a **version-pinned** entry so the whole repo (and every routine) resolves the same
+engine:
+
+- `"quetrex@quetrex": true` — the command layer is enabled (a plain `true`; the command
+  surface is not version-gated per repo).
+- `"quetrex-factory@quetrex": "<concrete version>"` — a **concrete version string**, never a
+  floating `true`. Resolve the latest published version from the marketplace manifest on
+  GitHub raw (there is no version-check API):
+
+```bash
+MARKET_URL="https://raw.githubusercontent.com/Glori-Holdings/quetrex-plugins/main/.claude-plugin/marketplace.json"
+LATEST_FACTORY="$(curl -fsS --max-time 8 "$MARKET_URL" 2>/dev/null | node -e '
+  let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+    let o; try{o=JSON.parse(s)}catch{process.exit(0)}
+    const p=(o.plugins||[]).find(x=>x&&x.name==="quetrex-factory");
+    process.stdout.write(p&&p.version?String(p.version):"");
+  })' 2>/dev/null)"
+```
+
+Merge — never clobber — into `$REPO_ROOT/.claude/settings.json`, preserving every other
+`enabledPlugins` entry and every other settings key. Only write a concrete factory pin
+when the version resolved; if the marketplace was unreachable, still enable `quetrex` and
+tell the user to run `/quetrex:update` once online to write the concrete engine pin (never
+pin a floating `true`):
+
+```bash
+node -e '
+  const fs=require("fs"), path=require("path");
+  const [file, latestFactory] = process.argv.slice(1);
+  let o={}; try{o=JSON.parse(fs.readFileSync(file,"utf8"))}catch{}
+  o.enabledPlugins = o.enabledPlugins || {};
+  const before = JSON.stringify(o.enabledPlugins);
+  o.enabledPlugins["quetrex@quetrex"] = true;
+  if (latestFactory) {
+    o.enabledPlugins["quetrex-factory@quetrex"] = latestFactory;   // concrete pin, never true
+  }
+  if (JSON.stringify(o.enabledPlugins) === before) { console.log("enabledPlugins already current."); process.exit(0); }
+  fs.mkdirSync(path.dirname(file), {recursive:true});
+  fs.writeFileSync(file, JSON.stringify(o, null, 2) + "\n");
+  console.log("Pinned enabledPlugins: quetrex@quetrex=true"
+    + (latestFactory ? ", quetrex-factory@quetrex=" + latestFactory : " (factory pin deferred — run /quetrex:update online)"));
+' "$REPO_ROOT/.claude/settings.json" "$LATEST_FACTORY"
+```
+
+Record whether the pin was written so step 6 stages `.claude/settings.json` and step 7
+reports it.
+
+---
+
+## 4i. Ensure the committed `.mcp.json` kanban broker
+
+Cloud sessions reach the kanban through the **MCP broker**, and a routine only ever sees
+what is **committed** — so the broker registration must live in the repo's own `.mcp.json`,
+not any machine-local MCP config. Ensure `$REPO_ROOT/.mcp.json` registers the kanban broker
+under `mcpServers`, **merged non-destructively** (never clobber an existing server the repo
+already registers):
+
+```bash
+node -e '
+  const fs=require("fs");
+  const [file, kanbanUrl] = process.argv.slice(1);
+  let o={}; try{o=JSON.parse(fs.readFileSync(file,"utf8"))}catch{}
+  o.mcpServers = o.mcpServers || {};
+  if (o.mcpServers["quetrex-kanban"]) { console.log(".mcp.json already registers the quetrex-kanban broker."); process.exit(0); }
+  o.mcpServers["quetrex-kanban"] = { type: "http", url: kanbanUrl.replace(/\/$/, "") + "/api/mcp" };
+  fs.writeFileSync(file, JSON.stringify(o, null, 2) + "\n");
+  console.log("Registered the quetrex-kanban MCP broker in .mcp.json");
+' "$REPO_ROOT/.mcp.json" "$QX_KANBAN_URL"
+```
+
+The broker authenticates cloud sessions and auto-rotates their credentials; **no secret
+value is written here** — only the endpoint. Record whether `.mcp.json` changed so step 6
+stages it and step 7 reports it.
+
+---
+
+## 4j. One-time legacy cleanup (guarded, reversible, per-machine)
+
+The npm era seeded Quetrex files into the operator's **global** `~/.claude`; the plugin era
+does not. Offer to clean those leftovers **once per machine** — idempotent, allowlist-scoped,
+pristine-only, reversible (quarantine, never hard-delete), and gated by two agreeing agents
+plus a per-item human decision. The deterministic engine ships as the `quetrex-cleanup` tool
+on the plugin's PATH (it keeps its once-per-machine marker under `${CLAUDE_PLUGIN_DATA}`,
+never `~/.claude`, never the repo).
+
+**1. Skip if already offered on this machine:**
+
+```bash
+if quetrex-cleanup already-ran; then
+  echo "Legacy cleanup already offered on this machine — skipping."
+else
+  quetrex-cleanup scan   # read-only TSV: STATUS<TAB>REL<TAB>REASON (empty => nothing to clean)
+fi
+```
+
+If `scan` prints nothing, say *"No npm-era Quetrex artifacts found in ~/.claude."*, run
+`quetrex-cleanup mark-done`, and move on.
+
+**2. Two-agent gate.** When `scan` returns candidates, launch **both** cleanup agents (via
+the Task tool) on the scan output:
+
+- `quetrex-cleanup-proposer` — proposes a per-item KEEP/REMOVE/STRIP plan (conservative,
+  default KEEP).
+- `quetrex-cleanup-auditor` — independently re-inspects each proposed REMOVE/STRIP and
+  **vetoes** anything user-owned or modified.
+
+Only items **both** agents agree are removable proceed. Any disagreement is **escalated to
+the human** as an open question — never auto-resolved.
+
+**3. Per-item human gate.** For each agreed item, ask the user in plain English — *what* the
+item is and *why* it is proposed for removal — and take a **per-item KEEP/REMOVE** decision.
+The default is **KEEP**; the user may decline any single item. Never batch-remove without
+per-item consent.
+
+**4. Apply — reversibly.** For the items the user approved:
+
+```bash
+# APPROVED = the ~/.claude-relative paths the user confirmed for removal.
+quetrex-cleanup quarantine "${APPROVED[@]}"   # MOVES each into ~/.claude/.quetrex-backup-<ts>/
+# For an approved SURGICAL item, strip ONLY Quetrex's own entries (never user content):
+#   quetrex-cleanup strip-settings     # drops Quetrex hook entries + the npm-era statusLine
+#   quetrex-cleanup strip-claudemd     # drops only the @quetrex-doctrine.md import line
+quetrex-cleanup mark-done                     # never offer again on this machine
+```
+
+`secrets.env` is **never removed** — it is only ever flagged so the user knows it is there.
+Everything quarantined stays restorable from the timestamped backup dir the engine prints.
+
+Record what was quarantined / stripped / kept / flagged so step 7 reports it.
+
+---
+
+## 4k. Note the Quetrex workflow in the project `CLAUDE.md`
+
+So anyone (and any agent) opening this repo knows work flows through the board, append a
+one-line note to the project `.claude/CLAUDE.md` — **append-only and idempotent**, never
+rewriting or reordering existing content. Use the same `$REPO_ROOT`-pinned path and
+"never the global file" rule as step 4:
+
+```bash
+PROJ_RULES="$REPO_ROOT/.claude/CLAUDE.md"
+node -e '
+  const fs=require("fs"), path=require("path");
+  const file=process.argv[1];
+  let cur=""; try{cur=fs.readFileSync(file,"utf8")}catch{}
+  if (/This is a Quetrex project/.test(cur)) { console.log("Quetrex note already present."); process.exit(0); }
+  const note = "\n## Quetrex\n\nThis is a Quetrex project — features go through `/quetrex:task-build`, and the guarded pipeline (architect → developers → QA → reviewer → git-workflow) carries each task to a reviewed, merged PR.\n";
+  fs.mkdirSync(path.dirname(file),{recursive:true});
+  fs.writeFileSync(file, cur + (cur && !cur.endsWith("\n") ? "\n" : "") + note);
+  console.log("Appended the Quetrex workflow note to " + file);
+' "$PROJ_RULES"
+```
+
+Record whether the note was appended so step 6 stages `.claude/CLAUDE.md` (already staged)
+and step 7 reports it.
+
+---
+
 ## 5. Point to /keys (never prompt for secrets)
 
 Print exactly:
@@ -618,21 +728,20 @@ turns the bare "set them in the dashboard" pointer into a one-keystroke import.
 
 **SECRET SAFETY (the invariant of this step):** the scan and import NEVER print a secret
 value or the bearer token. The only value-derived output is a masked last-4 tail. Each
-value flows **file → `node` → `qapi` → vault** and is never echoed, never on argv as a
+value flows **file → `node` → `quetrex-api` → vault** and is never echoed, never on argv as a
 value, never written to disk or logs. No `set -x`, no `curl -v`. `unset` after use.
 
-Requires the project to be linked: ensure `QX_PROJECT_CODE` is resolved (it is, from this
-command's flow once linked — otherwise `resolve_project`).
+Requires the project to be linked: `quetrex-api secret-put` resolves the project code itself
+(it walks up for `.quetrex/project.json`), so the repo just needs to be linked first.
 
-**1. Scan.** Use the shared `qx_env_scan` helper, which reads `$REPO_ROOT/.env`,
+**1. Scan.** Use the shared `quetrex-api env-scan` helper, which reads `$REPO_ROOT/.env`,
 `.env.local`, and `.env.*` (skipping `*.example`/`*.sample`), parses them in `node`
 (handles `KEY=value`, `export KEY=…`, quotes, `#` comments), filters to relevant
 credential names, normalizes variants (notably `FLY_TOKEN` → `FLY_API_TOKEN`), and emits
 `FILE<TAB>RAWNAME<TAB>CANON<TAB>****<last4>` — masked tail only, never the value:
 
 ```bash
-source ~/.claude/lib/quetrex-api.sh   # already sourced earlier; harmless to re-source
-SCAN="$(qx_env_scan "$REPO_ROOT")"
+SCAN="$(quetrex-api env-scan "$REPO_ROOT")"
 if [ -z "$SCAN" ]; then
   echo "No local env credentials found to import."
 fi
@@ -642,14 +751,14 @@ fi
 + masked last-4 only** (e.g. `FLY_API_TOKEN … ****CDEF`), then ask:
 *"Import these N keys into the project's vault?"* On **no**, skip the import. On **yes**,
 import each one — read the value inside `node` straight from its file via the shared
-`qx_secret_put_from_env` helper (PUT `/api/projects/$QX_PROJECT_CODE/secrets` with
+`quetrex-api secret-put` helper (PUT `/api/projects/$QX_PROJECT_CODE/secrets` with
 `{name,value}`); the value is never visible to the shell:
 
 ```bash
 # Iterate the scan lines; FILE/RAWNAME/CANON are non-secret, the value stays inside node.
 while IFS=$'\t' read -r ENVFILE RAWNAME CANON MASK; do
   [ -n "$CANON" ] || continue
-  if qx_secret_put_from_env "$ENVFILE" "$RAWNAME" "$CANON"; then
+  if quetrex-api secret-put "$ENVFILE" "$RAWNAME" "$CANON"; then
     echo "Imported $CANON ($MASK)"
   else
     echo "Failed to import $CANON — set it at $QX_KANBAN_URL/keys" >&2
@@ -666,39 +775,31 @@ a credential that was just imported.
 ## 6. Commit the additions — PR if possible, else local
 
 Follow the `worktree-workflow` conventions. Stage **only** the additions/cleanups:
-`.quetrex/project.json` plus any `CLAUDE.md` edits made in step 4, and the build gates
-deployed in step 4d. The confirmed stale removals from step 4c are already staged (they
-were `git rm`'d into the index), so they ride along in this same commit/PR. Use
+`.quetrex/project.json` plus any `CLAUDE.md` edits made in step 4. The build gates
+(`verify-gate.sh`/`merge-gate.sh`/`secret-scan.sh` and the fat pipeline agents) are
+delivered by the `quetrex-factory` plugin pin (4h) — this command never copies hook or
+agent files into the repo. The confirmed stale removals from step 4c are already staged
+(they were `git rm`'d into the index), so they ride along in this same commit/PR. Use
 `git -C "$REPO_ROOT"` so the enforce-branch hook sees the branch rather than blocking on
 `main`.
 
 ```bash
 # Use the project's own prefix — a repo pinned to "claude/" cannot push a feature/ branch.
-BRANCH="${BRANCH_PREFIX}q-init-adopt"
+BRANCH="${BRANCH_PREFIX}quetrex-init-adopt"
 git -C "$REPO_ROOT" checkout -b "$BRANCH" 2>/dev/null || git -C "$REPO_ROOT" checkout "$BRANCH"
 
 # Stage only what this command added/cleaned: the binding, any CLAUDE.md cleanups
-# (step 4), the project Verification rules created/appended in step 4b, and the
-# committed build gates deployed in step 4d (hooks + fat agents + settings.json wiring +
-# .quetrex/verify.json). Each `add` is a no-op if that path has nothing new to stage.
+# (step 4), and the project Verification rules created/appended in step 4b. Each
+# `add` is a no-op if that path has nothing new to stage.
 git -C "$REPO_ROOT" add .quetrex/project.json 2>/dev/null || true
 [ -f "$REPO_ROOT/CLAUDE.md" ]        && git -C "$REPO_ROOT" add CLAUDE.md 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/CLAUDE.md" ] && git -C "$REPO_ROOT" add .claude/CLAUDE.md 2>/dev/null || true
-# EVERY hook the installer wires must be staged. A wired hook whose script is
-# not committed exits 127 in a fresh clone (a cloud routine), and Claude Code
-# treats any exit other than 0 or 2 as non-blocking — a silent fail-open. This
-# list must stay identical to GATE_SCRIPTS in quetrex-install-project-gates.sh.
-git -C "$REPO_ROOT" add .claude/hooks/verify-gate.sh .claude/hooks/merge-gate.sh \
-  .claude/hooks/edit-gate.sh .claude/hooks/secret-scan.sh .claude/hooks/deny-guard.sh \
-  .claude/hooks/enforce-branch.sh .claude/hooks/auto-format.sh \
-  .claude/hooks/session-state.sh \
-  2>/dev/null || true
-git -C "$REPO_ROOT" add .claude/agents/architect.md .claude/agents/developer.md \
-  .claude/agents/qa.md .claude/agents/reviewer.md .claude/agents/security-reviewer.md \
-  .claude/agents/git-workflow.md .claude/agents/database-architect.md 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/settings.json" ] && git -C "$REPO_ROOT" add .claude/settings.json 2>/dev/null || true
 [ -f "$REPO_ROOT/.quetrex/verify.json" ]  && git -C "$REPO_ROOT" add .quetrex/verify.json 2>/dev/null || true
 [ -f "$REPO_ROOT/.worktreeinclude" ]      && git -C "$REPO_ROOT" add .worktreeinclude 2>/dev/null || true
+# The committed engine pin (4h) and the kanban MCP broker (4i) — both are read
+# by cloud routines from the repo, so both must be committed.
+[ -f "$REPO_ROOT/.mcp.json" ]             && git -C "$REPO_ROOT" add .mcp.json 2>/dev/null || true
 
 if git -C "$REPO_ROOT" diff --cached --quiet; then
   echo "Nothing to commit — repo already adopted."
@@ -706,8 +807,8 @@ else
   git -C "$REPO_ROOT" commit -m "chore: adopt repo into Quetrex project $CODE
 
 Add .quetrex/project.json binding, clean stale tracker references, ensure project
-Verification rules, and deploy the committed per-project build gates (hooks + fat
-agents + .quetrex/verify.json) so they fire locally and in cloud routines." >/dev/null
+Verification rules, and pin the quetrex-factory engine in enabledPlugins so its
+build gates run locally and in cloud routines." >/dev/null
 
   # Open a PR only if there is a remote AND gh is available.
   if git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1 && command -v gh >/dev/null 2>&1; then
@@ -715,7 +816,7 @@ agents + .quetrex/verify.json) so they fire locally and in cloud routines." >/de
     PR_URL="$(gh pr create --repo "$(git -C "$REPO_ROOT" remote get-url origin)" \
       --head "$BRANCH" \
       --title "chore: adopt repo into Quetrex project $CODE" \
-      --body "Links this repo to Quetrex project \`$CODE\` (adds \`.quetrex/project.json\`), cleans stale tracker references from CLAUDE.md, and deploys the committed per-project build gates (hooks + fat agents + .quetrex/verify.json) so they fire locally and in cloud routines. Non-destructive: no existing config or history was overwritten." 2>/dev/null)"
+      --body "Links this repo to Quetrex project \`$CODE\` (adds \`.quetrex/project.json\`), cleans stale tracker references from CLAUDE.md, and pins the quetrex-factory engine in enabledPlugins so its build gates run locally and in cloud routines. Non-destructive: no existing config or history was overwritten." 2>/dev/null)"
     if [ -n "$PR_URL" ]; then
       echo "Opened PR: $PR_URL"
     else
@@ -743,10 +844,6 @@ Summarize for the user:
   the file path that now carries the `## Verification` section.
 - **Stale project commands** — which flagged command/skill artifacts were removed (by path)
   vs kept, or *"no stale project commands found"* if nothing matched.
-- **Build gates** — the summary printed by `quetrex-install-project-gates.sh`: which
-  hooks/agents were (re)deployed, how many new hook entries were wired into
-  `.claude/settings.json`, and whether `.quetrex/verify.json` was written or already
-  present.
 - **Branch prefix** — the value recorded in the binding (`feature/` by default), and, if it
   is not `claude/`, the one-line note that cloud routines need the repo's branch restriction
   loosened to push it.
@@ -757,6 +854,14 @@ Summarize for the user:
   current"*), and the note that they are git-ignored paths copied into worktrees, never
   committed.
 - **GitHub app** — installed already / offered and accepted / offered and declined.
+- **Engine pin** — the `enabledPlugins` written (`quetrex@quetrex: true` and the concrete
+  `quetrex-factory@quetrex: <version>` pin), or *"already current"*; if the marketplace was
+  unreachable, the note to run `/quetrex:update` once online to write the concrete factory pin.
+- **MCP broker** — whether the `quetrex-kanban` server was registered in `.mcp.json` or was
+  already present (endpoint only — no secret written).
+- **Legacy cleanup** — *"already offered on this machine"*, *"nothing to clean"*, or the
+  per-item outcome (quarantined / stripped / kept / flagged), noting that everything is
+  reversible from the timestamped backup dir and that `secrets.env` was only flagged.
 - **Secrets** — which local env creds were imported into the vault (by CANON name +
   masked last-4, never values), and the `dash.quetrex.com/keys` reminder for any missing
   ones.
@@ -766,23 +871,23 @@ Summarize for the user:
 
 ## Error-handling rules
 
-- Reuse the helper's messaging verbatim: `401 → Run /q-login`,
+- Reuse the helper's messaging verbatim: `401 → Run /quetrex:login`,
   `403/404 → No access — contact your administrator`. The **only** override is the
   create-project 403, where you print the admin-specific hint instead.
 - Never print the bearer token. Build all JSON with `node` / `JSON.stringify`.
 - Idempotent: re-running on a linked repo never re-creates the binding and never
   prompts for a name — it re-verifies access and can re-clean / re-PR.
-- Non-destructive: the files this command creates are `.quetrex/project.json`, the
-  build-gate artifacts from step 4d (`.claude/hooks/{verify-gate,merge-gate,edit-gate,
-  secret-scan,deny-guard,enforce-branch,auto-format,session-state}.sh`, the seven fat
-  `.claude/agents/*.md`, and
-  `.quetrex/verify.json`), and `.worktreeinclude` (step 4f); `CLAUDE.md` edits only excise
-  stale tracker blocks, never wholesale rewrites; `.claude/settings.json` is merged, never
-  clobbered, and step 4e only ever **adds** to `permissions.allow` — it never removes or
-  narrows an entry, and never touches `permissions.deny`/`ask`. The only removals are
-  user-confirmed stale old-Quetrex project commands/skills (step 4c) — never auto-deleted,
-  never anything in the global `~/.claude` (step 4d only ever *reads* from `~/.claude`, it
-  never writes there).
+- Non-destructive: the only files this command creates are `.quetrex/project.json`,
+  `.worktreeinclude` (step 4f), and `.mcp.json` (step 4i, merged — never clobbering an
+  existing MCP server entry); `CLAUDE.md` edits only excise stale tracker blocks, never
+  wholesale rewrites; `.claude/settings.json` is merged, never clobbered — step 4e only
+  ever **adds** to `permissions.allow` and step 4h only ever adds/updates the
+  `enabledPlugins` pin, never removing or narrowing an entry, and never touching
+  `permissions.deny`/`ask`. The only removals are user-confirmed stale old-Quetrex
+  project commands/skills (step 4c) — never auto-deleted, never anything in the global
+  `~/.claude`. The build gates (`verify-gate.sh`/`merge-gate.sh`/`secret-scan.sh` and the
+  fat pipeline agents) are delivered by the `quetrex-factory` plugin pin (4h), never
+  copied into the repo — this command never writes a hook or agent file.
 - Never hardcode `feature/`: `branchPrefix` is chosen in step 3d, recorded in the binding,
   and used for this command's own adoption branch and by every downstream command.
 - `/install-github-app` is **offered**, never run unprompted, and adoption never blocks on

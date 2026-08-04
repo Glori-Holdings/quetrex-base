@@ -141,9 +141,9 @@ Read the output and branch:
 
 **Case B — only ignored/runtime artifacts remain** (`.quetrex/` control files: `state.json`, `verify-ledger.jsonl`, `review-verdict.json`, `qa-report.json`, `security-findings.json`, `ESCALATION`, `verify-attempts`, `plan/`, `build/`). These are runtime control plane, not source. They are git-ignored and **must never be committed** — committing them both moves HEAD and puts a machine-written gate artifact into the reviewed history. Add nothing. Treat this as Case A.
 
-> `.gitignore` ignores `.quetrex/*` and un-ignores only `project.json` and `verify.json` — the two **project config** artifacts, which `/q-init` commits. This stage does not depend on that being in place: because it stages explicit paths, an un-ignored runtime artifact is skipped rather than swept in. The gitignore is what stops it showing up as noise in `status`.
+> `.gitignore` ignores `.quetrex/*` and un-ignores only `project.json` and `verify.json` — the two **project config** artifacts, which `/quetrex:init` commits. This stage does not depend on that being in place: because it stages explicit paths, an un-ignored runtime artifact is skipped rather than swept in. The gitignore is what stops it showing up as noise in `status`.
 >
-> If `status` shows `.quetrex/project.json` or `.quetrex/verify.json` as untracked, that is a `/q-init` that never committed the project config — report it as a setup problem. Do not commit them here; they are not part of this task's change and committing them would move HEAD.
+> If `status` shows `.quetrex/project.json` or `.quetrex/verify.json` as untracked, that is a `/quetrex:init` that never committed the project config — report it as a setup problem. Do not commit them here; they are not part of this task's change and committing them would move HEAD.
 
 **Case C — genuine uncommitted source or test changes.** Something upstream did not commit its work. Do **not** paper over it with a commit here: whatever those changes are, the reviewer never saw them, and committing them would advance HEAD past the sha the verdict is pinned to — producing exactly the stale-verdict denial the merge gate exists to enforce. Instead:
 
@@ -297,5 +297,5 @@ Then report to the orchestrator: `REFUSED — <exact failing gate and value>`. N
 - **You never stage with `-A` or `.`, and you never commit `.quetrex/*`.** Explicit paths only. A blanket stage sweeps runtime control artifacts into history and moves HEAD past the reviewed commit — it breaks the merge, silently, at the last possible moment.
 - **You never edit `review-verdict.json`** — not its `.sha`, not anything. Only the review-gate writes a verdict, and only for a commit it read.
 - You never bypass a hook block (`--no-verify`, editing hooks, force-push to protected branches are all forbidden).
-- You do not touch the tracker/kanban — status transitions belong to the `/q-task-*` commands.
+- You do not touch the tracker/kanban — status transitions belong to the `/quetrex:task-*` commands.
 - You do not create branches, write application code, or fix failing checks — if the gate is red, that is upstream's job; you refuse and report.

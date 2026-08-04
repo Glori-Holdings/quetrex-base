@@ -2,9 +2,9 @@
 
 This is the single canonical definition of the development pipeline that drives one **unit of
 work** from kanban intake to an open PR. It is the source of truth for the *order of stages and
-the gates between them*: `/q-task-build` and `/q-task-rework` both reference it and **neither
-restates the steps**. `/q-task-build` runs it once per standalone task and once per epic child;
-`/q-task-rework` runs the identical engine on re-queue.
+the gates between them*: `/quetrex:task-build` and `/quetrex:task-rework` both reference it and **neither
+restates the steps**. `/quetrex:task-build` runs it once per standalone task and once per epic child;
+`/quetrex:task-rework` runs the identical engine on re-queue.
 
 **What this file is not.** Each stage's own behaviour is defined by its agent file under
 `.claude/agents/`, and those files are authoritative. Where this document and an agent file ever
@@ -49,7 +49,7 @@ It does **not** copy the steps below into its own file.
 
 ### Optional inputs — running one half of the engine across the human scope gate
 
-`/q-task-build` splits at a human scope-approval gate: an interactive PLAN half, then an
+`/quetrex:task-build` splits at a human scope-approval gate: an interactive PLAN half, then an
 unattended BUILD half a routine can run from the approved payload. Both halves run **this**
 engine; these three inputs are how one engine serves both. They are optional — omit all three
 and the engine runs end to end exactly as it always has.
@@ -256,7 +256,7 @@ engine.
 | Artifact | Written by | Read by |
 |---|---|---|
 | `plan/<TASK_ID>.json` | architect | developer, database-architect, qa, reviewer, security-reviewer, merge-gate |
-| `verify.json` | `/q-init` (project config) | every stage, verify-gate, merge-gate |
+| `verify.json` | `/quetrex:init` (project config) | every stage, verify-gate, merge-gate |
 | `verify-ledger.jsonl` | qa, git-workflow, verify-gate | reviewer, git-workflow, merge-gate |
 | `qa-report.json` | qa | reviewer |
 | `security-findings.json` | security-reviewer | reviewer, git-workflow, merge-gate |

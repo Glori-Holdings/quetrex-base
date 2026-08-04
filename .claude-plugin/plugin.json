@@ -1,7 +1,13 @@
 {
-  "name": "q",
-  "version": "2.0.1",
-  "description": "Quetrex kanban command layer for Claude Code. Wires a Quetrex board to the gated agent pipeline shipped by the quetrex-factory plugin (marketplace: Glori-Holdings/quetrex-plugins), carrying a task from written scope to a reviewed, merged PR. Commands namespace as /q:task-build, /q:init, /q:deploy.",
+  "name": "quetrex",
+  "displayName": "Quetrex",
+  "version": "2.0.0",
+  "description": "Drive your Quetrex board from your editor. Create, refine, build, merge, and deploy tasks with /quetrex:* commands. Installs the build engine (quetrex-factory) automatically — start here.",
+  "dependencies": ["quetrex-factory"],
+  "commands": ["./.claude/commands/"],
+  "agents": ["./.claude/agents/"],
+  "skills": ["./.claude/skills/"],
+  "hooks": "./hooks/hooks.json",
   "author": {
     "name": "Glen Barnhardt",
     "url": "https://github.com/Glori-Holdings/quetrex-base"

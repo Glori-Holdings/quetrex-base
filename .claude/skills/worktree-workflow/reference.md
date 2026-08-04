@@ -22,7 +22,7 @@ there. This is not a bug; it is what makes worktrees cheap.
 **Scope, precisely:** the harness applies it to the worktrees it creates for built-in
 agent isolation (`isolation: worktree`). It is **not** a git feature and **not** applied
 to a worktree you create yourself with `git worktree add`. Step 2 of the skill copies the
-entries by hand for exactly that reason. `/q-init` generates the file from the env files
+entries by hand for exactly that reason. `/quetrex:init` generates the file from the env files
 it already scans during adoption.
 
 **Never commit the file's *contents*.** `.worktreeinclude` lists paths; the paths it lists
