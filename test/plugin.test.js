@@ -1,0 +1,205 @@
+'use strict';
+
+// Framework-free structure test for the `quetrex` Claude Code plugin.
+// Run: `npm test` (this file, then bash test/merge-gate.test.sh).
+//
+// This replaced test/install.test.js, which validated the retired npm
+// installer (install.js). Quetrex is no longer an npm package that seeds
+// ~/.claude — it is a plugin the user enables. So the invariant that matters
+// is no longer "the installer wired ~/.claude correctly" but "the committed
+// plugin tree IS a correct plugin": the manifest is well-formed, every command
+// is de-prefixed to the plugin namespace, the plugin's own hooks resolve from
+// ${CLAUDE_PLUGIN_ROOT} and do NOT re-register the engine guards that
+// quetrex-factory owns, no command sources a lib from ~/.claude, and not one
+// legacy /q-<cmd> reference survives anywhere in the tree.
+
+const fs = require('fs');
+const path = require('path');
+const assert = require('assert');
+const { execFileSync } = require('child_process');
+
+const REPO_ROOT = path.join(__dirname, '..');
+const readJson = (rel) => JSON.parse(fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8'));
+const exists = (rel) => fs.existsSync(path.join(REPO_ROOT, rel));
+const read = (rel) => fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
+
+let passed = 0;
+function check(name, fn) {
+  fn();
+  passed++;
+  console.log(`  ok - ${name}`);
+}
+
+// Every hook `command` string in a hooks-shaped object.
+function hookCommands(obj) {
+  const out = [];
+  for (const groups of Object.values((obj && obj.hooks) || {})) {
+    if (!Array.isArray(groups)) continue;
+    for (const g of groups) {
+      for (const h of (g && g.hooks) || []) {
+        if (h && typeof h.command === 'string') out.push(h.command);
+      }
+    }
+  }
+  return out;
+}
+// Trailing `.sh` basename from a hook command (tolerates a closing quote).
+function hookBasename(cmd) {
+  const m = cmd.match(/([^/\s"']+\.sh)["']?\s*$/);
+  return m ? m[1] : null;
+}
+
+// Run `git grep` over the working tree and return matched lines (empty when
+// there are no matches). git grep exits 1 on "no match" — that is success here,
+// not an error.
+function gitGrep(pattern, pathspecs) {
+  const args = ['grep', '-I', '--no-color', '-E', pattern, '--', ...pathspecs];
+  try {
+    const out = execFileSync('git', args, { cwd: REPO_ROOT, encoding: 'utf8' });
+    return out.split('\n').filter(Boolean);
+  } catch (e) {
+    if (e.status === 1) return []; // no matches
+    throw e;
+  }
+}
+
+// The nine legacy command verbs, assembled from fragments so this test file
+// never itself contains a literal `/q-<verb>` that its own repo-wide sweep
+// assertion would flag as a false positive.
+const VERBS = ['init', 'login', 'task-new', 'task-refine', 'task-build',
+  'task-rework', 'task-complete', 'task-merge', 'deploy'];
+const LEGACY_CMD_RE = '/' + 'q-' + '(' + VERBS.join('|') + ')';
+
+// The de-prefixed core command set (the eight files renamed from q-*.md). New
+// capabilities (update.md, doctor.md) are added by other workstreams and are
+// intentionally NOT required here — the invariant this test owns is that the
+// core eight are de-prefixed and that ZERO q-*.md files remain.
+const CORE_COMMANDS = ['deploy', 'init', 'login', 'task-build',
+  'task-complete', 'task-new', 'task-refine', 'task-rework'].map((n) => `${n}.md`);
+
+// Guards that quetrex-factory owns; quetrex must NOT re-register them (enabling
+// quetrex depends_on quetrex-factory, so a copy here would double-register).
+const ENGINE_GUARDS = ['deny-guard.sh', 'secret-scan.sh', 'enforce-branch.sh', 'auto-format.sh'];
+// The command-layer hooks unique to quetrex, which it keeps registering.
+const KEPT_HOOKS = ['session-state.sh', 'workflow-reminder.sh', 'edit-gate.sh'];
+
+// --- 1. plugin.json manifest -----------------------------------------------
+check('.claude-plugin/plugin.json parses and carries the v2 identity', () => {
+  const p = readJson('.claude-plugin/plugin.json');
+  assert.strictEqual(p.name, 'quetrex', 'plugin name is the slash-command namespace — must be "quetrex"');
+  assert.strictEqual(p.version, '2.0.0');
+  assert.strictEqual(p.displayName, 'Quetrex');
+});
+
+check('plugin.json depends on quetrex-factory (the build engine)', () => {
+  const p = readJson('.claude-plugin/plugin.json');
+  assert.ok(Array.isArray(p.dependencies), 'dependencies must be an array');
+  assert.ok(p.dependencies.includes('quetrex-factory'),
+    'quetrex installs the engine automatically — quetrex-factory must be a declared dependency');
+});
+
+check('plugin.json declares custom paths that keep content under .claude/', () => {
+  const p = readJson('.claude-plugin/plugin.json');
+  assert.deepStrictEqual(p.commands, ['./.claude/commands/']);
+  assert.deepStrictEqual(p.agents, ['./.claude/agents/']);
+  assert.deepStrictEqual(p.skills, ['./.claude/skills/']);
+  assert.strictEqual(p.hooks, './hooks/hooks.json');
+});
+
+// --- 2. commands are de-prefixed to the plugin namespace -------------------
+check('no q-*.md command file survives the rename', () => {
+  const files = fs.readdirSync(path.join(REPO_ROOT, '.claude', 'commands'));
+  const legacy = files.filter((f) => /^q-.*\.md$/.test(f));
+  assert.deepStrictEqual(legacy, [],
+    'a q-*.md file becomes /quetrex:q-* — command files must be de-prefixed');
+});
+
+check('the de-prefixed core command set is present', () => {
+  for (const f of CORE_COMMANDS) {
+    assert.ok(exists(`.claude/commands/${f}`), `missing de-prefixed command: .claude/commands/${f}`);
+  }
+});
+
+// --- 3. the plugin's own hooks ---------------------------------------------
+check('hooks/hooks.json parses and every command resolves from the plugin root', () => {
+  const h = readJson('hooks/hooks.json');
+  const cmds = hookCommands(h);
+  assert.ok(cmds.length > 0, 'hooks.json registers at least one hook');
+  for (const cmd of cmds) {
+    assert.ok(cmd.includes('${CLAUDE_PLUGIN_ROOT}/'),
+      `plugin hook command must resolve from \${CLAUDE_PLUGIN_ROOT}: ${cmd}`);
+    assert.ok(!cmd.includes('${CLAUDE_PROJECT_DIR}'),
+      `a plugin hook registration must not use \${CLAUDE_PROJECT_DIR} (that is for scripts locating the user repo): ${cmd}`);
+    const rel = cmd.match(/\$\{CLAUDE_PLUGIN_ROOT\}\/([^"']+\.sh)/);
+    assert.ok(rel, `plugin hook command has no .sh target: ${cmd}`);
+    assert.ok(exists(rel[1]),
+      `plugin wires ${rel[1]}, which does not exist — the hook would exit 127 on every matching tool call`);
+  }
+});
+
+check('hooks.json registers ONLY the command-layer hooks, never the engine guards', () => {
+  const h = readJson('hooks/hooks.json');
+  const wired = new Set(hookCommands(h).map(hookBasename).filter(Boolean));
+  for (const g of ENGINE_GUARDS) {
+    assert.ok(!wired.has(g),
+      `${g} is owned by quetrex-factory — quetrex must not re-register it (double-registration when both plugins are enabled)`);
+  }
+  for (const k of KEPT_HOOKS) {
+    assert.ok(wired.has(k), `${k} is unique to the command layer and must stay registered by quetrex`);
+  }
+  assert.deepStrictEqual([...wired].sort(), [...KEPT_HOOKS].sort(),
+    'hooks.json must wire exactly the kept command-layer hooks and nothing else');
+});
+
+// --- 4. no command sources a lib the way the retired installer required ----
+check('no command sources a lib from ~/.claude (the plugin ships bin/quetrex-api on PATH)', () => {
+  const dir = path.join(REPO_ROOT, '.claude', 'commands');
+  for (const f of fs.readdirSync(dir)) {
+    const body = read(`.claude/commands/${f}`);
+    assert.ok(!/source\s+~\/\.claude\/lib/.test(body),
+      `${f} still sources a lib from ~/.claude — a plugin never seeds that path; call the bin/quetrex-api tool by name`);
+    assert.ok(!body.includes('${CLAUDE_PLUGIN_ROOT}'),
+      `${f} references \${CLAUDE_PLUGIN_ROOT}, which is UNSET in slash-command bash — call the bundled quetrex-api tool by name instead`);
+  }
+});
+
+// --- 5. not one legacy /q-<cmd> reference survives, anywhere ----------------
+check('zero /q-<cmd> command references remain repo-wide', () => {
+  const hits = gitGrep(LEGACY_CMD_RE, ['.', ':(exclude).quetrex-backups', ':(exclude).quetrex/plan']);
+  assert.deepStrictEqual(hits, [],
+    'every legacy command reference must be rewritten to /quetrex:*:\n' + hits.join('\n'));
+});
+
+// --- 6. the npm installer is fully retired ---------------------------------
+check('install.js is deleted', () => {
+  assert.ok(!exists('install.js'), 'install.js is retired — the plugin does not seed ~/.claude');
+});
+
+check('package.json has no publish/install machinery, keeps the dev/verify scripts', () => {
+  const pkg = readJson('package.json');
+  assert.ok(!pkg.scripts || !pkg.scripts.postinstall, 'no postinstall — nothing to install');
+  assert.ok(!('publishConfig' in pkg), 'no publishConfig — the package is not published');
+  assert.ok(!('files' in pkg), 'no "files" allowlist — there is no tarball to ship');
+  for (const s of ['check:js', 'check:sh', 'check:json', 'test']) {
+    assert.ok(pkg.scripts && pkg.scripts[s], `dev script missing: ${s}`);
+  }
+  assert.ok(!pkg.scripts['check:js'].includes('install.js'),
+    'check:js must not reference the deleted install.js');
+});
+
+check('no test file requires the retired install.js', () => {
+  // Needles assembled from fragments so THIS file never itself contains the
+  // literal it forbids (which would make the check match itself).
+  const mod = '../inst' + 'all.js';
+  const needles = ["require('" + mod + "')", 'require("' + mod + '")'];
+  const dir = __dirname;
+  for (const f of fs.readdirSync(dir)) {
+    if (!f.endsWith('.js')) continue;
+    const body = fs.readFileSync(path.join(dir, f), 'utf8');
+    for (const n of needles) {
+      assert.ok(!body.includes(n), `${f} still requires the retired installer`);
+    }
+  }
+});
+
+console.log(`\n${passed} passed`);

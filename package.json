@@ -1,41 +1,16 @@
 {
   "name": "quetrex-base",
   "version": "2.0.1",
-  "description": "Quetrex Base — Claude Code base configuration for development teams. Agents, skills, and commands for a complete AI-powered development pipeline.",
+  "private": true,
+  "description": "Quetrex — the Claude Code plugin engine (agents, skills, commands, hooks). Distributed as a plugin, not an npm package; this package.json exists only to run the repo's dev/verify scripts.",
   "scripts": {
-    "postinstall": "node install.js",
-    "check:js": "node --check install.js && node --check test/install.test.js",
-    "check:sh": "for f in .claude/hooks/*.sh .claude/lib/*.sh .claude/*.sh .claude/skills/*/*.sh .claude/skills/*/scripts/*.sh test/*.sh; do [ -f \"$f\" ] || continue; bash -n \"$f\" || exit 1; done",
+    "check:js": "node --check test/plugin.test.js",
+    "check:sh": "for f in .claude/hooks/*.sh .claude/lib/*.sh .claude/*.sh .claude/skills/*/*.sh .claude/skills/*/scripts/*.sh bin/quetrex-api test/*.sh; do [ -f \"$f\" ] || continue; bash -n \"$f\" || exit 1; done",
     "check:json": "node -e \"const fs=require('fs');const files=['package.json','.claude/settings.json','.claude/templates/verify.json','.quetrex/verify.json','.claude-plugin/plugin.json','hooks/hooks.json'];for(const f of files){JSON.parse(fs.readFileSync(f,'utf8'))}console.log('ok - '+files.length+' JSON files parse')\"",
-    "test": "node test/install.test.js && bash test/merge-gate.test.sh"
+    "test": "node test/plugin.test.js && bash test/merge-gate.test.sh"
   },
   "engines": {
     "node": ">=18"
   },
-  "keywords": [
-    "claude-code",
-    "quetrex-base",
-    "ai",
-    "agents",
-    "developer-tools"
-  ],
-  "license": "MIT",
-  "publishConfig": {
-    "access": "public"
-  },
-  "files": [
-    ".claude/agents/",
-    ".claude/commands/",
-    ".claude/lib/",
-    ".claude/hooks/",
-    ".claude/skills/qa-verify/",
-    ".claude/skills/tab-control/",
-    ".claude/skills/worktree-workflow/",
-    ".claude/quetrex-doctrine.md",
-    ".claude/settings.json",
-    ".claude/templates/",
-    ".claude/statusline-command.sh",
-    ".claude/team-protocol.md",
-    "install.js"
-  ]
+  "license": "MIT"
 }

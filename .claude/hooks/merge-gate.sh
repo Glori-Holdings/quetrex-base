@@ -196,7 +196,7 @@ HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
 if [ -f "$ESCALATION" ]; then
   reason="ESCALATE_HUMAN"
   detail=$(head -c 800 "$ESCALATION" 2>/dev/null)
-  deny "MERGE GATE ($reason): .quetrex/ESCALATION is present — a bounded self-heal/review loop hit its cap and the pipeline stopped. This merge is BLOCKED until a human resolves the escalation. Surface it to the user and run /q-task-rework; do not delete ESCALATION to force the merge.${detail:+ --- escalation note --- $detail}"
+  deny "MERGE GATE ($reason): .quetrex/ESCALATION is present — a bounded self-heal/review loop hit its cap and the pipeline stopped. This merge is BLOCKED until a human resolves the escalation. Surface it to the user and run /quetrex:task-rework; do not delete ESCALATION to force the merge.${detail:+ --- escalation note --- $detail}"
 fi
 
 # ===========================================================================
@@ -223,7 +223,7 @@ case "$VERDICT" in
     ;;
   ESCALATE_HUMAN|ESCALATE)
     # ESCALATE_HUMAN is the current contract string; ESCALATE is the legacy alias.
-    deny "MERGE GATE (ESCALATE_HUMAN): review verdict is '$VERDICT' — the review-gate was uncertain, hit its rework cap, or referred this to a human. Do NOT auto-merge. Surface the verdict and its findings to the user and let them decide (/q-task-rework)."
+    deny "MERGE GATE (ESCALATE_HUMAN): review verdict is '$VERDICT' — the review-gate was uncertain, hit its rework cap, or referred this to a human. Do NOT auto-merge. Surface the verdict and its findings to the user and let them decide (/quetrex:task-rework)."
     ;;
   APPROVE)
     # Legacy reviewer verdict. Under the NEW merge policy only the review-gate's
