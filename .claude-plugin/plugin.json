@@ -3,8 +3,12 @@
   "displayName": "Quetrex",
   "version": "2.0.0",
   "description": "Drive your Quetrex board from your editor. Create, refine, build, merge, and deploy tasks with /quetrex:* commands. Installs the build engine (quetrex-factory) automatically — start here.",
-  "dependencies": ["quetrex-factory"],
-  "commands": ["./.claude/commands/"],
+  "dependencies": [
+    "quetrex-factory"
+  ],
+  "commands": [
+    "./.claude/commands/"
+  ],
   "agents": [
     "./.claude/agents/architect.md",
     "./.claude/agents/database-architect.md",
@@ -16,8 +20,9 @@
     "./.claude/agents/reviewer.md",
     "./.claude/agents/security-reviewer.md"
   ],
-  "skills": ["./.claude/skills/"],
-  "hooks": "./hooks/hooks.json",
+  "skills": [
+    "./.claude/skills/"
+  ],
   "author": {
     "name": "Glen Barnhardt",
     "url": "https://github.com/Glori-Holdings/quetrex-base"
