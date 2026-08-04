@@ -105,7 +105,13 @@ check('plugin.json declares custom paths that keep content under .claude/', () =
   const p = readJson('.claude-plugin/plugin.json');
   assert.deepStrictEqual(p.commands, ['./.claude/commands/']);
   assert.deepStrictEqual(p.skills, ['./.claude/skills/']);
-  assert.strictEqual(p.hooks, './hooks/hooks.json');
+  // hooks must NOT be declared: the standard hooks/hooks.json auto-loads, so
+  // declaring it makes Claude Code double-load it ("Duplicate hooks file
+  // detected") and the plugin errors on install. Confirmed by live install test.
+  assert.strictEqual(p.hooks, undefined,
+    'do NOT declare hooks in plugin.json — hooks/hooks.json auto-loads; declaring it duplicates');
+  assert.ok(exists('hooks/hooks.json'),
+    'hooks/hooks.json must exist at the plugin root so it auto-loads');
   // `agents` MUST be individual .md FILE paths — the Claude Code plugin validator
   // rejects a directory for `agents` (unlike commands/skills, which take a dir).
   // Derive from the real dir so adding/removing an agent without updating the
