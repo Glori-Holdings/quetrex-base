@@ -27,8 +27,10 @@ in conversation.
   `/loop` (step 6B); harmless to run by hand.
 
 THE DEV PIPELINE itself is defined **once** in `.claude/lib/dev-pipeline.md` and is **not**
-restated here. This command is the lean intake + gate + dispatcher; the heavy work runs in
-background Workflow-tool runs so the terminal stays free.
+restated here. This command is the lean intake + gate + dispatcher; the heavy work runs
+unattended — a standalone task's BUILD half as a fired cloud Routine
+(`.claude/lib/cloud-build-routine.md`), an epic child's as a background Workflow-tool run —
+so the terminal stays free either way.
 
 All kanban I/O goes through the token-safe `quetrex-api` tool (shipped on the plugin's PATH —
 raw `quetrex-api <METHOD> <path> [body]` calls plus the `quetrex-api task-*` / `create-child` /
@@ -140,7 +142,9 @@ architect stage**, with these inputs:
 This isolates the worktree, sets the task `in_progress`, and produces
 `.quetrex/plan/<TASK_ID>.json` — the acceptance criteria, the **strict file-ownership
 map**, the `security_surface`, and the verify chain. **No developer runs yet.** Record the
-worktree path and the unit branch name; they go into the payload.
+worktree path into `$UNIT_WT`; Step 4a reads the plan artifact out of it and embeds the
+full JSON directly in the payload, so nothing downstream ever depends on that worktree
+still being around.
 
 ### B) PROJECT / EPIC → decompose, ONE LEVEL ONLY
 
@@ -200,13 +204,26 @@ PAYLOAD="$REPO_ROOT/.quetrex/build/$TASK_ID.json"
 # EDGES_JSON    (epic only): [["C3","C1"], …]  — plan LABELS, resolved to ids in 4c.
 node -e '
   const fs=require("fs");
-  const [file,task,title,kind,prefix,base,children,edges,session] = process.argv.slice(1);
+  const [file,task,title,kind,prefix,base,children,edges,session,wt] = process.argv.slice(1);
+  const planPath = ".quetrex/plan/" + task + ".json";
+  // Embed the architect'"'"'s plan artifact directly in the payload (single unit only —
+  // an epic has no single plan file at this point). This is what lets Step 6A publish the
+  // spec to the cloud routine without ever depending on $UNIT_WT still existing: a
+  // compaction, a resumed session, or a --build-only run days later reads planSnapshot
+  // straight out of this file, never off a worktree that may be long gone.
+  let planSnapshot = null;
+  if (wt) {
+    try { planSnapshot = JSON.parse(fs.readFileSync(require("path").join(wt, planPath), "utf8")); }
+    catch (e) { /* left null; Step 6A refuses to dispatch without it rather than guessing */ }
+  }
   const out = {
     task, title, kind,                       // kind: "single" | "epic"
     branchPrefix: prefix,
     baseBranch: base,
     integrationBranch: kind === "epic" ? prefix + task : null,
-    planPath: ".quetrex/plan/" + task + ".json",
+    planPath,
+    worktreePath: wt || null,                // where the plan half worked; reference only
+    planSnapshot,                            // full plan JSON, embedded — see note above
     sessionId: session || null,              // the plan-half session, for --resume
     scopeApprovedAt: null,                   // set in 4c, on approval
     children: JSON.parse(children || "[]"),  // [{label,title,desc,id}] — id filled in 4c
@@ -218,7 +235,7 @@ node -e '
   fs.mkdirSync(require("path").dirname(file), {recursive:true});
   fs.writeFileSync(file, JSON.stringify(out, null, 2) + "\n");
 ' "$PAYLOAD" "$TASK_ID" "$TASK_TITLE" "<single|epic>" "$BRANCH_PREFIX" "main" \
-  "${CHILDREN_JSON:-[]}" "${EDGES_JSON:-[]}" "${CLAUDE_CODE_SESSION_ID:-}"
+  "${CHILDREN_JSON:-[]}" "${EDGES_JSON:-[]}" "${CLAUDE_CODE_SESSION_ID:-}" "${UNIT_WT:-}"
 echo "Wrote build payload: $PAYLOAD"
 ```
 
@@ -337,18 +354,95 @@ not an error. Report which happened.
 
 ### A) Single unit
 
-Run THE DEV PIPELINE from `.claude/lib/dev-pipeline.md`, **resuming after the architect
-stage**, with:
+The BUILD half does not run in this process. Two moves, then this session returns
+**immediately** — the terminal stays free and there is nothing left here to poll.
 
-- `TASK_ID`, `TASK_TITLE`, `BASE_BRANCH` = `main`, `BRANCH_PREFIX`,
-- `WORKFLOW_TITLE` = `"<TASK_ID> · <title>"`,
-- `PIPELINE_RESUME_FROM` = `developers`,
-- `PLAN_ARTIFACT` = the payload's `planPath` — **already written and human-approved; do
-  not re-plan and do not widen the ownership map.**
+**1. Publish the approved spec to a helper branch.** The plan artifact is already embedded
+in the payload (`planSnapshot`, written at 4a) so this step never depends on the plan-half
+worktree still existing. Materialize it into a disposable, detached worktree and push it as
+its own throwaway branch — never onto the unit branch, never onto `main`:
 
-The PR targets `main`. Dispatch the workflow in the **background**. The engine drives
-`in_progress → pr_ready` (or `needs_clarity` on bounded-loop exhaustion). Then go to
-**Step 7**.
+```bash
+SPEC_BRANCH="quetrex-spec/$TASK_ID"
+PLAN_JSON="$(node -e '
+  const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+  if(!p.planSnapshot){ console.error("No embedded plan snapshot in the payload — run the plan half again."); process.exit(1); }
+  process.stdout.write(JSON.stringify(p.planSnapshot));
+' "$PAYLOAD")" || exit 1
+BASE_BRANCH_FOR_SPEC="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).baseBranch)' "$PAYLOAD")"
+
+TMP_WT="$(mktemp -d)"
+git -C "$REPO_ROOT" fetch origin "$BASE_BRANCH_FOR_SPEC" --quiet
+git -C "$REPO_ROOT" worktree add --detach --quiet "$TMP_WT" "origin/$BASE_BRANCH_FOR_SPEC"
+mkdir -p "$TMP_WT/.quetrex/plan"
+printf '%s\n' "$PLAN_JSON" > "$TMP_WT/.quetrex/plan/$TASK_ID.json"
+git -C "$TMP_WT" checkout -q -b "$SPEC_BRANCH"
+git -C "$TMP_WT" add -f ".quetrex/plan/$TASK_ID.json"
+git -C "$TMP_WT" -c user.name='quetrex-bot' -c user.email='quetrex-bot@users.noreply.github.com' \
+  commit -q -m "chore(spec): $TASK_ID build payload for cloud routine"
+git -C "$TMP_WT" push -f origin "$SPEC_BRANCH"
+git -C "$REPO_ROOT" worktree remove "$TMP_WT" --force
+```
+
+The spec branch carries **only** `.quetrex/plan/<TASK_ID>.json` — that file is git-ignored
+everywhere else (`.quetrex/*` minus `project.json`/`verify.json`), which is exactly why a
+normal push never carries it and this dedicated branch is the only way the zero-context
+cloud session receives the human-approved spec.
+
+**2. Fire the cloud Routine via the `RemoteTrigger` tool.** `RemoteTrigger` is a **tool**,
+not a CLI — this file is read as model-instructions, and this step is an instruction to
+invoke that tool directly, not a shell command. Build its body exactly as
+`.claude/lib/cloud-build-routine.md` documents:
+
+```bash
+EVENT_UUID="$(uuidgen | tr 'A-Z' 'a-z')"
+RUN_AT="$(date -u -v+2M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+2 minutes' +%Y-%m-%dT%H:%M:%SZ)"
+REPO_URL="$(git -C "$REPO_ROOT" remote get-url origin | sed -E 's#^git@([^:]+):#https://\1/#; s#\.git$##')"
+TASK_TITLE="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).title)' "$PAYLOAD")"
+```
+
+Load `.claude/lib/cloud-build-routine.md`, substitute its `{{TASK}}`, `{{REPO_URL}}`,
+`{{SPEC_BRANCH}}`, `{{BASE_BRANCH}}`, `{{BRANCH_PREFIX}}` placeholders with `$TASK_ID`,
+`$REPO_URL`, `$SPEC_BRANCH`, `$BASE_BRANCH_FOR_SPEC`, and the payload's `branchPrefix`, and
+use the filled text verbatim as the event's `message.content`. Then call the tool,
+`action:"create"` then `action:"run"`, with a body of this exact shape:
+
+```json
+{
+  "name": "<TASK_ID> · <title> (cloud build)",
+  "run_once_at": "<RUN_AT>",
+  "enabled": true,
+  "job_config": {
+    "ccr": {
+      "environment_id": "env_011CUpkAEM4fzsAD6dx1zW3r",
+      "session_context": {
+        "model": "claude-sonnet-5",
+        "sources": [{ "git_repository": { "url": "<REPO_URL>" } }],
+        "allowed_tools": ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+      },
+      "events": [{
+        "data": {
+          "uuid": "<EVENT_UUID>",
+          "session_id": "",
+          "type": "user",
+          "parent_tool_use_id": null,
+          "message": { "role": "user", "content": "<the filled cloud-build-routine.md prompt>" }
+        }
+      }]
+    }
+  }
+}
+```
+
+`allowed_tools` is intentionally the minimum the pipeline needs — do not widen it. Never
+place a bearer token or any other secret in `name`, `message.content`, or anywhere else in
+this body: the CCR authenticates to GitHub with its own credentials, never one this session
+hands it.
+
+**3. Return immediately.** Take the routine id the tool returns and report the **monitor
+URL** — `https://claude.ai/code/routines/{id}` — to the user, along with the spec branch and
+that the routine is building toward `pr_ready`. Do not wait for it, do not poll it, do not
+parse its output. Then go to **Step 7**.
 
 ### B) Epic — DAG dispatch as a `/loop` tick
 
@@ -414,11 +508,13 @@ That is a slash command, not shell. Stop the loop at the fixpoint (step 4 below)
 
 ## Step 7 — Terminus + report
 
-The heavy work — every unit's DEV PIPELINE — runs in **background** Workflow-tool runs;
-you never parse their stdout.
+The heavy work — every unit's DEV PIPELINE — runs unattended, out of this session: a
+standalone task's BUILD half as a **fired cloud Routine** (Step 6A), an epic child's as a
+**background Workflow-tool run** (Step 6B). You never parse either's stdout inline.
 
-**Single unit.** Fire-and-forget: report the workflow title, the branch, and that it is
-building toward `pr_ready`. The pipeline's terminus is an open PR. Whether it then merges
+**Single unit.** Fire-and-forget: already reported in Step 6A — the monitor URL
+(`https://claude.ai/code/routines/{id}`), the spec branch, and that the routine is building
+toward `pr_ready`. The pipeline's terminus is an open PR. Whether it then merges
 is decided by the reviewer's verdict and enforced by `merge-gate.sh` — `AUTO_MERGE` pinned
 to HEAD with a green ledger permits the squash merge; `REWORK` / `ESCALATE_HUMAN` sends the
 task to `needs_clarity` for `/quetrex:task-rework`. There is **no `/quetrex:task-merge` command**; do
@@ -462,3 +558,7 @@ output inline.
 - Never hardcode `feature/` — construct every branch from `branchPrefix`.
 - Never print or echo the bearer token. Never run `set -x` / `curl -v` around `quetrex-api`.
   Build every JSON payload with `node` / `JSON.stringify`, never `echo`.
+- Never place a bearer token, API key, or any other secret in the `RemoteTrigger` body
+  (Step 6A) — not in `name`, not in `message.content`, nowhere. The CCR authenticates to
+  GitHub with its own credentials, never one this session hands it. The spec branch it
+  reads (`quetrex-spec/<TASK_ID>`) carries only the plan JSON — never a credential.

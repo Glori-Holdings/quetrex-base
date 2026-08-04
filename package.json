@@ -7,7 +7,7 @@
     "check:js": "node --check test/plugin.test.js",
     "check:sh": "for f in .claude/hooks/*.sh .claude/lib/*.sh .claude/*.sh .claude/skills/*/*.sh .claude/skills/*/scripts/*.sh bin/* test/*.sh; do [ -f \"$f\" ] || continue; bash -n \"$f\" || exit 1; done",
     "check:json": "node -e \"const fs=require('fs');const files=['package.json','.claude/settings.json','.claude/templates/verify.json','.quetrex/verify.json','.claude-plugin/plugin.json','hooks/hooks.json'];for(const f of files){JSON.parse(fs.readFileSync(f,'utf8'))}console.log('ok - '+files.length+' JSON files parse')\"",
-    "test": "node test/plugin.test.js && bash test/merge-gate.test.sh && bash test/update-check.test.sh"
+    "test": "node test/plugin.test.js && for f in test/*.sh; do [ -f \"$f\" ] || continue; echo \"--- $f ---\"; bash \"$f\" || exit 1; done"
   },
   "engines": {
     "node": ">=18"

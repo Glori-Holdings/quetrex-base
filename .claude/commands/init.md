@@ -548,83 +548,46 @@ it. If they decline, record it and move on.
 
 ---
 
-## 4h. Pin the Quetrex engine in `enabledPlugins`
+## 4h. Arm the repo for cloud execution — `quetrex-arm`
 
-Cloud routines and every teammate read which engine to run from the **committed**
-`.claude/settings.json` `enabledPlugins`, not from any one machine's local plugin cache.
-Write a **version-pinned** entry so the whole repo (and every routine) resolves the same
-engine:
-
-- `"quetrex@quetrex": true` — the command layer is enabled (a plain `true`; the command
-  surface is not version-gated per repo).
-- `"quetrex-factory@quetrex": "<concrete version>"` — a **concrete version string**, never a
-  floating `true`. Resolve the latest published version from the marketplace manifest on
-  GitHub raw (there is no version-check API):
-
-```bash
-MARKET_URL="https://raw.githubusercontent.com/Glori-Holdings/quetrex-plugins/main/.claude-plugin/marketplace.json"
-LATEST_FACTORY="$(curl -fsS --max-time 8 "$MARKET_URL" 2>/dev/null | node -e '
-  let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-    let o; try{o=JSON.parse(s)}catch{process.exit(0)}
-    const p=(o.plugins||[]).find(x=>x&&x.name==="quetrex-factory");
-    process.stdout.write(p&&p.version?String(p.version):"");
-  })' 2>/dev/null)"
-```
-
-Merge — never clobber — into `$REPO_ROOT/.claude/settings.json`, preserving every other
-`enabledPlugins` entry and every other settings key. Only write a concrete factory pin
-when the version resolved; if the marketplace was unreachable, still enable `quetrex` and
-tell the user to run `/quetrex:update` once online to write the concrete engine pin (never
-pin a floating `true`):
+Cloud routines and every teammate read which engine to run, and how to reach the kanban,
+from what is **committed** in this repo — `.claude/settings.json` `enabledPlugins` +
+`extraKnownMarketplaces`, and `.mcp.json`'s kanban broker registration — never from any one
+machine's local plugin cache or MCP config. These writes used to be inline `node` prose
+right here in this command; that prose did not reliably execute (a run could finish with
+empty `enabledPlugins`, no `.mcp.json`, and no `extraKnownMarketplaces`), so arming is now a
+**deterministic executable**, `quetrex-arm`, shipped on the plugin's `bin/` (which IS on
+PATH in slash-command bash, unlike the plugin-root path variable, which is unset in this
+context — call it by name, never source it):
 
 ```bash
-node -e '
-  const fs=require("fs"), path=require("path");
-  const [file, latestFactory] = process.argv.slice(1);
-  let o={}; try{o=JSON.parse(fs.readFileSync(file,"utf8"))}catch{}
-  o.enabledPlugins = o.enabledPlugins || {};
-  const before = JSON.stringify(o.enabledPlugins);
-  o.enabledPlugins["quetrex@quetrex"] = true;
-  if (latestFactory) {
-    o.enabledPlugins["quetrex-factory@quetrex"] = latestFactory;   // concrete pin, never true
-  }
-  if (JSON.stringify(o.enabledPlugins) === before) { console.log("enabledPlugins already current."); process.exit(0); }
-  fs.mkdirSync(path.dirname(file), {recursive:true});
-  fs.writeFileSync(file, JSON.stringify(o, null, 2) + "\n");
-  console.log("Pinned enabledPlugins: quetrex@quetrex=true"
-    + (latestFactory ? ", quetrex-factory@quetrex=" + latestFactory : " (factory pin deferred — run /quetrex:update online)"));
-' "$REPO_ROOT/.claude/settings.json" "$LATEST_FACTORY"
+QUETREX_ARM_OUTPUT="$(quetrex-arm "$REPO_ROOT" "$QX_KANBAN_URL")"; QUETREX_ARM_RC=$?
+printf '%s\n' "$QUETREX_ARM_OUTPUT"
+if [ "$QUETREX_ARM_RC" -ne 0 ]; then
+  echo "quetrex-arm failed — .claude/settings.json / .mcp.json may be only partially armed. Re-run /quetrex:init once resolved." >&2
+fi
 ```
 
-Record whether the pin was written so step 6 stages `.claude/settings.json` and step 7
-reports it.
+`quetrex-arm` idempotently and non-destructively writes, into `$REPO_ROOT`:
 
----
+- `.claude/settings.json` `enabledPlugins`: `"quetrex@quetrex": true` (the command layer,
+  not version-gated per repo) and `"quetrex-factory@quetrex": "<concrete version>"` — a
+  **concrete version string**, never a floating `true`, resolved from the public
+  marketplace manifest on GitHub raw. If the marketplace is unreachable it still enables
+  `quetrex@quetrex` and reports that the factory pin is deferred until `/quetrex:update`
+  is run online.
+- `.claude/settings.json` `extraKnownMarketplaces.quetrex.source`:
+  `{"source":"github","repo":"Glori-Holdings/quetrex-plugins"}` — without this the
+  `quetrex-factory` pin above cannot resolve.
+- `.mcp.json` `mcpServers.quetrex-kanban`: `{"type":"http","url":"<kanbanUrl>/api/mcp"}` —
+  **endpoint only, no secret value**. The broker authenticates cloud sessions and
+  auto-rotates their credentials.
 
-## 4i. Ensure the committed `.mcp.json` kanban broker
-
-Cloud sessions reach the kanban through the **MCP broker**, and a routine only ever sees
-what is **committed** — so the broker registration must live in the repo's own `.mcp.json`,
-not any machine-local MCP config. Ensure `$REPO_ROOT/.mcp.json` registers the kanban broker
-under `mcpServers`, **merged non-destructively** (never clobber an existing server the repo
-already registers):
-
-```bash
-node -e '
-  const fs=require("fs");
-  const [file, kanbanUrl] = process.argv.slice(1);
-  let o={}; try{o=JSON.parse(fs.readFileSync(file,"utf8"))}catch{}
-  o.mcpServers = o.mcpServers || {};
-  if (o.mcpServers["quetrex-kanban"]) { console.log(".mcp.json already registers the quetrex-kanban broker."); process.exit(0); }
-  o.mcpServers["quetrex-kanban"] = { type: "http", url: kanbanUrl.replace(/\/$/, "") + "/api/mcp" };
-  fs.writeFileSync(file, JSON.stringify(o, null, 2) + "\n");
-  console.log("Registered the quetrex-kanban MCP broker in .mcp.json");
-' "$REPO_ROOT/.mcp.json" "$QX_KANBAN_URL"
-```
-
-The broker authenticates cloud sessions and auto-rotates their credentials; **no secret
-value is written here** — only the endpoint. Record whether `.mcp.json` changed so step 6
-stages it and step 7 reports it.
+Every write merges — it never clobbers any other `enabledPlugins` entry, any other
+`extraKnownMarketplaces` entry, any other `mcpServers` entry, or any other settings key.
+Record whatever `quetrex-arm` printed (each concern reports "wrote ..." or "already
+current"/"already registers ...") so step 6 stages `.claude/settings.json` + `.mcp.json`
+and step 7 reports it verbatim.
 
 ---
 
@@ -797,8 +760,9 @@ git -C "$REPO_ROOT" add .quetrex/project.json 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/settings.json" ] && git -C "$REPO_ROOT" add .claude/settings.json 2>/dev/null || true
 [ -f "$REPO_ROOT/.quetrex/verify.json" ]  && git -C "$REPO_ROOT" add .quetrex/verify.json 2>/dev/null || true
 [ -f "$REPO_ROOT/.worktreeinclude" ]      && git -C "$REPO_ROOT" add .worktreeinclude 2>/dev/null || true
-# The committed engine pin (4h) and the kanban MCP broker (4i) — both are read
-# by cloud routines from the repo, so both must be committed.
+# The committed engine pin and the kanban MCP broker — both written by
+# quetrex-arm in step 4h — are read by cloud routines from the repo, so both
+# must be committed.
 [ -f "$REPO_ROOT/.mcp.json" ]             && git -C "$REPO_ROOT" add .mcp.json 2>/dev/null || true
 
 if git -C "$REPO_ROOT" diff --cached --quiet; then
@@ -878,12 +842,13 @@ Summarize for the user:
 - Idempotent: re-running on a linked repo never re-creates the binding and never
   prompts for a name — it re-verifies access and can re-clean / re-PR.
 - Non-destructive: the only files this command creates are `.quetrex/project.json`,
-  `.worktreeinclude` (step 4f), and `.mcp.json` (step 4i, merged — never clobbering an
-  existing MCP server entry); `CLAUDE.md` edits only excise stale tracker blocks, never
-  wholesale rewrites; `.claude/settings.json` is merged, never clobbered — step 4e only
-  ever **adds** to `permissions.allow` and step 4h only ever adds/updates the
-  `enabledPlugins` pin, never removing or narrowing an entry, and never touching
-  `permissions.deny`/`ask`. The only removals are user-confirmed stale old-Quetrex
+  `.worktreeinclude` (step 4f), and `.mcp.json` (step 4h, via `quetrex-arm`, merged — never
+  clobbering an existing MCP server entry); `CLAUDE.md` edits only excise stale tracker
+  blocks, never wholesale rewrites; `.claude/settings.json` is merged, never clobbered —
+  step 4e only ever **adds** to `permissions.allow` and step 4h (`quetrex-arm`) only ever
+  adds/updates the `enabledPlugins` pin and `extraKnownMarketplaces.quetrex`, never removing
+  or narrowing an entry, and never touching `permissions.deny`/`ask`. The only removals are
+  user-confirmed stale old-Quetrex
   project commands/skills (step 4c) — never auto-deleted, never anything in the global
   `~/.claude`. The build gates (`verify-gate.sh`/`merge-gate.sh`/`secret-scan.sh` and the
   fat pipeline agents) are delivered by the `quetrex-factory` plugin pin (4h), never
