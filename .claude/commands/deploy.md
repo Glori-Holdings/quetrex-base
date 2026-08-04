@@ -1,5 +1,5 @@
 ---
-description: Deploy this project's app using its vault secrets (Fly.io for v1). Interviews for deploy config on first run, fetches secrets in-memory, runs the deploy token-safely (rolling). Also supports rollback to the previous release. Usage: /q-deploy [staging|production|rollback]
+description: Deploy this project's app using its vault secrets (Fly.io for v1). Interviews for deploy config on first run, fetches secrets in-memory, runs the deploy token-safely (rolling). Also supports rollback to the previous release. Usage: /quetrex:deploy [staging|production|rollback]
 argument-hint: "[staging | production | rollback]"
 ---
 
@@ -11,7 +11,7 @@ Deploy this project's app using its **vault secrets** from the Quetrex kanban. v
 Forward deploys use a **rolling** strategy — Fly replaces machines one at a time, gated on
 health checks, so a bad release never takes the whole app down at once.
 
-**Rollback:** `/q-deploy rollback [staging|production]` re-deploys the **previous** successful
+**Rollback:** `/quetrex:deploy rollback [staging|production]` re-deploys the **previous** successful
 release's image instead of building a new one. It lists recent releases, shows which prior
 image it will roll back to, and **confirms with you before acting**. See
 [§8b. Rollback](#8b-rollback--redeploy-the-previous-image-token-safely).
@@ -32,7 +32,7 @@ image it will roll back to, and **confirms with you before acting**. See
 Argument: `$ARGUMENTS` is optional. The first token is either an environment (`staging` /
 `production`) for a normal forward deploy, or the literal `rollback` to roll back to the
 previous release. When the first token is `rollback`, an optional **second** token is the
-environment (`/q-deploy rollback production`).
+environment (`/quetrex:deploy rollback production`).
 
 ---
 
@@ -57,13 +57,12 @@ fi
 
 ---
 
-## 2. Source the helper and resolve context
+## 2. Resolve context via the `quetrex-api` tool
 
 ```bash
-source ~/.claude/lib/quetrex-api.sh
-resolve_auth    || exit 1
-resolve_project || exit 1
-BIND="$(qx_binding_path)" || { echo "Run /q-init" >&2; exit 1; }
+QX_KANBAN_URL="$(quetrex-api kanban-url)"     || exit 1
+QX_PROJECT_CODE="$(quetrex-api project-code)" || exit 1
+BIND="$(quetrex-api binding-path)" || { echo "Run /quetrex:init" >&2; exit 1; }
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || dirname "$(dirname "$BIND")")"
 echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL"
 ```
@@ -73,7 +72,7 @@ echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL"
 ## 3. Validate project access
 
 ```bash
-qapi GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1
+quetrex-api GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1
 ```
 
 ---
@@ -156,21 +155,21 @@ step 6 means freshly imported keys appear in the in-memory map.
 
 **SECRET SAFETY (same invariant as the rest of this command):** the scan and import NEVER
 print a secret value or the bearer; the only value-derived output is a masked last-4 tail.
-Each value flows **file → `node` → `qapi` → vault** — never echoed, never on argv as a
+Each value flows **file → `node` → `quetrex-api` → vault** — never echoed, never on argv as a
 value, never to disk/logs. No `set -x`, no `curl -v`. `unset` after use.
 
-Use the shared helpers (identical pattern to `/q-init` step 5b). `qx_env_scan`
+Use the shared helpers (identical pattern to `/quetrex:init` step 5b). `quetrex-api env-scan`
 parses `$REPO_ROOT/.env`, `.env.local`, `.env.*` (skipping `*.example`/`*.sample`) in
 `node`, filters to relevant credential names, **normalizes `FLY_TOKEN` → `FLY_API_TOKEN`**
 (the exact name step 8 looks up), and emits `FILE<TAB>RAWNAME<TAB>CANON<TAB>****<last4>`:
 
 ```bash
-SCAN="$(qx_env_scan "$REPO_ROOT")"
+SCAN="$(quetrex-api env-scan "$REPO_ROOT")"
 ```
 
 If `SCAN` is non-empty, show the discovered entries by **CANON name + masked last-4 only**
 and ask: *"Import these N keys into the project's vault before deploying?"* On **yes**,
-import each with `qx_secret_put_from_env` (value read inside `node`, PUT to
+import each with `quetrex-api secret-put` (value read inside `node`, PUT to
 `/api/projects/$QX_PROJECT_CODE/secrets`); on **no**, skip:
 
 ```bash
@@ -178,7 +177,7 @@ if [ -n "$SCAN" ]; then
   while IFS=$'\t' read -r ENVFILE RAWNAME CANON MASK; do
     [ -n "$CANON" ] || continue
     # (Ask once up front; only loop here if the user said yes.)
-    if qx_secret_put_from_env "$ENVFILE" "$RAWNAME" "$CANON"; then
+    if quetrex-api secret-put "$ENVFILE" "$RAWNAME" "$CANON"; then
       echo "Imported $CANON ($MASK)"
     else
       echo "Failed to import $CANON — set it at $QX_KANBAN_URL/keys" >&2
@@ -195,7 +194,7 @@ the vault nor local env. Never re-prompt for a credential just imported.
 ## 6. Fetch vault secrets IN-MEMORY
 
 ```bash
-SECRETS_JSON="$(qapi POST "/api/projects/$QX_PROJECT_CODE/secrets/export")" || exit 1
+SECRETS_JSON="$(quetrex-api POST "/api/projects/$QX_PROJECT_CODE/secrets/export")" || exit 1
 ```
 
 `SECRETS_JSON` is a `{NAME:value}` map held only in this process as a **plain, NON-exported**
@@ -225,7 +224,7 @@ from the **masked** endpoint (names only — values are masked server-side and w
 them anyway):
 
 ```bash
-MASKED="$(qapi GET "/api/projects/$QX_PROJECT_CODE/secrets")" || exit 1
+MASKED="$(quetrex-api GET "/api/projects/$QX_PROJECT_CODE/secrets")" || exit 1
 printf '%s' "$MASKED" | node -e '
   let d="";
   process.stdin.on("data", c => { d += c; });
@@ -316,7 +315,7 @@ _FLY_TOK="$(printf '%s' "$SECRETS_JSON" | node -e '
 ')"
 
 if [ -z "$_FLY_TOK" ]; then
-  echo "No FLY_API_TOKEN in the project vault or this repo's local env files (step 5b checked .env*). Set FLY_API_TOKEN at $QX_KANBAN_URL/keys, then re-run /q-deploy." >&2
+  echo "No FLY_API_TOKEN in the project vault or this repo's local env files (step 5b checked .env*). Set FLY_API_TOKEN at $QX_KANBAN_URL/keys, then re-run /quetrex:deploy." >&2
   unset SECRETS_JSON _FLY_TOK
   exit 1
 fi
@@ -480,7 +479,7 @@ On a successful deploy, capture the URL (`fly status --app "$APP"` or the known
 they say yes:
 
 ```bash
-TASKS="$(qapi GET "/api/tasks?project=$QX_PROJECT_CODE")" || exit 1
+TASKS="$(quetrex-api GET "/api/tasks?project=$QX_PROJECT_CODE")" || exit 1
 node -e '
   let a; try{a=JSON.parse(process.argv[1])}catch{process.exit(1)}
   const list=Array.isArray(a)?a:(a.tasks||[]);
@@ -492,7 +491,7 @@ For each merged task, PATCH it to deployed:
 
 ```bash
 PAYLOAD="$(node -e 'process.stdout.write(JSON.stringify({status:"deployed"}))')"
-qapi PATCH "/api/tasks/$ID" "$PAYLOAD" >/dev/null || true
+quetrex-api PATCH "/api/tasks/$ID" "$PAYLOAD" >/dev/null || true
 ```
 
 Report which tasks advanced.
@@ -515,7 +514,7 @@ Report which tasks advanced.
 - The only thing written to disk is the **non-secret** `deploy` config (including the
   `runtimeSecrets` allowlist — names only) in `.quetrex/project.json`.
 - The step 5b env-cred import never prints a secret value or the bearer; masked last-4 is
-  the only value-derived output; values flow file→`node`→`qapi`→vault and are never on
+  the only value-derived output; values flow file→`node`→`quetrex-api`→vault and are never on
   argv as a value, never to disk/logs; the body var is `unset` after each import.
 - **Rollback** uses the same `_FLY_TOK` (inline per-command, never echoed); `fly releases`
   prints release metadata only (never a secret); the prior image ref is non-secret and parsed
@@ -536,11 +535,11 @@ Report which tasks advanced.
   env do you stop with the "set FLY_API_TOKEN at <kanban>/keys" message.
 - `fly status` unreachable → stop before deploy; scrub vars.
 - Env arg not in config → ask the user to pick a valid environment.
-- **Rollback** (`/q-deploy rollback [env]`) → skip the runtime-secret allowlist and secret push;
+- **Rollback** (`/quetrex:deploy rollback [env]`) → skip the runtime-secret allowlist and secret push;
   list releases, resolve the previous image, **confirm with the user before acting**, then
   `fly deploy --image <prev> --strategy rolling`. If the previous image can't be resolved,
   show `fly releases` and ask the user to paste the image ref — never guess. Do not advance
   task status on a rollback.
-- Any `qapi` or resolver non-zero exit → the helper already printed the correct message.
-- Never print or echo the bearer token or any vault secret. Never run `set -x` around `qapi`
+- Any `quetrex-api` or resolver non-zero exit → the helper already printed the correct message.
+- Never print or echo the bearer token or any vault secret. Never run `set -x` around `quetrex-api`
   or `fly`.

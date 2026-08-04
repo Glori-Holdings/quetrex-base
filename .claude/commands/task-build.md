@@ -1,5 +1,5 @@
 ---
-description: Vet, classify, and build one Quetrex task end to end. Splits at the human scope gate — a PLAN half that produces the architect's plan and asks for approval, and a BUILD half that a routine can run unattended from the approved payload. Single unit for a feature/bug, or one-level epic decomposition with a DAG of child workflows that auto-merge into a per-epic integration branch. Usage: /q-task-build SMA-1 [--build-only|--tick]
+description: Vet, classify, and build one Quetrex task end to end. Splits at the human scope gate — a PLAN half that produces the architect's plan and asks for approval, and a BUILD half that a routine can run unattended from the approved payload. Single unit for a feature/bug, or one-level epic decomposition with a DAG of child workflows that auto-merge into a per-epic integration branch. Usage: /quetrex:task-build SMA-1 [--build-only|--tick]
 argument-hint: <TASK-ID like SMA-1> [--build-only | --tick]
 ---
 
@@ -19,20 +19,21 @@ in conversation.
 
 **Modes**
 
-- `/q-task-build SMA-1` — plan half → scope gate → build half on approval.
-- `/q-task-build SMA-1 --build-only` — build half **only**, against an already-approved
+- `/quetrex:task-build SMA-1` — plan half → scope gate → build half on approval.
+- `/quetrex:task-build SMA-1 --build-only` — build half **only**, against an already-approved
   payload. This is the entry point an automated trigger uses; it refuses to run if the
   payload is missing or unapproved.
-- `/q-task-build SMA-1 --tick` — run exactly **one** epic dispatch tick and exit. Used by
+- `/quetrex:task-build SMA-1 --tick` — run exactly **one** epic dispatch tick and exit. Used by
   `/loop` (step 6B); harmless to run by hand.
 
 THE DEV PIPELINE itself is defined **once** in `.claude/lib/dev-pipeline.md` and is **not**
 restated here. This command is the lean intake + gate + dispatcher; the heavy work runs in
 background Workflow-tool runs so the terminal stays free.
 
-All kanban I/O goes through the token-safe helpers in `.claude/lib/quetrex-api.sh`
-(`qapi` + the `qx_*` wrappers): never echo the token, never `set -x` / `curl -v` around
-`qapi`, always build JSON with `node` / `JSON.stringify`.
+All kanban I/O goes through the token-safe `quetrex-api` tool (shipped on the plugin's PATH —
+raw `quetrex-api <METHOD> <path> [body]` calls plus the `quetrex-api task-*` / `create-child` /
+`add-dep` / `is-unblocked` subcommands): never echo the token, never `set -x` / `curl -v` around
+`quetrex-api`, always build JSON with `node` / `JSON.stringify`.
 
 Argument: `$ARGUMENTS` is a task identifier (`SMA-1`) plus an optional mode flag.
 
@@ -48,30 +49,29 @@ case "$ARGUMENTS" in *--build-only*) MODE="build" ;; *--tick*) MODE="tick" ;; es
 
 If `TASK_ID` is empty, print usage and stop:
 
-> Usage: `/q-task-build SMA-1 [--build-only | --tick]`
+> Usage: `/quetrex:task-build SMA-1 [--build-only | --tick]`
 
-Source the helper and resolve context in one bash block — the helper owns all auth/access
-messaging; do not reinvent it. Resolve the **branch prefix** here too: every branch this
-command constructs uses it.
+Resolve context in one bash block — the `quetrex-api` tool (shipped on the plugin's PATH) owns
+all auth/access messaging; do not reinvent it. Resolve the **branch prefix** here too: every
+branch this command constructs uses it.
 
 ```bash
-source ~/.claude/lib/quetrex-api.sh
-resolve_auth    || exit 1      # prints "Run /q-login" on failure
-resolve_project || exit 1      # prints "Run /q-init" on failure
-qapi GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1   # validate access
-TASK="$(qapi GET "/api/tasks/$TASK_ID")" || exit 1
+QX_KANBAN_URL="$(quetrex-api kanban-url)"     || exit 1   # prints "Run /quetrex:login" on failure
+QX_PROJECT_CODE="$(quetrex-api project-code)" || exit 1   # prints "Run /quetrex:init" on failure
+quetrex-api GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1   # validate access
+TASK="$(quetrex-api GET "/api/tasks/$TASK_ID")" || exit 1
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 # Branch prefix: NEVER hardcode "feature/". A repo whose push rules cannot be loosened
 # sets "branchPrefix": "claude/" in .quetrex/project.json, and every branch below follows.
-BRANCH_PREFIX="$(_qx_json_get "$REPO_ROOT/.quetrex/project.json" branchPrefix 2>/dev/null || echo 'feature/')"
+BRANCH_PREFIX="$(quetrex-api json-get "$REPO_ROOT/.quetrex/project.json" branchPrefix 2>/dev/null || echo 'feature/')"
 [ -n "$BRANCH_PREFIX" ] || BRANCH_PREFIX="feature/"
 
 echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL   branchPrefix=$BRANCH_PREFIX"
 ```
 
-If any resolver or `qapi` call exits non-zero, the helper already printed the correct
-message (401 → `Run /q-login`; 403/404 → `No access — contact your administrator`; other →
+If any context fetch or `quetrex-api` call exits non-zero, the tool already printed the correct
+message (401 → `Run /quetrex:login`; 403/404 → `No access — contact your administrator`; other →
 `Quetrex API error (HTTP <code>)`). Just stop.
 
 **If `MODE` is `build` or `tick`, skip straight to Step 5.** Those modes read the payload
@@ -91,7 +91,7 @@ node -e '
 **Actionability guard.**
 
 - Actionable starting statuses: `backlog`, `queued`. A `needs_clarity` task should go
-  through `/q-task-rework` instead — say so and stop.
+  through `/quetrex:task-rework` instead — say so and stop.
 - If the task is already `pr_ready` / `merged` / `deployed` / `complete`, say so and
   **stop** (avoid duplicate work).
 - If the task is already `in_progress`:
@@ -101,10 +101,10 @@ node -e '
     exposes child tasks) → this is a **RESUME**, not duplicate work. Skip the plan half
     entirely (decomposition and approval are one-time and already done) and go to
     **Step 5** in build mode over the existing children. This is the supported path for
-    draining dependents that a `/q-task-rework` of a failed child has since unblocked.
+    draining dependents that a `/quetrex:task-rework` of a failed child has since unblocked.
 - If the task is an **epic child** (`parentTaskId` is set), say: "this is a child of
-  `<EPIC-ID>`; run `/q-task-build` on the epic, or `/q-task-rework` on the child" and
-  **stop**. `/q-task-build` operates on standalone tasks and epics, not lone children.
+  `<EPIC-ID>`; run `/quetrex:task-build` on the epic, or `/quetrex:task-rework` on the child" and
+  **stop**. `/quetrex:task-build` operates on standalone tasks and epics, not lone children.
 
 ---
 
@@ -113,11 +113,11 @@ node -e '
 - Read the task **and the repo code** (Glob / Grep / Read) to ground your understanding of
   what the change actually touches.
 - If the description is unclear or underspecified, **ask the user** sharp clarifying
-  questions (or suggest `/q-task-refine SMA-1`) and wait. Do **not** guess on genuine gaps.
+  questions (or suggest `/quetrex:task-refine SMA-1`) and wait. Do **not** guess on genuine gaps.
 - **Classify** the task as **Project / Feature / Bug** and persist the label:
 
 ```bash
-qx_task_type "$TASK_ID" "<project|feature|bug>"
+quetrex-api task-type "$TASK_ID" "<project|feature|bug>"
 ```
 
 ---
@@ -262,7 +262,7 @@ node -e '
 # a) Create each child; write its returned identifier back into the payload immediately.
 #    The label -> id map is persisted per child, not batched at the end, so an interruption
 #    mid-materialization leaves a payload that still describes exactly what exists.
-CHILD_ID="$(qx_create_child "$TASK_ID" "<child title>" "<child desc>")" || exit 1
+CHILD_ID="$(quetrex-api create-child "$TASK_ID" "<child title>" "<child desc>")" || exit 1
 node -e '
   const fs=require("fs");
   const [file,label,id]=process.argv.slice(1);
@@ -281,7 +281,7 @@ node -e '
   fs.writeFileSync(process.argv[1], JSON.stringify(p,null,2)+"\n");
   for(const [a,b] of p.edgeIds) console.log(a+"\t"+b);
 ' "$PAYLOAD" | while IFS=$'\t' read -r CH DEP; do
-  qx_add_dep "$CH" "$DEP" || exit 1
+  quetrex-api add-dep "$CH" "$DEP" || exit 1
 done
 ```
 
@@ -290,8 +290,8 @@ the `worktree-workflow` skill (use `git -C` so the enforce-branch hook sees the 
 Finally set the **epic** itself to `in_progress` and post a summary comment:
 
 ```bash
-qx_task_status "$TASK_ID" in_progress
-qx_task_comment "$TASK_ID" "Scope approved. Epic decomposed into N children with M dependency edges; integration branch ${BRANCH_PREFIX}$TASK_ID created. Dispatching ready children."
+quetrex-api task-status "$TASK_ID" in_progress
+quetrex-api task-comment "$TASK_ID" "Scope approved. Epic decomposed into N children with M dependency edges; integration branch ${BRANCH_PREFIX}$TASK_ID created. Dispatching ready children."
 ```
 
 ---
@@ -305,7 +305,7 @@ path. **Read the payload; carry nothing in from conversation.**
 
 ```bash
 PAYLOAD="$REPO_ROOT/.quetrex/build/$TASK_ID.json"
-[ -f "$PAYLOAD" ] || { echo "No build payload for $TASK_ID — run /q-task-build $TASK_ID to plan and approve scope first." >&2; exit 1; }
+[ -f "$PAYLOAD" ] || { echo "No build payload for $TASK_ID — run /quetrex:task-build $TASK_ID to plan and approve scope first." >&2; exit 1; }
 node -e '
   const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
   if(!p.scopeApprovedAt){ console.error("Scope for "+p.task+" has NOT been approved — refusing to build."); process.exit(1); }
@@ -362,7 +362,7 @@ loop at the payload's `tickIntervalMinutes` — **2–5 minutes**. Children are 
 units; anything faster is pure API noise, and anything slower wastes the DAG's parallelism.
 
 ```
-/loop 3m /q-task-build <EPIC-ID> --tick
+/loop 3m /quetrex:task-build <EPIC-ID> --tick
 ```
 
 That is a slash command, not shell. Stop the loop at the fixpoint (step 4 below).
@@ -373,7 +373,7 @@ That is a slash command, not shell. Stop the loop at the fixpoint (step 4 below)
    `DONE_FOR_UNBLOCKING = {merged, deployed, complete}`:
 
    ```bash
-   qx_is_unblocked "<child-id>"   # exit 0 = ready, 1 = still blocked
+   quetrex-api is-unblocked "<child-id>"   # exit 0 = ready, 1 = still blocked
    ```
 
    Prefer the server's `isBlocked` flag; the helper falls back to checking dependency
@@ -395,7 +395,7 @@ That is a slash command, not shell. Stop the loop at the fixpoint (step 4 below)
 3. **Reap.** A child whose pipeline reached review-approved + green has had its PR
    squash-auto-merged into the integration branch — the one place auto-merge is allowed,
    because it merges into the integration branch, **never** `main`. Set it `merged`
-   (`qx_task_status "<child-id>" merged`); that unblocks its dependents, which the next
+   (`quetrex-api task-status "<child-id>" merged`); that unblocks its dependents, which the next
    tick picks up. A child the engine sent to `needs_clarity` stays there: its
    **independent siblings keep running**, its **dependents WAIT** — never auto-`needs_clarity`
    a dependent by association.
@@ -421,7 +421,7 @@ you never parse their stdout.
 building toward `pr_ready`. The pipeline's terminus is an open PR. Whether it then merges
 is decided by the reviewer's verdict and enforced by `merge-gate.sh` — `AUTO_MERGE` pinned
 to HEAD with a green ledger permits the squash merge; `REWORK` / `ESCALATE_HUMAN` sends the
-task to `needs_clarity` for `/q-task-rework`. There is **no `/q-task-merge` command**; do
+task to `needs_clarity` for `/quetrex:task-rework`. There is **no `/quetrex:task-merge` command**; do
 not tell the user to run one.
 
 **Epic, at the fixpoint.** Partition the children:
@@ -431,14 +431,14 @@ not tell the user to run one.
   `gh pr create --base main --head "${BRANCH_PREFIX}<EPIC-ID>"`, so the merge gate has a
   PR to act on. That PR is the epic's terminus; it merges under the same `merge-gate.sh`
   rules as any other. Leave the epic `in_progress` until it merges, then
-  `qx_task_status <EPIC-ID> merged`. (Every child branch was deleted on its auto-merge, so
+  `quetrex-api task-status <EPIC-ID> merged`. (Every child branch was deleted on its auto-merge, so
   the integration branch is the only one carrying the epic id.)
 
 - **Any child `needs_clarity`, or blocked-waiting on one** → do **NOT** open the
   integration PR. Report exactly which children **failed** and which are
-  **blocked-waiting** on a failed dependency. The user runs **`/q-task-rework <child>`** on
+  **blocked-waiting** on a failed dependency. The user runs **`/quetrex:task-rework <child>`** on
   each failure; on pass it auto-merges into the integration branch and **unblocks** its
-  dependents. Re-running **`/q-task-build <EPIC-ID>`** then resumes the dispatcher (Step 1
+  dependents. Re-running **`/quetrex:task-build <EPIC-ID>`** then resumes the dispatcher (Step 1
   resume path → Step 5) and drains the now-eligible dependents. Only when every child is
   `merged` is the integration → main PR opened. The epic stays `in_progress` throughout.
 
@@ -449,10 +449,10 @@ output inline.
 
 ## Error-handling rules
 
-- Any `qapi` or resolver non-zero exit → the helper already printed the correct
+- Any `quetrex-api` or resolver non-zero exit → the helper already printed the correct
   user-facing message. Just stop; do not add your own auth/access explanation.
 - Non-actionable status, or an epic-child argument → report and stop (per Step 1).
-- Underspecified task → ask sharp questions or suggest `/q-task-refine`; do not guess.
+- Underspecified task → ask sharp questions or suggest `/quetrex:task-refine`; do not guess.
 - **Never build an unapproved payload.** No `scopeApprovedAt`, no build — for a single
   unit as much as for an epic.
 - Epic: create **nothing** until the graph is DAG-validated **and** the user explicitly
@@ -460,5 +460,5 @@ output inline.
 - A failed child must never cascade: independent siblings keep running, dependents wait,
   the dispatcher never thrashes. Stop the `/loop` at the fixpoint.
 - Never hardcode `feature/` — construct every branch from `branchPrefix`.
-- Never print or echo the bearer token. Never run `set -x` / `curl -v` around `qapi`.
+- Never print or echo the bearer token. Never run `set -x` / `curl -v` around `quetrex-api`.
   Build every JSON payload with `node` / `JSON.stringify`, never `echo`.

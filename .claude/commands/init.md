@@ -1,5 +1,5 @@
 ---
-description: Link this repo to a Quetrex project (writes ./.quetrex/project.json with its branchPrefix) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, deploy the committed per-project build gates, union in the permissions the pipeline needs, generate .worktreeinclude, offer /install-github-app, offer to import local env creds into the vault, open a PR). Usage: /q-init [project name]
+description: Link this repo to a Quetrex project (writes ./.quetrex/project.json with its branchPrefix) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, deploy the committed per-project build gates, union in the permissions the pipeline needs, generate .worktreeinclude, offer /install-github-app, offer to import local env creds into the vault, open a PR). Usage: /quetrex:init [project name]
 argument-hint: "[project name — only used when the repo is not yet linked]"
 ---
 
@@ -23,7 +23,7 @@ stale old-Quetrex project commands/skills, and only the specific ones the user
 **confirms** (step 4c) — never auto-deleted. Secrets are never prompted for here — they
 live at `dash.quetrex.com/keys`.
 
-**Token safety:** never echo or print the bearer token. The helper's `qapi` injects
+**Token safety:** never echo or print the bearer token. The helper's `quetrex-api` injects
 it via a `0600` temp config and never exposes it. Build all JSON with
 `node` / `JSON.stringify`, never with `echo`. No `set -x`, no `curl -v`.
 
@@ -31,11 +31,11 @@ it via a `0600` temp config and never exposes it. Build all JSON with
 
 ## 1. Resolve auth
 
-Run a single bash block. The helper owns all auth messaging — do not reinvent it.
+Run a single bash block. The `quetrex-api` tool (shipped on the plugin's PATH) owns all auth
+messaging — do not reinvent it.
 
 ```bash
-source ~/.claude/lib/quetrex-api.sh
-resolve_auth || exit 1   # prints "Run /q-login" on miss/expiry
+QX_KANBAN_URL="$(quetrex-api kanban-url)" || exit 1   # prints "Run /quetrex:login" on miss/expiry
 ```
 
 If it fails, surface its message verbatim and stop. `QX_KANBAN_URL` is now set from
@@ -45,7 +45,7 @@ If it fails, surface its message verbatim and stop. `QX_KANBAN_URL` is now set f
 
 ## 2. Detect an existing binding
 
-Walk up from `$PWD` for `.quetrex/project.json` (the same walk `resolve_project`
+Walk up from `$PWD` for `.quetrex/project.json` (the same walk `quetrex-api project-code`
 performs). Also locate the repo root (the directory containing `.git`) for later
 staging.
 
@@ -68,12 +68,12 @@ Do **not** re-create the binding and do **not** prompt for a name or POST
 `/api/projects`. Read the code, announce it, and verify access:
 
 ```bash
-CODE="$(_qx_json_get "$BIND" projectCode)" || { echo "Binding is unreadable — fix or remove $BIND and re-run." >&2; exit 1; }
+CODE="$(quetrex-api json-get "$BIND" projectCode)" || { echo "Binding is unreadable — fix or remove $BIND and re-run." >&2; exit 1; }
 echo "This repo is linked to project $CODE"
-qapi GET "/api/projects/$CODE" >/dev/null || exit 1   # helper prints 401→login, 403/404→no access
+quetrex-api GET "/api/projects/$CODE" >/dev/null || exit 1   # helper prints 401→login, 403/404→no access
 ```
 
-A non-zero `qapi` exit means the helper already printed the correct message — stop.
+A non-zero `quetrex-api` exit means the helper already printed the correct message — stop.
 On success, proceed to **step 4 (adoption)** so re-runs still clean stale refs and
 can open a PR if anything changed.
 
@@ -100,10 +100,10 @@ project be called?"* Capture their answer into `NAME` before continuing.
 
 ```bash
 PAYLOAD="$(node -e 'process.stdout.write(JSON.stringify({name:process.argv[1]}))' "$NAME")"
-if ! RESP="$(qapi POST /api/projects "$PAYLOAD")"; then
-  # qapi already printed a message. The most common failure here is 403 — project
+if ! RESP="$(quetrex-api POST /api/projects "$PAYLOAD")"; then
+  # quetrex-api already printed a message. The most common failure here is 403 — project
   # creation currently requires admin. Give the clearer, action-specific guidance.
-  echo "Creating a project requires admin — ask a super_admin to create it, or get added to an existing project, then re-run /q-init." >&2
+  echo "Creating a project requires admin — ask a super_admin to create it, or get added to an existing project, then re-run /quetrex:init." >&2
   exit 1
 fi
 CODE="$(node -e '
@@ -533,8 +533,8 @@ burns all three bounded self-heal attempts "fixing" code that was never broken, 
 artefacts of that flailing are hardcoded credentials and weakened tests. This file is the
 cheapest fix in the adoption.
 
-The file list is already known: step 5b's `qx_env_scan` enumerates this repo's env files.
-If 5b has not run yet, call `qx_env_scan "$REPO_ROOT"` here — it is read-only and safe to
+The file list is already known: step 5b's `quetrex-api env-scan` enumerates this repo's env files.
+If 5b has not run yet, call `quetrex-api env-scan "$REPO_ROOT"` here — it is read-only and safe to
 run twice. **Take only the FILE column** (the masked-value column never leaves that step):
 
 ```bash
@@ -542,7 +542,7 @@ ENV_FILES=()
 while IFS=$'\t' read -r ENVFILE _RAW _CANON _MASK; do
   [ -n "$ENVFILE" ] || continue
   ENV_FILES+=("${ENVFILE#$REPO_ROOT/}")
-done <<< "$(qx_env_scan "$REPO_ROOT")"
+done <<< "$(quetrex-api env-scan "$REPO_ROOT")"
 ```
 
 Write the union of those, plus any local Claude settings, **append-only and idempotent** —
@@ -550,7 +550,7 @@ never drop an entry the user added:
 
 ```bash
 WTI="$REPO_ROOT/.worktreeinclude"
-# ENV_FILES = the FILE column of qx_env_scan output (see 5b), de-duplicated and made
+# ENV_FILES = the FILE column of quetrex-api env-scan output (see 5b), de-duplicated and made
 # repo-relative. Add local-only config that every worktree also needs.
 node -e '
   const fs=require("fs");
@@ -618,21 +618,20 @@ turns the bare "set them in the dashboard" pointer into a one-keystroke import.
 
 **SECRET SAFETY (the invariant of this step):** the scan and import NEVER print a secret
 value or the bearer token. The only value-derived output is a masked last-4 tail. Each
-value flows **file → `node` → `qapi` → vault** and is never echoed, never on argv as a
+value flows **file → `node` → `quetrex-api` → vault** and is never echoed, never on argv as a
 value, never written to disk or logs. No `set -x`, no `curl -v`. `unset` after use.
 
-Requires the project to be linked: ensure `QX_PROJECT_CODE` is resolved (it is, from this
-command's flow once linked — otherwise `resolve_project`).
+Requires the project to be linked: `quetrex-api secret-put` resolves the project code itself
+(it walks up for `.quetrex/project.json`), so the repo just needs to be linked first.
 
-**1. Scan.** Use the shared `qx_env_scan` helper, which reads `$REPO_ROOT/.env`,
+**1. Scan.** Use the shared `quetrex-api env-scan` helper, which reads `$REPO_ROOT/.env`,
 `.env.local`, and `.env.*` (skipping `*.example`/`*.sample`), parses them in `node`
 (handles `KEY=value`, `export KEY=…`, quotes, `#` comments), filters to relevant
 credential names, normalizes variants (notably `FLY_TOKEN` → `FLY_API_TOKEN`), and emits
 `FILE<TAB>RAWNAME<TAB>CANON<TAB>****<last4>` — masked tail only, never the value:
 
 ```bash
-source ~/.claude/lib/quetrex-api.sh   # already sourced earlier; harmless to re-source
-SCAN="$(qx_env_scan "$REPO_ROOT")"
+SCAN="$(quetrex-api env-scan "$REPO_ROOT")"
 if [ -z "$SCAN" ]; then
   echo "No local env credentials found to import."
 fi
@@ -642,14 +641,14 @@ fi
 + masked last-4 only** (e.g. `FLY_API_TOKEN … ****CDEF`), then ask:
 *"Import these N keys into the project's vault?"* On **no**, skip the import. On **yes**,
 import each one — read the value inside `node` straight from its file via the shared
-`qx_secret_put_from_env` helper (PUT `/api/projects/$QX_PROJECT_CODE/secrets` with
+`quetrex-api secret-put` helper (PUT `/api/projects/$QX_PROJECT_CODE/secrets` with
 `{name,value}`); the value is never visible to the shell:
 
 ```bash
 # Iterate the scan lines; FILE/RAWNAME/CANON are non-secret, the value stays inside node.
 while IFS=$'\t' read -r ENVFILE RAWNAME CANON MASK; do
   [ -n "$CANON" ] || continue
-  if qx_secret_put_from_env "$ENVFILE" "$RAWNAME" "$CANON"; then
+  if quetrex-api secret-put "$ENVFILE" "$RAWNAME" "$CANON"; then
     echo "Imported $CANON ($MASK)"
   else
     echo "Failed to import $CANON — set it at $QX_KANBAN_URL/keys" >&2
@@ -766,7 +765,7 @@ Summarize for the user:
 
 ## Error-handling rules
 
-- Reuse the helper's messaging verbatim: `401 → Run /q-login`,
+- Reuse the helper's messaging verbatim: `401 → Run /quetrex:login`,
   `403/404 → No access — contact your administrator`. The **only** override is the
   create-project 403, where you print the admin-specific hint instead.
 - Never print the bearer token. Build all JSON with `node` / `JSON.stringify`.
