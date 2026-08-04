@@ -59,17 +59,15 @@ Follow the exact stage order and gates .claude/lib/dev-pipeline.md defines — a
 developer(s), QA, reviewer, git-workflow — against base branch {{BASE_BRANCH}} / branch
 prefix {{BRANCH_PREFIX}}. The architect already ran locally and produced
 /tmp/plan-{{TASK}}.json (PLAN_ARTIFACT); resume from developer(s) — do not re-run the
-architect stage. Two supported mechanisms, in preference order:
-
- a) If the Workflow tool is available in this session, dispatch the remaining stages
-    (developer(s), qa, reviewer, git-workflow) exactly as dev-pipeline.md describes for a
-    local session running THE DEV PIPELINE with PIPELINE_RESUME_FROM=developers.
- b) If the Workflow tool is not available here, read each stage's own agent file directly
-    off disk (.claude/agents/developer.md, qa.md, reviewer.md, security-reviewer.md when the
-    plan sets security_review_required, git-workflow.md) and run that stage yourself as a
-    subagent invocation, in that exact order. Do not collapse the pipeline into one
-    undifferentiated pass — each stage is a distinct read of its own agent file, with its
-    own inputs, its own gate, and its own artifact under .quetrex/.
+architect stage. Spawn the remaining stages (developer(s), qa, reviewer, git-workflow) via
+the Task tool — one dispatch per stage, in that exact order, each reading its own agent file
+off disk (.claude/agents/developer.md, qa.md, reviewer.md, security-reviewer.md when the
+plan sets security_review_required, git-workflow.md) as its instructions. If subagent
+dispatch is unavailable in this cloud session (the Task tool is absent or fails), run the
+stages sequentially yourself in one session instead, applying each role's discipline in that
+exact order — this single-session mode is proven to produce a correct PR. Either way, do not
+collapse the pipeline into one undifferentiated pass — each stage is a distinct read of its
+own agent file, with its own inputs, its own gate, and its own artifact under .quetrex/.
 
 ### 4. The five hardening rules — non-negotiable, they govern every stage above
  1. **Commit-as-you-go.** Commit each coherent slice of work the moment it is a complete,
@@ -121,8 +119,9 @@ API from here.
   `RemoteTrigger` body that wraps it — the CCR authenticates to GitHub with its own
   credentials, never one handed to it here.
 - `allowed_tools` on the `RemoteTrigger` body stays `["Bash", "Read", "Write", "Edit",
-  "Glob", "Grep"]` — the minimum this pipeline needs. Do not widen it to grant broader
-  shell or network access than the build requires.
+  "Glob", "Grep", "Task"]` — the minimum this pipeline needs, `Task` included so the
+  session can dispatch the architect/developer/qa/reviewer stages as subagents. Do not
+  widen it further to grant broader shell or network access than the build requires.
 - The spec branch (`{{SPEC_BRANCH}}`) carries only `.quetrex/plan/{{TASK}}.json` — the plan
   itself must never carry a credential; it is architecture and acceptance criteria, nothing
   the `security_surface` classifies as secret.

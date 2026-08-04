@@ -418,7 +418,7 @@ use the filled text verbatim as the event's `message.content`. Then call the too
       "session_context": {
         "model": "claude-sonnet-5",
         "sources": [{ "git_repository": { "url": "<REPO_URL>" } }],
-        "allowed_tools": ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+        "allowed_tools": ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Task"]
       },
       "events": [{
         "data": {
