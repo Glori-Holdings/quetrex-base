@@ -600,6 +600,168 @@ it. If they decline, record it and move on.
 
 ---
 
+## 4h. Pin the Quetrex engine in `enabledPlugins`
+
+Cloud routines and every teammate read which engine to run from the **committed**
+`.claude/settings.json` `enabledPlugins`, not from any one machine's local plugin cache.
+Write a **version-pinned** entry so the whole repo (and every routine) resolves the same
+engine:
+
+- `"quetrex@quetrex": true` — the command layer is enabled (a plain `true`; the command
+  surface is not version-gated per repo).
+- `"quetrex-factory@quetrex": "<concrete version>"` — a **concrete version string**, never a
+  floating `true`. Resolve the latest published version from the marketplace manifest on
+  GitHub raw (there is no version-check API):
+
+```bash
+MARKET_URL="https://raw.githubusercontent.com/Glori-Holdings/quetrex-plugins/main/.claude-plugin/marketplace.json"
+LATEST_FACTORY="$(curl -fsS --max-time 8 "$MARKET_URL" 2>/dev/null | node -e '
+  let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+    let o; try{o=JSON.parse(s)}catch{process.exit(0)}
+    const p=(o.plugins||[]).find(x=>x&&x.name==="quetrex-factory");
+    process.stdout.write(p&&p.version?String(p.version):"");
+  })' 2>/dev/null)"
+```
+
+Merge — never clobber — into `$REPO_ROOT/.claude/settings.json`, preserving every other
+`enabledPlugins` entry and every other settings key. Only write a concrete factory pin
+when the version resolved; if the marketplace was unreachable, still enable `quetrex` and
+tell the user to run `/quetrex:update` once online to write the concrete engine pin (never
+pin a floating `true`):
+
+```bash
+node -e '
+  const fs=require("fs"), path=require("path");
+  const [file, latestFactory] = process.argv.slice(1);
+  let o={}; try{o=JSON.parse(fs.readFileSync(file,"utf8"))}catch{}
+  o.enabledPlugins = o.enabledPlugins || {};
+  const before = JSON.stringify(o.enabledPlugins);
+  o.enabledPlugins["quetrex@quetrex"] = true;
+  if (latestFactory) {
+    o.enabledPlugins["quetrex-factory@quetrex"] = latestFactory;   // concrete pin, never true
+  }
+  if (JSON.stringify(o.enabledPlugins) === before) { console.log("enabledPlugins already current."); process.exit(0); }
+  fs.mkdirSync(path.dirname(file), {recursive:true});
+  fs.writeFileSync(file, JSON.stringify(o, null, 2) + "\n");
+  console.log("Pinned enabledPlugins: quetrex@quetrex=true"
+    + (latestFactory ? ", quetrex-factory@quetrex=" + latestFactory : " (factory pin deferred — run /quetrex:update online)"));
+' "$REPO_ROOT/.claude/settings.json" "$LATEST_FACTORY"
+```
+
+Record whether the pin was written so step 6 stages `.claude/settings.json` and step 7
+reports it.
+
+---
+
+## 4i. Ensure the committed `.mcp.json` kanban broker
+
+Cloud sessions reach the kanban through the **MCP broker**, and a routine only ever sees
+what is **committed** — so the broker registration must live in the repo's own `.mcp.json`,
+not any machine-local MCP config. Ensure `$REPO_ROOT/.mcp.json` registers the kanban broker
+under `mcpServers`, **merged non-destructively** (never clobber an existing server the repo
+already registers):
+
+```bash
+node -e '
+  const fs=require("fs");
+  const [file, kanbanUrl] = process.argv.slice(1);
+  let o={}; try{o=JSON.parse(fs.readFileSync(file,"utf8"))}catch{}
+  o.mcpServers = o.mcpServers || {};
+  if (o.mcpServers["quetrex-kanban"]) { console.log(".mcp.json already registers the quetrex-kanban broker."); process.exit(0); }
+  o.mcpServers["quetrex-kanban"] = { type: "http", url: kanbanUrl.replace(/\/$/, "") + "/api/mcp" };
+  fs.writeFileSync(file, JSON.stringify(o, null, 2) + "\n");
+  console.log("Registered the quetrex-kanban MCP broker in .mcp.json");
+' "$REPO_ROOT/.mcp.json" "$QX_KANBAN_URL"
+```
+
+The broker authenticates cloud sessions and auto-rotates their credentials; **no secret
+value is written here** — only the endpoint. Record whether `.mcp.json` changed so step 6
+stages it and step 7 reports it.
+
+---
+
+## 4j. One-time legacy cleanup (guarded, reversible, per-machine)
+
+The npm era seeded Quetrex files into the operator's **global** `~/.claude`; the plugin era
+does not. Offer to clean those leftovers **once per machine** — idempotent, allowlist-scoped,
+pristine-only, reversible (quarantine, never hard-delete), and gated by two agreeing agents
+plus a per-item human decision. The deterministic engine ships as the `quetrex-cleanup` tool
+on the plugin's PATH (it keeps its once-per-machine marker under `${CLAUDE_PLUGIN_DATA}`,
+never `~/.claude`, never the repo).
+
+**1. Skip if already offered on this machine:**
+
+```bash
+if quetrex-cleanup already-ran; then
+  echo "Legacy cleanup already offered on this machine — skipping."
+else
+  quetrex-cleanup scan   # read-only TSV: STATUS<TAB>REL<TAB>REASON (empty => nothing to clean)
+fi
+```
+
+If `scan` prints nothing, say *"No npm-era Quetrex artifacts found in ~/.claude."*, run
+`quetrex-cleanup mark-done`, and move on.
+
+**2. Two-agent gate.** When `scan` returns candidates, launch **both** cleanup agents (via
+the Task tool) on the scan output:
+
+- `quetrex-cleanup-proposer` — proposes a per-item KEEP/REMOVE/STRIP plan (conservative,
+  default KEEP).
+- `quetrex-cleanup-auditor` — independently re-inspects each proposed REMOVE/STRIP and
+  **vetoes** anything user-owned or modified.
+
+Only items **both** agents agree are removable proceed. Any disagreement is **escalated to
+the human** as an open question — never auto-resolved.
+
+**3. Per-item human gate.** For each agreed item, ask the user in plain English — *what* the
+item is and *why* it is proposed for removal — and take a **per-item KEEP/REMOVE** decision.
+The default is **KEEP**; the user may decline any single item. Never batch-remove without
+per-item consent.
+
+**4. Apply — reversibly.** For the items the user approved:
+
+```bash
+# APPROVED = the ~/.claude-relative paths the user confirmed for removal.
+quetrex-cleanup quarantine "${APPROVED[@]}"   # MOVES each into ~/.claude/.quetrex-backup-<ts>/
+# For an approved SURGICAL item, strip ONLY Quetrex's own entries (never user content):
+#   quetrex-cleanup strip-settings     # drops Quetrex hook entries + the npm-era statusLine
+#   quetrex-cleanup strip-claudemd     # drops only the @quetrex-doctrine.md import line
+quetrex-cleanup mark-done                     # never offer again on this machine
+```
+
+`secrets.env` is **never removed** — it is only ever flagged so the user knows it is there.
+Everything quarantined stays restorable from the timestamped backup dir the engine prints.
+
+Record what was quarantined / stripped / kept / flagged so step 7 reports it.
+
+---
+
+## 4k. Note the Quetrex workflow in the project `CLAUDE.md`
+
+So anyone (and any agent) opening this repo knows work flows through the board, append a
+one-line note to the project `.claude/CLAUDE.md` — **append-only and idempotent**, never
+rewriting or reordering existing content. Use the same `$REPO_ROOT`-pinned path and
+"never the global file" rule as step 4:
+
+```bash
+PROJ_RULES="$REPO_ROOT/.claude/CLAUDE.md"
+node -e '
+  const fs=require("fs"), path=require("path");
+  const file=process.argv[1];
+  let cur=""; try{cur=fs.readFileSync(file,"utf8")}catch{}
+  if (/This is a Quetrex project/.test(cur)) { console.log("Quetrex note already present."); process.exit(0); }
+  const note = "\n## Quetrex\n\nThis is a Quetrex project — features go through `/quetrex:task-build`, and the guarded pipeline (architect → developers → QA → reviewer → git-workflow) carries each task to a reviewed, merged PR.\n";
+  fs.mkdirSync(path.dirname(file),{recursive:true});
+  fs.writeFileSync(file, cur + (cur && !cur.endsWith("\n") ? "\n" : "") + note);
+  console.log("Appended the Quetrex workflow note to " + file);
+' "$PROJ_RULES"
+```
+
+Record whether the note was appended so step 6 stages `.claude/CLAUDE.md` (already staged)
+and step 7 reports it.
+
+---
+
 ## 5. Point to /keys (never prompt for secrets)
 
 Print exactly:
@@ -698,6 +860,9 @@ git -C "$REPO_ROOT" add .claude/agents/architect.md .claude/agents/developer.md 
 [ -f "$REPO_ROOT/.claude/settings.json" ] && git -C "$REPO_ROOT" add .claude/settings.json 2>/dev/null || true
 [ -f "$REPO_ROOT/.quetrex/verify.json" ]  && git -C "$REPO_ROOT" add .quetrex/verify.json 2>/dev/null || true
 [ -f "$REPO_ROOT/.worktreeinclude" ]      && git -C "$REPO_ROOT" add .worktreeinclude 2>/dev/null || true
+# The committed engine pin (4h) and the kanban MCP broker (4i) — both are read
+# by cloud routines from the repo, so both must be committed.
+[ -f "$REPO_ROOT/.mcp.json" ]             && git -C "$REPO_ROOT" add .mcp.json 2>/dev/null || true
 
 if git -C "$REPO_ROOT" diff --cached --quiet; then
   echo "Nothing to commit — repo already adopted."
@@ -756,6 +921,14 @@ Summarize for the user:
   current"*), and the note that they are git-ignored paths copied into worktrees, never
   committed.
 - **GitHub app** — installed already / offered and accepted / offered and declined.
+- **Engine pin** — the `enabledPlugins` written (`quetrex@quetrex: true` and the concrete
+  `quetrex-factory@quetrex: <version>` pin), or *"already current"*; if the marketplace was
+  unreachable, the note to run `/quetrex:update` once online to write the concrete factory pin.
+- **MCP broker** — whether the `quetrex-kanban` server was registered in `.mcp.json` or was
+  already present (endpoint only — no secret written).
+- **Legacy cleanup** — *"already offered on this machine"*, *"nothing to clean"*, or the
+  per-item outcome (quarantined / stripped / kept / flagged), noting that everything is
+  reversible from the timestamped backup dir and that `secrets.env` was only flagged.
 - **Secrets** — which local env creds were imported into the vault (by CANON name +
   masked last-4, never values), and the `dash.quetrex.com/keys` reminder for any missing
   ones.

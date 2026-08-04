@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# quetrex-cleanup — launcher for the legacy-cleanup engine.
+#
+# WHY A LAUNCHER. In plugin slash-command bash, ${CLAUDE_PLUGIN_ROOT} and
+# ${CLAUDE_PLUGIN_DATA} are UNSET, so a command cannot source a lib by plugin
+# path — but the plugin's bin/ directory IS on PATH, so a bundled executable is
+# callable by name. /quetrex:init therefore invokes `quetrex-cleanup <sub>`.
+# The heavy, safety-critical logic lives in the reviewable lib script; this
+# launcher only resolves that lib RELATIVE TO ITS OWN LOCATION (bin/ and
+# .claude/ are siblings under the plugin root) and execs it, forwarding args.
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENGINE="$SELF_DIR/../.claude/lib/quetrex-legacy-cleanup.sh"
+
+if [ ! -f "$ENGINE" ]; then
+  echo "quetrex-cleanup: engine not found at $ENGINE" >&2
+  exit 2
+fi
+
+exec bash "$ENGINE" "$@"

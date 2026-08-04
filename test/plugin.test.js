@@ -81,7 +81,10 @@ const CORE_COMMANDS = ['deploy', 'init', 'login', 'task-build',
 // quetrex depends_on quetrex-factory, so a copy here would double-register).
 const ENGINE_GUARDS = ['deny-guard.sh', 'secret-scan.sh', 'enforce-branch.sh', 'auto-format.sh'];
 // The command-layer hooks unique to quetrex, which it keeps registering.
-const KEPT_HOOKS = ['session-state.sh', 'workflow-reminder.sh', 'edit-gate.sh'];
+// quetrex-update-check.sh is the one hook the command-layer plugin legitimately
+// owns: a non-blocking SessionStart nudge that a newer engine version exists.
+const KEPT_HOOKS = ['session-state.sh', 'workflow-reminder.sh', 'edit-gate.sh',
+  'quetrex-update-check.sh'];
 
 // --- 1. plugin.json manifest -----------------------------------------------
 check('.claude-plugin/plugin.json parses and carries the v2 identity', () => {
