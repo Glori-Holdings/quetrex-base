@@ -104,9 +104,21 @@ check('plugin.json depends on quetrex-factory (the build engine)', () => {
 check('plugin.json declares custom paths that keep content under .claude/', () => {
   const p = readJson('.claude-plugin/plugin.json');
   assert.deepStrictEqual(p.commands, ['./.claude/commands/']);
-  assert.deepStrictEqual(p.agents, ['./.claude/agents/']);
   assert.deepStrictEqual(p.skills, ['./.claude/skills/']);
   assert.strictEqual(p.hooks, './hooks/hooks.json');
+  // `agents` MUST be individual .md FILE paths — the Claude Code plugin validator
+  // rejects a directory for `agents` (unlike commands/skills, which take a dir).
+  // Derive from the real dir so adding/removing an agent without updating the
+  // manifest fails here — and so the "directory" regression can never come back.
+  const agentFiles = fs.readdirSync(path.join(REPO_ROOT, '.claude/agents'))
+    .filter((f) => f.endsWith('.md'))
+    .map((f) => `./.claude/agents/${f}`)
+    .sort();
+  assert.ok(Array.isArray(p.agents) && p.agents.length > 0, 'agents must be a non-empty array');
+  assert.ok(p.agents.every((a) => a.endsWith('.md')),
+    'agents must be individual .md file paths, not a directory (the plugin validator rejects a dir)');
+  assert.deepStrictEqual([...p.agents].sort(), agentFiles,
+    'every .claude/agents/*.md file must be declared in plugin.json agents (and vice-versa)');
 });
 
 // --- 2. commands are de-prefixed to the plugin namespace -------------------
