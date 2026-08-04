@@ -81,6 +81,25 @@ if [ -f "$HOOKS_JSON" ] && command -v node >/dev/null 2>&1; then
   fi
 fi
 
+# --- 5b. .claude/settings.json wires zero workflow-reminder hooks ------------
+# Regression guard: the change that deleted workflow-reminder.sh and its
+# hooks/hooks.json registration also left a dangling UserPromptSubmit wiring
+# in the repo's OWN .claude/settings.json, which exits 127 on every prompt.
+# This check would have caught that: it goes RED if settings.json ever
+# references workflow-reminder again, under any hook key.
+SETTINGS_JSON="$REPO_ROOT/.claude/settings.json"
+if [ -f "$SETTINGS_JSON" ]; then
+  HITS="$(grep -c 'workflow-reminder' "$SETTINGS_JSON" 2>/dev/null || true)"
+  HITS="${HITS:-0}"
+  if [ "$HITS" -eq 0 ]; then
+    pass ".claude/settings.json contains zero references to workflow-reminder"
+  else
+    fail ".claude/settings.json still references workflow-reminder ($HITS hit(s))"
+  fi
+else
+  fail ".claude/settings.json not found at $SETTINGS_JSON"
+fi
+
 # --- 5. the injected reminder text is absent from the tracked tree -----------
 # Grep the injected text fragment repo-wide (git-tracked files only, so a
 # throwaway local scratch file can't produce a false positive). Assembled from
