@@ -1,5 +1,8 @@
 # Agent Team Protocol
 
+Load this alongside the `quetrex-pipeline` skill when a change is large enough to
+need multiple developers working in parallel.
+
 ## When to use a team
 - Work touches 3+ files across layers (UI + API + DB)
 - For simpler work, use a single subagent or work directly
@@ -22,7 +25,7 @@
 - Send targeted messages — don't broadcast
 
 ## Validate
-- Each teammate runs the verification chain in `~/.claude/CLAUDE.md` before marking complete
+- Each teammate runs the project's verify chain (`<repo>/.quetrex/verify.json`, or the `## Verification` section of that repo's `.claude/CLAUDE.md`) before marking complete
 - Tests are part of the task that owns the code — the developer writes them alongside the implementation
-- Lead runs the same verification chain before opening the PR
+- Lead runs the same verify chain before opening the PR
 - On failure, send feedback to the responsible teammate
