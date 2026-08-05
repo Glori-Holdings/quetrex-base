@@ -83,14 +83,13 @@ const ENGINE_GUARDS = ['deny-guard.sh', 'secret-scan.sh', 'enforce-branch.sh', '
 // The command-layer hooks unique to quetrex, which it keeps registering.
 // quetrex-update-check.sh is the one hook the command-layer plugin legitimately
 // owns: a non-blocking SessionStart nudge that a newer engine version exists.
-const KEPT_HOOKS = ['session-state.sh', 'workflow-reminder.sh', 'edit-gate.sh',
-  'quetrex-update-check.sh'];
+const KEPT_HOOKS = ['session-state.sh', 'edit-gate.sh', 'quetrex-update-check.sh'];
 
 // --- 1. plugin.json manifest -----------------------------------------------
 check('.claude-plugin/plugin.json parses and carries the v2 identity', () => {
   const p = readJson('.claude-plugin/plugin.json');
   assert.strictEqual(p.name, 'quetrex', 'plugin name is the slash-command namespace — must be "quetrex"');
-  assert.strictEqual(p.version, '2.0.0');
+  assert.strictEqual(p.version, '2.0.3');
   assert.strictEqual(p.displayName, 'Quetrex');
 });
 
@@ -255,11 +254,21 @@ check('committed .claude/settings.json enabledPlugins values all satisfy the sch
     `${FACTORY_PIN_KEY} must be a concrete array pin, not ${JSON.stringify(pin)} — cloud routines need an exact engine`);
 });
 
-check('init.md and update.md emit the array pin, never a bare version string', () => {
-  for (const rel of ['.claude/commands/init.md', '.claude/commands/update.md']) {
+// Every place that WRITES the pin. bin/quetrex-arm is the deterministic arming
+// executable /quetrex:init shells out to; update.md carries the bump snippet.
+// Discovered by repo-wide grep rather than hardcoded, so a new writer added
+// elsewhere cannot reintroduce the bare-string form unnoticed.
+check('every pin writer emits the array form, never a bare version string', () => {
+  const ASSIGN_RE = new RegExp('enabledPlugins\\["' + FACTORY_PIN_KEY + '"\\]\\s*=\\s*[^;\\n]+', 'g');
+  const writers = gitGrep('enabledPlugins\\["' + FACTORY_PIN_KEY + '"\\][[:space:]]*=', [':!test/'])
+    .map((line) => line.split(':')[0]);
+  const unique = [...new Set(writers)];
+  assert.ok(unique.length > 0, 'the repo must still write the engine pin somewhere');
+  assert.ok(unique.includes('bin/quetrex-arm'),
+    'bin/quetrex-arm is the deterministic arming writer — it must still write the pin');
+  for (const rel of unique) {
     const body = read(rel);
-    const assignments = body.match(
-      new RegExp('enabledPlugins\\["' + FACTORY_PIN_KEY + '"\\]\\s*=\\s*[^;\\n]+', 'g')) || [];
+    const assignments = body.match(ASSIGN_RE) || [];
     assert.ok(assignments.length > 0, `${rel} must still write the ${FACTORY_PIN_KEY} pin`);
     for (const a of assignments) {
       const rhs = a.slice(a.indexOf('=') + 1).trim();
