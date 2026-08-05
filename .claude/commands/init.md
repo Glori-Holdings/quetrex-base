@@ -130,37 +130,46 @@ echo "Wrote binding: $REPO_ROOT/.quetrex/project.json → $CODE (branchPrefix=$B
 
 See **3d** for how `$BRANCH_PREFIX` is chosen — decide it before writing the binding.
 
-**d. Choose `branchPrefix` — do not hardcode `feature/`.**
+**d. Set `branchPrefix` — `claude/`, and do NOT ask the user.**
 
-Every branch the pipeline creates is built from this value. It exists because an
-**Anthropic cloud routine starts from a fresh clone of the default branch and can only
-push to `claude/`-prefixed branches** unless that restriction is loosened per repo. Nothing
-else in the workflow breaks under that restriction — worktrees, local sub-branch commits,
-merging sub-branches locally, basing off an integration branch and diffing `main...HEAD` all
-survive. **Only the push breaks — and with no push there is no PR, so the pipeline has no
-terminus.**
+Every branch the pipeline creates is built from this value.
 
 ```bash
-BRANCH_PREFIX="feature/"   # default
+BRANCH_PREFIX="claude/"   # the only prefix that works everywhere; not a question
 ```
 
-Ask the user only when it matters, and give them the real trade-off:
+**Do not prompt for this.** It was a question once, and it was the wrong one: choosing
+correctly required knowing whether you personally could loosen a branch-push restriction on
+this GitHub repo, which is a repo-admin detail a new team member has no way to evaluate. The
+two options were never symmetric anyway:
 
-> This repo's branches will be named `feature/<task>`. If you plan to run Quetrex builds
-> as cloud routines and you **cannot** loosen the branch restriction on this repo, choose
-> `claude/` instead — routines can only push to `claude/*` by default. Loosening the repo
-> is the better option where you have the access, because the restriction is a real
-> guardrail against an autonomous run touching `main`.
+| Prefix | Local builds | Anthropic cloud routines |
+| --- | --- | --- |
+| `claude/` | works | **works, with no setup** |
+| anything else | works | blocked until a repo admin allows pushes to that prefix |
 
-Accept only a value ending in `/`. On an **already-linked** repo (step 2a), if
-`branchPrefix` is absent from the binding, add it with the default rather than re-prompting
-— every consumer already defaults to `feature/`, so this is a pure backfill:
+An Anthropic cloud routine clones the default branch and can only push to `claude/*` unless
+that restriction is loosened per repo. Everything else survives the restriction — worktrees,
+local sub-branch commits, merging sub-branches locally, diffing `main...HEAD`. Only the push
+breaks, and with no push there is no PR, so the build finishes with nowhere to deliver the
+work. `claude/` therefore costs nothing and removes a whole class of silent failure, so it
+is the default rather than a choice.
+
+Report it as a statement, not a decision — one line, phrased for someone who has never seen
+this before:
+
+> Branches: `claude/<task>` — works for local and cloud builds. Change `branchPrefix` in
+> `.quetrex/project.json` if your team prefers another convention.
+
+Only honour a different prefix if the user explicitly asks for one, and accept it only if it
+ends in `/`. On an **already-linked** repo (step 2a), if `branchPrefix` is absent from the
+binding, backfill the same default and say so:
 
 ```bash
 node -e '
   const fs=require("fs"); const f=process.argv[1];
   const o=JSON.parse(fs.readFileSync(f,"utf8"));
-  if(!o.branchPrefix){ o.branchPrefix="feature/"; fs.writeFileSync(f, JSON.stringify(o,null,2)+"\n"); console.log("backfilled branchPrefix=feature/"); }
+  if(!o.branchPrefix){ o.branchPrefix="claude/"; fs.writeFileSync(f, JSON.stringify(o,null,2)+"\n"); console.log("backfilled branchPrefix=claude/ (existing branches are unaffected)"); }
 ' "$BIND"
 ```
 
@@ -868,7 +877,8 @@ Summarize for the user:
   `~/.claude`. The build gates (`verify-gate.sh`/`merge-gate.sh`/`secret-scan.sh` and the
   fat pipeline agents) are delivered by the `quetrex-factory` plugin pin (4h), never
   copied into the repo — this command never writes a hook or agent file.
-- Never hardcode `feature/`: `branchPrefix` is chosen in step 3d, recorded in the binding,
-  and used for this command's own adoption branch and by every downstream command.
+- Never hardcode a branch prefix, and never ask the user to pick one: `branchPrefix`
+  defaults to `claude/` in step 3d, is recorded in the binding, and is used for this
+  command's own adoption branch and by every downstream command.
 - `/install-github-app` is **offered**, never run unprompted, and adoption never blocks on
   it.

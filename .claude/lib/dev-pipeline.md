@@ -36,9 +36,10 @@ It does **not** copy the steps below into its own file.
 - `TASK_ID` — kanban identifier of the unit (`SMA-1`, or an epic child `SMA-1.2`).
 - `TASK_TITLE` — used for the workflow title and the branch slug.
 - `BRANCH_PREFIX` — the prefix every branch this run creates is built from, read by the caller
-  from `.quetrex/project.json` (`branchPrefix`). Defaults to `feature/` when the caller does not
-  pass it. **Never hardcode `feature/`** — a repo whose push rules cannot be loosened sets
-  `claude/` (or anything else) and every branch below must follow. Wherever this document writes
+  from `.quetrex/project.json` (`branchPrefix`). Defaults to `claude/` when the caller does not
+  pass it — the only prefix a cloud routine can push to without repo-admin setup. **Never
+  hardcode a prefix** — a team may set anything else and every branch below must follow.
+  Wherever this document writes
   `${BRANCH_PREFIX}`, it means that value, not the literal string.
 - `BASE_BRANCH` — branch to fork from: `main` for a standalone task; the per-epic integration
   branch `${BRANCH_PREFIX}<EPIC-ID>` for an epic child.

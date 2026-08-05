@@ -287,6 +287,25 @@ check('every pin writer emits the array form, never a bare version string', () =
   }
 });
 
+// --- 5bb. one branch-prefix default, and it is claude/ ---------------------
+// `claude/` is the only prefix an Anthropic cloud routine can push to without a
+// repo admin loosening the branch restriction, so it is the default everywhere
+// and /quetrex:init does not ask. Two competing defaults in the same system is
+// the confusion this replaced — assert there is exactly one.
+check('every branch-prefix fallback defaults to claude/, never feature/', () => {
+  const stale = gitGrep('(branchPrefix *\\|\\| *"feature/"|BRANCH_PREFIX="feature/"|echo .feature/.)', [':!test/']);
+  assert.deepStrictEqual(stale, [],
+    'a feature/ branch-prefix fallback survives — there must be exactly one default (claude/):\n' + stale.join('\n'));
+});
+
+check('init.md sets the branch prefix without prompting for it', () => {
+  const body = read('.claude/commands/init.md');
+  assert.ok(/BRANCH_PREFIX="claude\/"/.test(body),
+    'init.md must default BRANCH_PREFIX to claude/');
+  assert.ok(/do NOT ask the user|Do not prompt for this/i.test(body),
+    'init.md must state that the branch prefix is not a question — it was a prompt users could not answer');
+});
+
 // --- 5c. the file-edit grant stays scoped and enforceable ------------------
 // defaultMode "dontAsk" makes permissions.allow the COMPLETE grant set, so a
 // bare "Edit"/"Write" grants every path on the machine with no prompt. And
