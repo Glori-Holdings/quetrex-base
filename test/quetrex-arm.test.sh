@@ -6,14 +6,18 @@
 # Run: bash test/quetrex-arm.test.sh
 #
 # Proves:
-#   1. Fresh repo: writes all three — enabledPlugins pin (concrete factory
-#      version, never `true`), extraKnownMarketplaces.quetrex in the EXACT
-#      required shape, and .mcp.json's quetrex-kanban http broker.
+#   1. Fresh repo: writes the enabledPlugins pin (concrete factory version,
+#      never `true`) and extraKnownMarketplaces.quetrex in the EXACT required
+#      shape — and writes NO .mcp.json at all.
 #   2. Idempotent: a second run on the same repo makes NO changes (byte-
-#      identical settings.json and .mcp.json) and exits 0.
+#      identical settings.json, still no .mcp.json) and exits 0.
 #   3. Non-destructive: a pre-existing unrelated enabledPlugins entry and a
 #      pre-existing unrelated mcpServers entry both survive arming.
-#   4. Never writes a secret value into .mcp.json — only an http endpoint.
+#   4. REMEDIATION (the reason this behaviour changed): arming REMOVES a
+#      quetrex-kanban broker registered at the never-built <kanban>/api/mcp
+#      endpoint — deleting .mcp.json when that entry was all it held, and
+#      preserving the file when it holds anything else. A quetrex-kanban entry
+#      pointing at a DIFFERENT url is left untouched.
 #
 # Runs entirely offline: QX_ARM_MARKET_URL points at a local fixture file
 # (quetrex-arm accepts any curl-understood URL, including file://), so this
@@ -104,10 +108,20 @@ fi
 SETTINGS1="$REPO1/.claude/settings.json"
 MCP1="$REPO1/.mcp.json"
 
-if [ -f "$SETTINGS1" ] && [ -f "$MCP1" ]; then
-  pass "fresh run writes both .claude/settings.json and .mcp.json"
+if [ -f "$SETTINGS1" ]; then
+  pass "fresh run writes .claude/settings.json"
 else
-  fail "fresh run should write .claude/settings.json and .mcp.json (settings exists=$([ -f "$SETTINGS1" ] && echo yes || echo no), mcp exists=$([ -f "$MCP1" ] && echo yes || echo no))"
+  fail "fresh run should write .claude/settings.json"
+fi
+
+# The retired behaviour: arming used to register an http MCP broker at
+# <kanban>/api/mcp. That endpoint was never built — it answers with the dash's
+# Next.js 404 page — so every armed repo opened with an MCP server that could
+# never handshake. Arming must not create that file at all any more.
+if [ ! -e "$MCP1" ]; then
+  pass "fresh run writes NO .mcp.json (the /api/mcp broker endpoint does not exist)"
+else
+  fail "fresh run must not create .mcp.json — the quetrex-kanban broker endpoint was never built (got: $(cat "$MCP1"))"
 fi
 
 QPIN="$(json_get "$SETTINGS1" 'enabledPlugins.quetrex@quetrex')"
@@ -166,29 +180,10 @@ else
   fail "extraKnownMarketplaces.quetrex.autoUpdate must be true — third-party marketplaces default to OFF and silently strand the team on a stale engine (got: $AUTOUP)"
 fi
 
-MCPTYPE="$(json_get "$MCP1" 'mcpServers.quetrex-kanban.type')"
-MCPURL="$(json_get "$MCP1" 'mcpServers.quetrex-kanban.url')"
-if [ "$MCPTYPE" = '"http"' ] && [ "$MCPURL" = '"https://kanban.example.test/api/mcp"' ]; then
-  pass "mcpServers.quetrex-kanban is an http broker with the correct endpoint"
-else
-  fail "mcpServers.quetrex-kanban wrong (type=$MCPTYPE url=$MCPURL)"
-fi
-
-# ---------------------------------------------------------------------------
-# 4. Never writes a secret value into .mcp.json.
-# ---------------------------------------------------------------------------
-MCP1_KEYS="$(json_get "$MCP1" 'mcpServers.quetrex-kanban')"
-if printf '%s' "$MCP1_KEYS" | grep -qiE 'token|secret|key|bearer|password|authorization'; then
-  fail ".mcp.json quetrex-kanban entry must never contain a secret-shaped field (got: $MCP1_KEYS)"
-else
-  pass ".mcp.json quetrex-kanban entry carries no secret-shaped field (endpoint only)"
-fi
-
 # ---------------------------------------------------------------------------
 # 2. Idempotent — second run makes no changes.
 # ---------------------------------------------------------------------------
 cp "$SETTINGS1" "$WORK/settings.run1.json"
-cp "$MCP1" "$WORK/mcp.run1.json"
 
 OUT2="$(run_arm "$REPO1")"; RC2=$?
 
@@ -205,17 +200,16 @@ else
   diff "$WORK/settings.run1.json" "$SETTINGS1" || true
 fi
 
-if diff -q "$WORK/mcp.run1.json" "$MCP1" >/dev/null; then
-  pass "second run leaves .mcp.json byte-identical"
+if [ ! -e "$MCP1" ]; then
+  pass "second run still creates no .mcp.json"
 else
-  fail "second run must not change .mcp.json (diff below)"
-  diff "$WORK/mcp.run1.json" "$MCP1" || true
+  fail "second run must not create .mcp.json (got: $(cat "$MCP1"))"
 fi
 
-if printf '%s' "$OUT2" | grep -qi 'already current' && printf '%s' "$OUT2" | grep -qi 'already register'; then
-  pass "second run reports already-current for both settings.json and .mcp.json"
+if printf '%s' "$OUT2" | grep -qi 'already current' && printf '%s' "$OUT2" | grep -qi 'nothing to remediate'; then
+  pass "second run reports already-current for settings.json and nothing to remediate for .mcp.json"
 else
-  fail "second run should report already-current for both files (got: $OUT2)"
+  fail "second run should report already-current + nothing-to-remediate (got: $OUT2)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -268,11 +262,138 @@ else
 fi
 
 QPIN2="$(json_get "$REPO2/.claude/settings.json" 'enabledPlugins.quetrex@quetrex')"
-KANBAN2="$(json_get "$REPO2/.mcp.json" 'mcpServers.quetrex-kanban.url')"
-if [ "$QPIN2" = "true" ] && [ "$KANBAN2" = '"https://kanban.example.test/api/mcp"' ]; then
-  pass "arming still adds its own entries alongside the foreign ones"
+KANBAN2="$(json_get "$REPO2/.mcp.json" 'mcpServers.quetrex-kanban')"
+if [ "$QPIN2" = "true" ]; then
+  pass "arming still adds its own settings entries alongside the foreign ones"
 else
-  fail "arming should still add its own entries (qpin=$QPIN2, kanban=$KANBAN2)"
+  fail "arming should still add its own settings entries (qpin=$QPIN2)"
+fi
+if [ "$KANBAN2" = "undefined" ]; then
+  pass "arming registers no quetrex-kanban broker alongside a foreign one"
+else
+  fail "arming must not register a quetrex-kanban broker (got: $KANBAN2)"
+fi
+
+# ---------------------------------------------------------------------------
+# 4. REMEDIATION — the dead broker is REMOVED from an already-armed repo.
+#
+#    This is why the behaviour above changed. Repos armed by an older engine
+#    carry a committed quetrex-kanban registration pointing at
+#    <kanban>/api/mcp, a route the kanban never had; Claude Code fails to
+#    connect it on every single session, in every clone, for every teammate.
+#    Re-running /quetrex:init (hence quetrex-arm) is the remediation path, so
+#    the removal is asserted four ways: the whole-file delete, the
+#    preserve-other-servers case, the preserve-other-top-level-keys case, and
+#    the leave-a-real-url-alone case.
+# ---------------------------------------------------------------------------
+
+# 4a. .mcp.json holding ONLY the dead broker → the file itself is deleted, because
+#     an empty {"mcpServers":{}} is still a config Claude Code loads.
+REPO4="$WORK/repo4"
+mkdir -p "$REPO4"
+cat > "$REPO4/.mcp.json" <<'JSON'
+{
+  "mcpServers": {
+    "quetrex-kanban": { "type": "http", "url": "https://dash.quetrex.com/api/mcp" }
+  }
+}
+JSON
+OUT4="$(run_arm "$REPO4")"; RC4=$?
+
+if [ "$RC4" -eq 0 ]; then
+  pass "arming a repo carrying the dead broker exits 0"
+else
+  fail "arming a repo carrying the dead broker should exit 0 (got rc=$RC4, output: $OUT4)"
+fi
+
+if [ ! -e "$REPO4/.mcp.json" ]; then
+  pass "dead-broker-only .mcp.json is deleted outright"
+else
+  fail "a .mcp.json holding only the dead broker must be deleted (still present: $(cat "$REPO4/.mcp.json"))"
+fi
+
+if printf '%s' "$OUT4" | grep -qi 'removed the dead quetrex-kanban broker'; then
+  pass "removal is reported out loud, so /quetrex:init can tell the operator"
+else
+  fail "removal must be reported in the output (got: $OUT4)"
+fi
+
+# 4b. .mcp.json ALSO holding a foreign server → entry removed, file kept, foreign
+#     server untouched.
+REPO5="$WORK/repo5"
+mkdir -p "$REPO5"
+cat > "$REPO5/.mcp.json" <<'JSON'
+{
+  "mcpServers": {
+    "quetrex-kanban": { "type": "http", "url": "https://dash.quetrex.com/api/mcp" },
+    "other-broker": { "type": "stdio", "command": "some-tool" }
+  },
+  "unrelatedTopLevelKey": "keep-me"
+}
+JSON
+run_arm "$REPO5" >/dev/null
+
+if [ -f "$REPO5/.mcp.json" ]; then
+  pass "a .mcp.json with other content survives the removal"
+else
+  fail "a .mcp.json with other content must NOT be deleted"
+fi
+
+DEAD5="$(json_get "$REPO5/.mcp.json" 'mcpServers.quetrex-kanban')"
+OTHER5="$(json_get "$REPO5/.mcp.json" 'mcpServers.other-broker.command')"
+TOP5="$(json_get "$REPO5/.mcp.json" 'unrelatedTopLevelKey')"
+if [ "$DEAD5" = "undefined" ]; then
+  pass "the dead quetrex-kanban entry is removed from a shared .mcp.json"
+else
+  fail "the dead quetrex-kanban entry must be removed (got: $DEAD5)"
+fi
+if [ "$OTHER5" = '"some-tool"' ]; then
+  pass "a foreign mcpServers entry survives the removal"
+else
+  fail "a foreign mcpServers entry must survive the removal (got: $OTHER5)"
+fi
+if [ "$TOP5" = '"keep-me"' ]; then
+  pass "an unrelated top-level .mcp.json key survives the removal"
+else
+  fail "an unrelated top-level .mcp.json key must survive (got: $TOP5)"
+fi
+
+# 4c. A quetrex-kanban entry pointing at a DIFFERENT url is NOT ours to delete —
+#     a team that has wired this name to something real must keep it.
+REPO6="$WORK/repo6"
+mkdir -p "$REPO6"
+cat > "$REPO6/.mcp.json" <<'JSON'
+{
+  "mcpServers": {
+    "quetrex-kanban": { "type": "http", "url": "https://broker.example.test/mcp/v1" }
+  }
+}
+JSON
+OUT6="$(run_arm "$REPO6")"
+
+KEPT6="$(json_get "$REPO6/.mcp.json" 'mcpServers.quetrex-kanban.url')"
+if [ "$KEPT6" = '"https://broker.example.test/mcp/v1"' ]; then
+  pass "a quetrex-kanban entry at a non-/api/mcp url is left untouched"
+else
+  fail "only the /api/mcp endpoint may be removed — a real broker url must survive (got: $KEPT6)"
+fi
+if printf '%s' "$OUT6" | grep -qi 'left untouched'; then
+  pass "leaving a real broker alone is reported out loud"
+else
+  fail "leaving a foreign quetrex-kanban url alone should be reported (got: $OUT6)"
+fi
+
+# 4d. An unparseable .mcp.json is never rewritten or deleted — arming reports and
+#     moves on rather than destroying hand-written config it cannot understand.
+REPO7="$WORK/repo7"
+mkdir -p "$REPO7"
+printf '{ this is not json' > "$REPO7/.mcp.json"
+OUT7="$(run_arm "$REPO7")"; RC7=$?
+
+if [ "$RC7" -eq 0 ] && [ "$(cat "$REPO7/.mcp.json")" = '{ this is not json' ]; then
+  pass "an unparseable .mcp.json is left byte-identical and does not fail the run"
+else
+  fail "an unparseable .mcp.json must be left alone with rc=0 (rc=$RC7, content: $(cat "$REPO7/.mcp.json"))"
 fi
 
 # ---------------------------------------------------------------------------

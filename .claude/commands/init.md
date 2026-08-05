@@ -572,21 +572,20 @@ it. If they decline, record it and move on.
 
 ## 4h. Arm the repo for cloud execution — `quetrex-arm`
 
-Cloud routines and every teammate read which engine to run, and how to reach the kanban,
-from what is **committed** in this repo — `.claude/settings.json` `enabledPlugins` +
-`extraKnownMarketplaces`, and `.mcp.json`'s kanban broker registration — never from any one
-machine's local plugin cache or MCP config. These writes used to be inline `node` prose
-right here in this command; that prose did not reliably execute (a run could finish with
-empty `enabledPlugins`, no `.mcp.json`, and no `extraKnownMarketplaces`), so arming is now a
-**deterministic executable**, `quetrex-arm`, shipped on the plugin's `bin/` (which IS on
-PATH in slash-command bash, unlike the plugin-root path variable, which is unset in this
-context — call it by name, never source it):
+Cloud routines and every teammate read which engine to run from what is **committed** in
+this repo — `.claude/settings.json` `enabledPlugins` + `extraKnownMarketplaces` — never from
+any one machine's local plugin cache. These writes used to be inline `node` prose right here
+in this command; that prose did not reliably execute (a run could finish with empty
+`enabledPlugins` and no `extraKnownMarketplaces`), so arming is now a **deterministic
+executable**, `quetrex-arm`, shipped on the plugin's `bin/` (which IS on PATH in
+slash-command bash, unlike the plugin-root path variable, which is unset in this context —
+call it by name, never source it):
 
 ```bash
 QUETREX_ARM_OUTPUT="$(quetrex-arm "$REPO_ROOT" "$QX_KANBAN_URL")"; QUETREX_ARM_RC=$?
 printf '%s\n' "$QUETREX_ARM_OUTPUT"
 if [ "$QUETREX_ARM_RC" -ne 0 ]; then
-  echo "quetrex-arm failed — .claude/settings.json / .mcp.json may be only partially armed. Re-run /quetrex:init once resolved." >&2
+  echo "quetrex-arm failed — .claude/settings.json may be only partially armed. Re-run /quetrex:init once resolved." >&2
 fi
 ```
 
@@ -603,15 +602,25 @@ fi
 - `.claude/settings.json` `extraKnownMarketplaces.quetrex.source`:
   `{"source":"github","repo":"Glori-Holdings/quetrex-plugins"}` — without this the
   `quetrex-factory` pin above cannot resolve.
-- `.mcp.json` `mcpServers.quetrex-kanban`: `{"type":"http","url":"<kanbanUrl>/api/mcp"}` —
-  **endpoint only, no secret value**. The broker authenticates cloud sessions and
-  auto-rotates their credentials.
+It also **removes** one thing, and this is a repair, not an omission:
+
+- `.mcp.json` `mcpServers.quetrex-kanban` — deleted when its url is `<kanbanUrl>/api/mcp`.
+  Earlier versions *registered* that http broker. **The endpoint was never built**: the
+  kanban has no `/api/mcp` route and the URL answers with the dash's Next.js 404 HTML page,
+  so Claude Code opened every armed repo with an MCP server that could never handshake —
+  surfacing to the operator as "the plugins cannot connect to the dash." Arming now purges
+  the registration, which makes **re-running `/quetrex:init` the remediation path** for a
+  repo armed by an older engine. Nothing is lost; the broker never worked. Only that exact
+  url is touched — another `mcpServers` entry, another top-level key, or a `quetrex-kanban`
+  entry pointing at something real all survive untouched, and `.mcp.json` is deleted only if
+  removing our entry leaves it empty. When the broker endpoint is genuinely built, restore
+  the write **only** after the live URL answers an MCP `initialize`.
 
 Every write merges — it never clobbers any other `enabledPlugins` entry, any other
 `extraKnownMarketplaces` entry, any other `mcpServers` entry, or any other settings key.
-Record whatever `quetrex-arm` printed (each concern reports "wrote ..." or "already
-current"/"already registers ...") so step 6 stages `.claude/settings.json` + `.mcp.json`
-and step 7 reports it verbatim.
+Record whatever `quetrex-arm` printed (each concern reports "wrote ...", "already current",
+or what it removed/left alone in `.mcp.json`) so step 6 stages `.claude/settings.json` +
+`.mcp.json` and step 7 reports it verbatim.
 
 ---
 
@@ -784,10 +793,13 @@ git -C "$REPO_ROOT" add .quetrex/project.json 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/settings.json" ] && git -C "$REPO_ROOT" add .claude/settings.json 2>/dev/null || true
 [ -f "$REPO_ROOT/.quetrex/verify.json" ]  && git -C "$REPO_ROOT" add .quetrex/verify.json 2>/dev/null || true
 [ -f "$REPO_ROOT/.worktreeinclude" ]      && git -C "$REPO_ROOT" add .worktreeinclude 2>/dev/null || true
-# The committed engine pin and the kanban MCP broker — both written by
-# quetrex-arm in step 4h — are read by cloud routines from the repo, so both
-# must be committed.
-[ -f "$REPO_ROOT/.mcp.json" ]             && git -C "$REPO_ROOT" add .mcp.json 2>/dev/null || true
+# The committed engine pin is read by cloud routines from the repo, so it must be
+# committed. `.mcp.json` uses `add -A` on purpose: step 4h now REMOVES the dead
+# quetrex-kanban broker and may delete the file outright, and a `[ -f ]` guard
+# would skip a vanished file — leaving the repair uncommitted, so every teammate
+# and every cloud routine kept the failing MCP server. `add -A <path>` stages the
+# deletion as readily as a modification.
+git -C "$REPO_ROOT" add -A .mcp.json 2>/dev/null || true
 
 if git -C "$REPO_ROOT" diff --cached --quiet; then
   echo "Nothing to commit — repo already adopted."
@@ -845,8 +857,11 @@ Summarize for the user:
 - **Engine pin** — the `enabledPlugins` written (`quetrex@quetrex: true` and the concrete
   `quetrex-factory@quetrex: <version>` pin), or *"already current"*; if the marketplace was
   unreachable, the note to run `/quetrex:update` once online to write the concrete factory pin.
-- **MCP broker** — whether the `quetrex-kanban` server was registered in `.mcp.json` or was
-  already present (endpoint only — no secret written).
+- **MCP broker** — what step 4h did to `.mcp.json`: removed the dead `quetrex-kanban`
+  registration (and whether the emptied file was deleted), or nothing to remediate. If it
+  removed one, say plainly that this repo had a broker pointing at an endpoint that was never
+  built, that it is why MCP failed to connect on every session, and that the repair lands for
+  the whole team with this commit.
 - **Legacy cleanup** — *"already offered on this machine"*, *"nothing to clean"*, or the
   per-item outcome (quarantined / stripped / kept / flagged), noting that everything is
   reversible from the timestamped backup dir and that `secrets.env` was only flagged.
@@ -865,9 +880,10 @@ Summarize for the user:
 - Never print the bearer token. Build all JSON with `node` / `JSON.stringify`.
 - Idempotent: re-running on a linked repo never re-creates the binding and never
   prompts for a name — it re-verifies access and can re-clean / re-PR.
-- Non-destructive: the only files this command creates are `.quetrex/project.json`,
-  `.worktreeinclude` (step 4f), and `.mcp.json` (step 4h, via `quetrex-arm`, merged — never
-  clobbering an existing MCP server entry); `CLAUDE.md` edits only excise stale tracker
+- Non-destructive: the only files this command creates are `.quetrex/project.json` and
+  `.worktreeinclude` (step 4f). The single deletion it performs anywhere is step 4h's purge of
+  the `quetrex-kanban` broker whose url is the never-built `/api/mcp` endpoint — scoped to that
+  one key, and to the file only when that key was all it held; `CLAUDE.md` edits only excise stale tracker
   blocks, never wholesale rewrites; `.claude/settings.json` is merged, never clobbered —
   step 4e only ever **adds** to `permissions.allow` and step 4h (`quetrex-arm`) only ever
   adds/updates the `enabledPlugins` pin and `extraKnownMarketplaces.quetrex`, never removing

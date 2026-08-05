@@ -1,5 +1,5 @@
 ---
-description: Diagnose this repo's Quetrex health — board reachable, engine pinned to the latest, no leftover legacy artifacts, verify chain configured, deploy target set, vault wired — in the checkmark / here's-the-fix style of the native /doctor. Usage: /quetrex:doctor
+description: Diagnose this repo's Quetrex health — board reachable, engine pinned to the latest, no leftover legacy artifacts, no dead MCP broker, verify chain configured, deploy target set, vault wired — in the checkmark / here's-the-fix style of the native /doctor. Usage: /quetrex:doctor
 argument-hint: ""
 ---
 
@@ -16,7 +16,7 @@ itself. If a check below reveals a platform/plugin-install problem (a plugin not
 enabled, the CLI unhealthy), say so and **point the user at `/doctor`** rather
 than re-implementing those checks here.
 
-What THIS command owns are the six Quetrex-app checks native `/doctor` knows
+What THIS command owns are the seven Quetrex-app checks native `/doctor` knows
 nothing about. Run them all, then print one line per check:
 
 - `✓ <check> — <what's good>`
@@ -140,7 +140,39 @@ fi
 
 ---
 
-## Check 4 — Verify chain configured
+## Check 4 — No dead MCP broker
+
+Earlier engines committed an `.mcp.json` registering a `quetrex-kanban` http
+broker at `<kanbanUrl>/api/mcp`. **That endpoint was never built** — the kanban
+has no such route and the URL answers with the dash's Next.js 404 HTML page — so
+Claude Code opened the repo with an MCP server that could never handshake. The
+operator sees it as *"the plugins cannot connect to the dash"*, and it is
+committed, so it hits every teammate and every cloud routine. Detect the stale
+registration; never remove it here (`/quetrex:init` owns the repair):
+
+```bash
+DEAD_MCP="$(node -e '
+  const fs=require("fs");
+  let o; try{o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{process.stdout.write("");process.exit(0)}
+  const e=o && o.mcpServers && o.mcpServers["quetrex-kanban"];
+  const url=e?String(e.url||""):"";
+  process.stdout.write(/\/api\/mcp\/?$/.test(url)?url:"");
+' "$REPO_ROOT/.mcp.json" 2>/dev/null)"
+if [ -z "$DEAD_MCP" ]; then
+  echo "✓ No dead MCP broker — .mcp.json registers no server at the never-built /api/mcp endpoint."
+else
+  echo "✗ Dead MCP broker — .mcp.json points quetrex-kanban at $DEAD_MCP, an endpoint that does not exist; MCP fails to connect on every session in this repo."
+  echo "    Fix: run /quetrex:init — arming now removes that registration and commits the repair for the whole team."
+fi
+```
+
+Do **not** report this as a dash outage or an auth problem. If the board check
+above went green, the dash is fine; this is a config pointing at a route that was
+never built.
+
+---
+
+## Check 5 — Verify chain configured
 
 QA and `verify-gate.sh` run the chain from `.quetrex/verify.json` (machine-
 readable, authoritative), with the project `.claude/CLAUDE.md` `## Verification`
@@ -168,7 +200,7 @@ fi
 
 ---
 
-## Check 5 — Deploy target set
+## Check 6 — Deploy target set
 
 `/quetrex:deploy` needs a per-project deploy config (its Fly app, region, etc.,
 recorded by the deploy command's first-run interview). Detect whether a deploy
@@ -189,7 +221,7 @@ fi
 
 ---
 
-## Check 6 — Vault wired
+## Check 7 — Vault wired
 
 Secrets live in the project vault (values are never in AI context); the repo
 just needs to be linked so `dash.quetrex.com/keys` and the in-memory secret
@@ -214,7 +246,7 @@ fi
 
 ## Final summary
 
-After the six checks, print a one-line roll-up: *"Quetrex health: N/6 green."*
+After the seven checks, print a one-line roll-up: *"Quetrex health: N/7 green."*
 If any check surfaced a **platform or plugin-install** symptom (a plugin not
 enabled, the CLI itself unhealthy, marketplace unreachable), add one line
 directing the user to native **`/doctor`** for that layer — this command
