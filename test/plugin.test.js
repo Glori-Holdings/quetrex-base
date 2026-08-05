@@ -124,6 +124,55 @@ check('no shipped file declares an mcpServers block', () => {
   );
 });
 
+// --- 0b. COMMANDS MUST ACTUALLY RUN ---------------------------------------
+// Every defect that reached an operator in this engine so far shared one shape:
+// a code path that had never once been EXECUTED. The suite checked what files
+// SAID ("does init.md contain the right sentence") and never what they DID, so
+// the first human to walk a path was the one who found it broken.
+//
+// The worst instance: /quetrex:login and /quetrex:update both used
+//     read -r A B < <(node -e '... process.stdout.write(a+" "+b) ...')
+//         || { echo "unreadable"; exit 1; }
+// `read` returns NON-ZERO when the final line has no trailing newline. The
+// values land in the variables correctly and the guard fires anyway — so both
+// commands failed 100% of the time, on healthy input. /quetrex:login is the
+// FIRST command a teammate runs on a new machine, so onboarding was impossible.
+//
+// These two checks are cheap and they close that class permanently.
+check('no shipped command reads from a process substitution (read returns non-zero without a trailing newline)', () => {
+  const hits = gitGrep('read -r .*< <', [':(exclude)test/**']);   // no parens: git grep would read them as a group
+  assert.deepStrictEqual(
+    hits, [],
+    'a shipped file uses `read ... < <(...)`: ' + hits.join(', ')
+      + '. `read` exits NON-ZERO when the last line lacks a trailing newline, so any `|| { fatal }` '
+      + 'guard fires on SUCCESS and the command aborts with a bogus error. Capture into a variable, '
+      + 'check it, then split with `set --`.',
+  );
+});
+
+check('every bash block embedded in every command is syntactically valid', () => {
+  const dir = path.join(REPO_ROOT, '.claude/commands');
+  const failures = [];
+  let blocks = 0;
+  for (const file of fs.readdirSync(dir).filter((x) => x.endsWith('.md'))) {
+    const src = fs.readFileSync(path.join(dir, file), 'utf8');
+    [...src.matchAll(/```bash\n([\s\S]*?)```/g)].forEach((m, i) => {
+      blocks++;
+      const tmp = path.join(require('os').tmpdir(), 'qx-block-' + process.pid + '-' + blocks + '.sh');
+      fs.writeFileSync(tmp, m[1]);
+      try {
+        execFileSync('bash', ['-n', tmp], { stdio: 'pipe' });
+      } catch (e) {
+        failures.push(file + ' block#' + (i + 1) + ': ' + String(e.stderr || '').trim().split('\n')[0]);
+      } finally {
+        try { fs.unlinkSync(tmp); } catch {}
+      }
+    });
+  }
+  assert.ok(blocks > 50, 'expected to find the command bash blocks, found only ' + blocks);
+  assert.deepStrictEqual(failures, [], 'bash syntax errors in shipped command blocks:\n  ' + failures.join('\n  '));
+});
+
 // --- 1. plugin.json manifest -----------------------------------------------
 check('.claude-plugin/plugin.json parses and carries the v2 identity', () => {
   const p = readJson('.claude-plugin/plugin.json');

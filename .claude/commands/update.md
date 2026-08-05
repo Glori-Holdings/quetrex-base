@@ -51,14 +51,22 @@ version you could not confirm:
 MARKET_URL="https://raw.githubusercontent.com/Glori-Holdings/quetrex-plugins/main/.claude-plugin/marketplace.json"
 MANIFEST="$(curl -fsS --max-time 10 "$MARKET_URL")" || { echo "Could not fetch the Quetrex marketplace — check your connection and re-run /quetrex:update." >&2; exit 1; }
 
-read -r LATEST_QUETREX LATEST_FACTORY < <(printf '%s' "$MANIFEST" | node -e '
+# NEVER `read ... < <(...)` here — see the note in login.md. `read` returns
+# NON-ZERO on a final line with no trailing newline, so the guard below fired on
+# SUCCESS and this command failed 100% of the time with "manifest unreadable"
+# against a perfectly healthy manifest. Capture, check, then split.
+VERSIONS="$(printf '%s' "$MANIFEST" | node -e '
   let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
     let o; try{o=JSON.parse(s)}catch{process.exit(1)}
     const v=n=>{const p=(o.plugins||[]).find(x=>x&&x.name===n);return p&&p.version?String(p.version):""};
     const q=v("quetrex"), f=v("quetrex-factory");
     if(!q||!f){process.exit(1)}
     process.stdout.write(q+" "+f);
-  })') || { echo "The marketplace manifest was unreadable — contact your administrator." >&2; exit 1; }
+  })')" || { echo "The marketplace manifest was unreadable — contact your administrator." >&2; exit 1; }
+# shellcheck disable=SC2086
+set -- $VERSIONS
+[ "$#" -eq 2 ] || { echo "The marketplace manifest was unreadable — contact your administrator." >&2; exit 1; }
+LATEST_QUETREX="$1"; LATEST_FACTORY="$2"
 
 echo "Latest published: quetrex $LATEST_QUETREX, quetrex-factory $LATEST_FACTORY"
 ```
