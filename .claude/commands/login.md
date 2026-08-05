@@ -49,7 +49,12 @@ is safe to hold in a shell var — but do **not** print it; only show `USER_CODE
 `VERIFICATION_URL`):
 
 ```bash
-read -r DEVICE_CODE USER_CODE VERIFICATION_URL INTERVAL EXPIRES < <(node -e '
+# NEVER `read ... < <(...)` here. `read` returns NON-ZERO when the final line
+# carries no trailing newline, so a `|| { fatal }` guard fires on SUCCESS — the
+# values are in the variables and the command aborts anyway. That defect shipped
+# in this command and in /quetrex:update, and it made both fail 100% of the time:
+# a new teammate could not even log in. Capture, check, then split.
+DEVICE_FIELDS="$(node -e '
   let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
     let o; try{o=JSON.parse(s)}catch{process.exit(1)}
     if(!o.deviceCode||!o.userCode||!o.verificationUrl){process.exit(1)}
@@ -57,7 +62,11 @@ read -r DEVICE_CODE USER_CODE VERIFICATION_URL INTERVAL EXPIRES < <(node -e '
       o.deviceCode, o.userCode, o.verificationUrl,
       String(o.intervalSeconds||5), String(o.expiresInSeconds||600)
     ].join(" "))
-  })' <<<"$START_BODY") || { echo "Unexpected device-flow response." >&2; exit 1; }
+  })' <<<"$START_BODY")" || { echo "Unexpected device-flow response." >&2; exit 1; }
+# shellcheck disable=SC2086
+set -- $DEVICE_FIELDS
+[ "$#" -eq 5 ] || { echo "Unexpected device-flow response." >&2; exit 1; }
+DEVICE_CODE="$1"; USER_CODE="$2"; VERIFICATION_URL="$3"; INTERVAL="$4"; EXPIRES="$5"
 ```
 
 ---
