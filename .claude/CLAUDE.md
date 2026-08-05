@@ -7,6 +7,10 @@ This repo IS the Quetrex engine — the hooks, agents, commands and installer th
 - **A change to a hook's blocking behavior ships in the same commit as a test under `test/` that proves both the new block and the new allow.**
 - Generic pipeline doctrine (agent roles, branch rules, permission model) lives in the on-demand `.claude/skills/quetrex-pipeline/` skill — nothing loads it globally. Keep THIS file to what is true of THIS repo only.
 
+# Learning
+
+When I correct you or you catch yourself making a mistake, before continuing, add the lesson as a one-line rule under #LESSONS so it never happens again.
+
 # LESSONS
 
 - Customer-facing explainers must show the real machinery (agents' specializations, the architect's PRD-decomposition that kills drift/hallucination, hooks, skills, exact commands), grounded in the actual source files — never shallow marketing gloss, and structured so the reader never hits a boring paragraph before the substance lands.
@@ -20,3 +24,7 @@ npm run check:sh
 npm run check:json
 npm test
 ```
+
+## Quetrex
+
+This is a Quetrex project (code `QUE`) — features go through `/quetrex:task-build`, and the guarded pipeline (architect → developers → QA → reviewer → git-workflow) carries each task to a reviewed, merged PR.

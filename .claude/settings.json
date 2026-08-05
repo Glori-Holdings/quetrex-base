@@ -16,7 +16,15 @@
       "Bash(git worktree:*)",
       "Bash(gh pr:*)",
       "Bash(gh run:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(git diff:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(jq:*)",
+      "Bash(mkdir:*)",
+      "Write",
+      "Edit"
     ],
     "deny": [
       "Bash(rm -rf /)",
@@ -139,5 +147,9 @@
   "skipDangerousModePermissionPrompt": true,
   "voiceEnabled": true,
   "teammateMode": "auto",
-  "remoteControlAtStartup": false
+  "remoteControlAtStartup": false,
+  "enabledPlugins": {
+    "quetrex@quetrex": true,
+    "quetrex-factory@quetrex": "1.0.0"
+  }
 }

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "quetrex-kanban": {
+      "type": "http",
+      "url": "https://dash.quetrex.com/api/mcp"
+    }
+  }
+}
