@@ -79,7 +79,12 @@ cache_fresh() {
   [ -f "$CACHE_FILE" ] || return 1
   local now mtime
   now="$(date +%s)"
-  mtime="$(stat -f %m "$CACHE_FILE" 2>/dev/null || stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0)"
+  # GNU stat (-c %Y) first for Linux; BSD stat (-f %m) fallback for macOS. On the
+  # wrong platform `stat` can emit non-numeric output, which under `set -u` makes
+  # the arithmetic below treat it as an unbound variable and abort the hook (exit 1,
+  # no output) — so sanitize mtime to a plain integer before the comparison.
+  mtime="$(stat -c %Y "$CACHE_FILE" 2>/dev/null || stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)"
+  case "$mtime" in ''|*[!0-9]*) mtime=0 ;; esac
   [ $((now - mtime)) -lt "$TTL_SECONDS" ]
 }
 

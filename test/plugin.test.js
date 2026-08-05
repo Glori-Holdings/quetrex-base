@@ -89,7 +89,7 @@ const KEPT_HOOKS = ['session-state.sh', 'edit-gate.sh', 'quetrex-update-check.sh
 check('.claude-plugin/plugin.json parses and carries the v2 identity', () => {
   const p = readJson('.claude-plugin/plugin.json');
   assert.strictEqual(p.name, 'quetrex', 'plugin name is the slash-command namespace — must be "quetrex"');
-  assert.strictEqual(p.version, '2.0.1');
+  assert.strictEqual(p.version, '2.0.2');
   assert.strictEqual(p.displayName, 'Quetrex');
 });
 
