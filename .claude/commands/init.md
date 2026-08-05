@@ -557,9 +557,12 @@ engine:
 
 - `"quetrex@quetrex": true` — the command layer is enabled (a plain `true`; the command
   surface is not version-gated per repo).
-- `"quetrex-factory@quetrex": "<concrete version>"` — a **concrete version string**, never a
-  floating `true`. Resolve the latest published version from the marketplace manifest on
-  GitHub raw (there is no version-check API):
+- `"quetrex-factory@quetrex": ["<concrete version>"]` — a **concrete version pin**, never a
+  floating `true`. Claude Code's `enabledPlugins` schema accepts a boolean or an **array of
+  semver ranges**; a bare version *string* fails settings validation with `Invalid input` and
+  the entry is dropped, so the repo silently loses its pin. Always write the one-element
+  array. Resolve the latest published version from the marketplace manifest on GitHub raw
+  (there is no version-check API):
 
 ```bash
 MARKET_URL="https://raw.githubusercontent.com/Glori-Holdings/quetrex-plugins/main/.claude-plugin/marketplace.json"
@@ -586,7 +589,7 @@ node -e '
   const before = JSON.stringify(o.enabledPlugins);
   o.enabledPlugins["quetrex@quetrex"] = true;
   if (latestFactory) {
-    o.enabledPlugins["quetrex-factory@quetrex"] = latestFactory;   // concrete pin, never true
+    o.enabledPlugins["quetrex-factory@quetrex"] = [latestFactory];  // array pin — a bare string is invalid
   }
   if (JSON.stringify(o.enabledPlugins) === before) { console.log("enabledPlugins already current."); process.exit(0); }
   fs.mkdirSync(path.dirname(file), {recursive:true});

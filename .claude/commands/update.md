@@ -71,8 +71,11 @@ Update `$REPO_ROOT/.claude/settings.json` `enabledPlugins` so it reads:
 
 - `"quetrex@quetrex": true` — the command layer is enabled (a plain `true`; the
   command surface is not version-gated per repo).
-- `"quetrex-factory@quetrex": "<LATEST_FACTORY>"` — a **concrete version pin**,
+- `"quetrex-factory@quetrex": ["<LATEST_FACTORY>"]` — a **concrete version pin**,
   never a floating `true`. This is the number cloud routines and teammates read.
+  Claude Code's `enabledPlugins` schema accepts a boolean or an **array of semver
+  ranges**; a bare version *string* fails settings validation with `Invalid input`
+  and the entry is dropped, so write the one-element array.
 
 Merge, never clobber — preserve every other `enabledPlugins` entry and every
 other settings key. Only write when the pin actually changed:
@@ -86,7 +89,7 @@ node -e '
   o.enabledPlugins = o.enabledPlugins || {};
   const before = JSON.stringify(o.enabledPlugins);
   o.enabledPlugins["quetrex@quetrex"] = true;
-  o.enabledPlugins["quetrex-factory@quetrex"] = latestFactory;   // concrete pin
+  o.enabledPlugins["quetrex-factory@quetrex"] = [latestFactory];  // array pin — a bare string is invalid
   if (JSON.stringify(o.enabledPlugins) === before) { console.log("PIN_UNCHANGED"); process.exit(0); }
   fs.mkdirSync(path.dirname(file), {recursive:true});
   fs.writeFileSync(file, JSON.stringify(o, null, 2) + "\n");

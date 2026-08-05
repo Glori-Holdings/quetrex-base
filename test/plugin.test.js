@@ -218,6 +218,57 @@ check('zero broad /q-<anything> command references remain under .claude/ (catche
     'every legacy /q-<verb> reference under .claude/ (including glob-style mentions like /q-task-*) must be rewritten to /quetrex:*:\n' + hits.join('\n'));
 });
 
+// --- 5b. the engine pin is a shape Claude Code actually accepts -------------
+// Claude Code's settings schema is:
+//   enabledPlugins: record<string, string[] | boolean | undefined>
+// A bare version STRING (`"quetrex-factory@quetrex": "1.0.0"`) fails validation
+// with `Invalid input`, and the entry is dropped — the repo silently loses its
+// engine pin while looking pinned. The array form is the documented "extended
+// format with version constraints", and Claude Code treats an array value as
+// enabled (`value === true || Array.isArray(value)`).
+const FACTORY_PIN_KEY = 'quetrex-factory@quetrex';
+const isValidEnabledPluginsValue = (v) =>
+  typeof v === 'boolean' ||
+  (Array.isArray(v) && v.length > 0 && v.every((r) => typeof r === 'string' && r.length > 0));
+
+check('the enabledPlugins validator rejects a bare version string and accepts the array pin', () => {
+  // The exact shape that shipped broken — this is the regression this test owns.
+  assert.ok(!isValidEnabledPluginsValue('1.0.0'),
+    'a bare version string must be rejected — Claude Code reports it as Invalid input');
+  assert.ok(!isValidEnabledPluginsValue([]), 'an empty array pins nothing');
+  assert.ok(!isValidEnabledPluginsValue(null), 'null is not a valid enabledPlugins value');
+  // The shapes the schema does accept.
+  assert.ok(isValidEnabledPluginsValue(true), 'true (unversioned enable) is valid');
+  assert.ok(isValidEnabledPluginsValue(false), 'false (explicit disable) is valid');
+  assert.ok(isValidEnabledPluginsValue(['1.0.0']), 'a one-element semver array is the concrete pin');
+});
+
+check('committed .claude/settings.json enabledPlugins values all satisfy the schema', () => {
+  const entries = Object.entries(readJson('.claude/settings.json').enabledPlugins || {});
+  assert.ok(entries.length > 0, '.claude/settings.json must pin the engine for teammates and cloud routines');
+  for (const [key, value] of entries) {
+    assert.ok(isValidEnabledPluginsValue(value),
+      `enabledPlugins["${key}"] = ${JSON.stringify(value)} is not a boolean or a non-empty string array`);
+  }
+  const pin = Object.fromEntries(entries)[FACTORY_PIN_KEY];
+  assert.ok(Array.isArray(pin),
+    `${FACTORY_PIN_KEY} must be a concrete array pin, not ${JSON.stringify(pin)} — cloud routines need an exact engine`);
+});
+
+check('init.md and update.md emit the array pin, never a bare version string', () => {
+  for (const rel of ['.claude/commands/init.md', '.claude/commands/update.md']) {
+    const body = read(rel);
+    const assignments = body.match(
+      new RegExp('enabledPlugins\\["' + FACTORY_PIN_KEY + '"\\]\\s*=\\s*[^;\\n]+', 'g')) || [];
+    assert.ok(assignments.length > 0, `${rel} must still write the ${FACTORY_PIN_KEY} pin`);
+    for (const a of assignments) {
+      const rhs = a.slice(a.indexOf('=') + 1).trim();
+      assert.ok(rhs.startsWith('['),
+        `${rel} assigns a non-array pin (${rhs}) — a bare version string fails settings validation`);
+    }
+  }
+});
+
 // --- 6. the npm installer is fully retired ---------------------------------
 check('install.js is deleted', () => {
   assert.ok(!exists('install.js'), 'install.js is retired — the plugin does not seed ~/.claude');

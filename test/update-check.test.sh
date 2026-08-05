@@ -51,6 +51,17 @@ cat > "$MARKET" <<'JSON'
 }
 JSON
 
+# When QX_UPDATE_INSTALLED_* is empty the hook falls back to DISCOVERING the
+# versions from the ambient session: quetrex's own version from
+# ${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json, and the factory pin from
+# ${CLAUDE_PROJECT_DIR}/.claude/settings.json. Claude Code exports both of those
+# to hooks, so a suite run from a Stop/SessionStart hook would read the REAL
+# repo's settings and see versions the test never set — the "nothing installed"
+# case is only genuinely empty when the ambient discovery inputs are gone too.
+# Strip them for every hook invocation so the test is driven purely by QX_UPDATE_*,
+# exactly as this file's header claims, whether it runs from a bare shell or a hook.
+hook_env() { env -u CLAUDE_PROJECT_DIR -u CLAUDE_PLUGIN_ROOT "$@"; }
+
 # run_hook <cache-subdir> — invokes the hook with a private cache dir and the
 # fixture marketplace file, capturing stdout. Extra env is taken from the
 # caller's environment (INSTALLED/OFFLINE/etc. set inline before the call).
@@ -59,7 +70,7 @@ run_hook() {
   CLAUDE_PLUGIN_DATA="$cachedir" \
   QX_UPDATE_MARKETPLACE_FILE="$MARKET" \
   QX_UPDATE_TTL_SECONDS="${QX_UPDATE_TTL_SECONDS:-86400}" \
-    bash "$HOOK" </dev/null
+    hook_env bash "$HOOK" </dev/null
 }
 
 # --- 1. behind on quetrex -> prints and mentions /quetrex:update -------------
@@ -92,7 +103,7 @@ fi
 # No marketplace file, offline forced, empty cache dir => nothing to compare.
 OUT="$(CLAUDE_PLUGIN_DATA="$WORK/c4" QX_UPDATE_MARKETPLACE_FILE="" QX_UPDATE_OFFLINE=1 \
        QX_UPDATE_INSTALLED_QUETREX=2.0.0 QX_UPDATE_INSTALLED_FACTORY=1.0.0 \
-       bash "$HOOK" </dev/null)"; RC=$?
+       hook_env bash "$HOOK" </dev/null)"; RC=$?
 if [ "$RC" -eq 0 ] && [ -z "$OUT" ]; then
   pass "offline with no cache is silent and exits 0"
 else
@@ -109,7 +120,7 @@ if [ ! -f "$CACHE5/update-check.cache" ]; then
 else
   OUT="$(CLAUDE_PLUGIN_DATA="$CACHE5" QX_UPDATE_MARKETPLACE_FILE="" QX_UPDATE_OFFLINE=1 \
          QX_UPDATE_INSTALLED_QUETREX=2.0.0 QX_UPDATE_INSTALLED_FACTORY=1.5.0 \
-         bash "$HOOK" </dev/null)"; RC=$?
+         hook_env bash "$HOOK" </dev/null)"; RC=$?
   if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q '2.4.0'; then
     pass "offline with a fresh cache still reports from cache"
   else
@@ -120,7 +131,7 @@ fi
 # --- 6. nothing to compare (no installed versions) -> silent, exit 0 --------
 OUT="$(CLAUDE_PLUGIN_DATA="$WORK/c6" QX_UPDATE_MARKETPLACE_FILE="$MARKET" \
        QX_UPDATE_INSTALLED_QUETREX="" QX_UPDATE_INSTALLED_FACTORY="" \
-       bash "$HOOK" </dev/null)"; RC=$?
+       hook_env bash "$HOOK" </dev/null)"; RC=$?
 if [ "$RC" -eq 0 ] && [ -z "$OUT" ]; then
   pass "no installed versions to compare is silent, exit 0"
 else
