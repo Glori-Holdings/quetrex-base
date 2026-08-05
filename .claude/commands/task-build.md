@@ -64,10 +64,11 @@ quetrex-api GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1   # valida
 TASK="$(quetrex-api GET "/api/tasks/$TASK_ID")" || exit 1
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-# Branch prefix: NEVER hardcode "feature/". A repo whose push rules cannot be loosened
-# sets "branchPrefix": "claude/" in .quetrex/project.json, and every branch below follows.
-BRANCH_PREFIX="$(quetrex-api json-get "$REPO_ROOT/.quetrex/project.json" branchPrefix 2>/dev/null || echo 'feature/')"
-[ -n "$BRANCH_PREFIX" ] || BRANCH_PREFIX="feature/"
+# Branch prefix: NEVER hardcode one. It is data, read from .quetrex/project.json.
+# The default is "claude/" — the only prefix an Anthropic cloud routine can push to
+# without a repo admin loosening the branch restriction first.
+BRANCH_PREFIX="$(quetrex-api json-get "$REPO_ROOT/.quetrex/project.json" branchPrefix 2>/dev/null || echo 'claude/')"
+[ -n "$BRANCH_PREFIX" ] || BRANCH_PREFIX="claude/"
 
 echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL   branchPrefix=$BRANCH_PREFIX"
 ```
@@ -555,7 +556,7 @@ output inline.
   approves. One-level decomposition only.
 - A failed child must never cascade: independent siblings keep running, dependents wait,
   the dispatcher never thrashes. Stop the `/loop` at the fixpoint.
-- Never hardcode `feature/` — construct every branch from `branchPrefix`.
+- Never hardcode a branch prefix — construct every branch from `branchPrefix`.
 - Never print or echo the bearer token. Never run `set -x` / `curl -v` around `quetrex-api`.
   Build every JSON payload with `node` / `JSON.stringify`, never `echo`.
 - Never place a bearer token, API key, or any other secret in the `RemoteTrigger` body

@@ -71,8 +71,11 @@ Update `$REPO_ROOT/.claude/settings.json` `enabledPlugins` so it reads:
 
 - `"quetrex@quetrex": true` — the command layer is enabled (a plain `true`; the
   command surface is not version-gated per repo).
-- `"quetrex-factory@quetrex": "<LATEST_FACTORY>"` — a **concrete version pin**,
+- `"quetrex-factory@quetrex": ["<LATEST_FACTORY>"]` — a **concrete version pin**,
   never a floating `true`. This is the number cloud routines and teammates read.
+  Claude Code's `enabledPlugins` schema accepts a boolean or an **array of semver
+  ranges**; a bare version *string* fails settings validation with `Invalid input`
+  and the entry is dropped, so write the one-element array.
 
 Merge, never clobber — preserve every other `enabledPlugins` entry and every
 other settings key. Only write when the pin actually changed:
@@ -86,7 +89,7 @@ node -e '
   o.enabledPlugins = o.enabledPlugins || {};
   const before = JSON.stringify(o.enabledPlugins);
   o.enabledPlugins["quetrex@quetrex"] = true;
-  o.enabledPlugins["quetrex-factory@quetrex"] = latestFactory;   // concrete pin
+  o.enabledPlugins["quetrex-factory@quetrex"] = [latestFactory];  // array pin — a bare string is invalid
   if (JSON.stringify(o.enabledPlugins) === before) { console.log("PIN_UNCHANGED"); process.exit(0); }
   fs.mkdirSync(path.dirname(file), {recursive:true});
   fs.writeFileSync(file, JSON.stringify(o, null, 2) + "\n");
@@ -150,8 +153,11 @@ fi
 
 - The marketplace fetch is REQUIRED here (unlike the passive SessionStart nudge):
   never pin to a version you could not confirm from the manifest.
-- The `quetrex-factory` pin is always a **concrete version string**, never a
-  floating `true` — routines and teammates must all resolve the exact same engine.
+- The `quetrex-factory` pin is always a **one-element array holding a concrete
+  version** (`["1.5.0"]`), never a bare version string and never a floating `true`
+  — routines and teammates must all resolve the exact same engine. A bare string
+  fails Claude Code's settings validation with `Invalid input` and the entry is
+  dropped, leaving the repo unpinned while appearing pinned.
 - Never commit the pin bump to `main`; always a branch + PR so the move is
   reviewed and adopted team-wide at once.
 - Build all JSON with `node` / `JSON.stringify`; never hand-edit settings with

@@ -21,17 +21,19 @@ Put worktrees in a dedicated sibling dir, never on top of an existing path:
 `../<project>-worktrees/<unit-name>`. Before creating, `ls` the target — if a dir already
 exists that you did not create, pick another name; do not delete unknown dirs.
 
-**Branch names use the project's prefix, not a hardcoded `feature/`.** Read it from the
-binding, defaulting to `feature/`:
+**Branch names use the project's prefix, never a hardcoded one.** Read it from the
+binding, defaulting to `claude/`:
 
 ```bash
 BIND="$(git rev-parse --show-toplevel)/.quetrex/project.json"
-PFX="$(node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).branchPrefix||"feature/"))}catch{process.stdout.write("feature/")}' "$BIND" 2>/dev/null || echo feature/)"
+PFX="$(node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).branchPrefix||"claude/"))}catch{process.stdout.write("claude/")}' "$BIND" 2>/dev/null || echo claude/)"
 BRANCH="${PFX}<unit>"
 ```
 
-A repo whose push rules cannot be loosened sets `"branchPrefix": "claude/"` in
-`.quetrex/project.json` and every branch this skill creates follows.
+`claude/` is the default because it is the only prefix an Anthropic cloud routine can push
+to without a repo admin loosening the branch restriction first. A team that prefers another
+convention sets `"branchPrefix"` in `.quetrex/project.json` and every branch this skill
+creates follows.
 
 ## 1. Create the branch + worktree
 

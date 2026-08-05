@@ -21,7 +21,9 @@
 #
 #   .claude/settings.json
 #     enabledPlugins["quetrex@quetrex"]        = true
-#     enabledPlugins["quetrex-factory@quetrex"] = <concrete version>   (never a
+#     enabledPlugins["quetrex-factory@quetrex"] = [<concrete version>]  (a
+#       one-element ARRAY — the schema accepts a boolean or an array of semver
+#       ranges, and a bare version string is rejected as `Invalid input`; never a
 #       floating `true` — resolved from the public marketplace manifest; if the
 #       marketplace is unreachable, quetrex@quetrex is still enabled and the
 #       factory pin is deferred with a note to run /quetrex:update)
@@ -87,7 +89,13 @@ _qxarm_write_settings() {
     o.enabledPlugins = o.enabledPlugins || {};
     const beforePins = JSON.stringify(o.enabledPlugins);
     o.enabledPlugins["quetrex@quetrex"] = true;
-    if (factory) { o.enabledPlugins["quetrex-factory@quetrex"] = factory; }
+    // A one-element ARRAY, never the bare version string. The settings schema is
+    // enabledPlugins: record<string, string[] | boolean | undefined> — a string
+    // value fails validation with `Invalid input` and the entry is dropped, so the
+    // repo looks pinned while having no pin at all.
+    // (No apostrophes in this block: the whole node program is a single-quoted
+    // shell string, and one would terminate it.)
+    if (factory) { o.enabledPlugins["quetrex-factory@quetrex"] = [factory]; }
     const pinsChanged = JSON.stringify(o.enabledPlugins) !== beforePins;
 
     o.extraKnownMarketplaces = o.extraKnownMarketplaces || {};

@@ -89,7 +89,7 @@ const KEPT_HOOKS = ['session-state.sh', 'edit-gate.sh', 'quetrex-update-check.sh
 check('.claude-plugin/plugin.json parses and carries the v2 identity', () => {
   const p = readJson('.claude-plugin/plugin.json');
   assert.strictEqual(p.name, 'quetrex', 'plugin name is the slash-command namespace — must be "quetrex"');
-  assert.strictEqual(p.version, '2.0.2');
+  assert.strictEqual(p.version, '2.0.3');
   assert.strictEqual(p.displayName, 'Quetrex');
 });
 
@@ -215,6 +215,142 @@ check('zero broad /q-<anything> command references remain under .claude/ (catche
   const hits = gitGrep(BROAD_LEGACY_RE, ['.claude', ':(exclude).quetrex-backups', ':(exclude).quetrex/plan']);
   assert.deepStrictEqual(hits, [],
     'every legacy /q-<verb> reference under .claude/ (including glob-style mentions like /q-task-*) must be rewritten to /quetrex:*:\n' + hits.join('\n'));
+});
+
+// --- 5b. the engine pin is a shape Claude Code actually accepts -------------
+// Claude Code's settings schema is:
+//   enabledPlugins: record<string, string[] | boolean | undefined>
+// A bare version STRING (`"quetrex-factory@quetrex": "1.0.0"`) fails validation
+// with `Invalid input`, and the entry is dropped — the repo silently loses its
+// engine pin while looking pinned. The array form is the documented "extended
+// format with version constraints", and Claude Code treats an array value as
+// enabled (`value === true || Array.isArray(value)`).
+const FACTORY_PIN_KEY = 'quetrex-factory@quetrex';
+const isValidEnabledPluginsValue = (v) =>
+  typeof v === 'boolean' ||
+  (Array.isArray(v) && v.length > 0 && v.every((r) => typeof r === 'string' && r.length > 0));
+
+check('the enabledPlugins validator rejects a bare version string and accepts the array pin', () => {
+  // The exact shape that shipped broken — this is the regression this test owns.
+  assert.ok(!isValidEnabledPluginsValue('1.0.0'),
+    'a bare version string must be rejected — Claude Code reports it as Invalid input');
+  assert.ok(!isValidEnabledPluginsValue([]), 'an empty array pins nothing');
+  assert.ok(!isValidEnabledPluginsValue(null), 'null is not a valid enabledPlugins value');
+  // The shapes the schema does accept.
+  assert.ok(isValidEnabledPluginsValue(true), 'true (unversioned enable) is valid');
+  assert.ok(isValidEnabledPluginsValue(false), 'false (explicit disable) is valid');
+  assert.ok(isValidEnabledPluginsValue(['1.0.0']), 'a one-element semver array is the concrete pin');
+});
+
+check('committed .claude/settings.json enabledPlugins values all satisfy the schema', () => {
+  const entries = Object.entries(readJson('.claude/settings.json').enabledPlugins || {});
+  assert.ok(entries.length > 0, '.claude/settings.json must pin the engine for teammates and cloud routines');
+  for (const [key, value] of entries) {
+    assert.ok(isValidEnabledPluginsValue(value),
+      `enabledPlugins["${key}"] = ${JSON.stringify(value)} is not a boolean or a non-empty string array`);
+  }
+  const pin = Object.fromEntries(entries)[FACTORY_PIN_KEY];
+  assert.ok(Array.isArray(pin),
+    `${FACTORY_PIN_KEY} must be a concrete array pin, not ${JSON.stringify(pin)} — cloud routines need an exact engine`);
+});
+
+// Every place that WRITES the pin. bin/quetrex-arm is the deterministic arming
+// executable /quetrex:init shells out to; update.md carries the bump snippet.
+// Discovered by repo-wide grep rather than hardcoded, so a new writer added
+// elsewhere cannot reintroduce the bare-string form unnoticed.
+check('every pin writer emits the array form, never a bare version string', () => {
+  const ASSIGN_RE = new RegExp('enabledPlugins\\["' + FACTORY_PIN_KEY + '"\\]\\s*=\\s*[^;\\n]+', 'g');
+  // Drop comment lines (`#` in shell, `//` in the embedded node programs) — a
+  // doc comment describing the pin must not satisfy "this file writes the pin",
+  // or deleting the real write would still pass.
+  const isComment = (line) => /^\s*(#|\/\/)/.test(line);
+  // gitGrep does NOT pass -n, so each row is `path:content` — split on the FIRST
+  // colon only. (Slicing at a later colon silently disables the comment filter.)
+  const rowPath = (row) => row.slice(0, row.indexOf(':'));
+  const rowText = (row) => row.slice(row.indexOf(':') + 1);
+  const hits = gitGrep('enabledPlugins\\["' + FACTORY_PIN_KEY + '"\\][[:space:]]*=', [':!test/'])
+    .filter((row) => !isComment(rowText(row)));
+  const unique = [...new Set(hits.map(rowPath))];
+  assert.ok(unique.length > 0, 'the repo must still write the engine pin somewhere');
+  assert.ok(unique.includes('bin/quetrex-arm'),
+    'bin/quetrex-arm is the deterministic arming writer — it must still write the pin');
+  for (const rel of unique) {
+    const body = read(rel);
+    const assignments = (body.match(ASSIGN_RE) || [])
+      .filter((a) => !isComment(a));
+    assert.ok(assignments.length > 0, `${rel} must still write the ${FACTORY_PIN_KEY} pin`);
+    for (const a of assignments) {
+      const rhs = a.slice(a.indexOf('=') + 1).trim();
+      assert.ok(rhs.startsWith('['),
+        `${rel} assigns a non-array pin (${rhs}) — a bare version string fails settings validation`);
+    }
+  }
+});
+
+// --- 5bb. one branch-prefix default, and it is claude/ ---------------------
+// `claude/` is the only prefix an Anthropic cloud routine can push to without a
+// repo admin loosening the branch restriction, so it is the default everywhere
+// and /quetrex:init does not ask. Two competing defaults in the same system is
+// the confusion this replaced — assert there is exactly one.
+check('every branch-prefix fallback defaults to claude/, never feature/', () => {
+  const stale = gitGrep('(branchPrefix *\\|\\| *"feature/"|BRANCH_PREFIX="feature/"|echo .feature/.)', [':!test/']);
+  assert.deepStrictEqual(stale, [],
+    'a feature/ branch-prefix fallback survives — there must be exactly one default (claude/):\n' + stale.join('\n'));
+});
+
+check('init.md sets the branch prefix without prompting for it', () => {
+  const body = read('.claude/commands/init.md');
+  assert.ok(/BRANCH_PREFIX="claude\/"/.test(body),
+    'init.md must default BRANCH_PREFIX to claude/');
+  assert.ok(/do NOT ask the user|Do not prompt for this/i.test(body),
+    'init.md must state that the branch prefix is not a question — it was a prompt users could not answer');
+});
+
+// --- 5c. the file-edit grant stays scoped and enforceable ------------------
+// defaultMode "dontAsk" makes permissions.allow the COMPLETE grant set, so a
+// bare "Edit"/"Write" grants every path on the machine with no prompt. And
+// Claude Code consults Edit(path)/Read(path) rules ONLY — a Write(path) rule is
+// accepted, never enforced, and warns at startup. Both mistakes look correct in
+// review, so assert against both, here and in the need[] array /quetrex:init
+// unions into every customer repo.
+const BARE_EDIT_GRANTS = ['Write', 'Edit', 'NotebookEdit', 'MultiEdit'];
+check('the file-edit permission grant is path-scoped and uses an enforceable Edit() rule', () => {
+  const allow = readJson('.claude/settings.json').permissions.allow;
+  for (const bare of BARE_EDIT_GRANTS) {
+    assert.ok(!allow.includes(bare),
+      `permissions.allow contains bare "${bare}" — under dontAsk that grants every path on the machine; use Edit(/**)`);
+  }
+  const unenforceable = allow.filter((r) => /^(Write|NotebookEdit|MultiEdit|Glob)\(/.test(r));
+  assert.deepStrictEqual(unenforceable, [],
+    'these rules are accepted but never consulted (only Edit(path)/Read(path) are): ' + unenforceable.join(', '));
+  assert.ok(allow.includes('Edit(/**)'),
+    'the pipeline needs a project-scoped file-edit grant: Edit(/**)');
+});
+
+check('init.md seeds customer repos with the same scoped, enforceable grant', () => {
+  const body = read('.claude/commands/init.md');
+  const need = body.match(/const need\s*=\s*\[[\s\S]*?\]/);
+  assert.ok(need, 'init.md must still declare the need[] permission array');
+  const entries = [...need[0].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  for (const bare of BARE_EDIT_GRANTS) {
+    assert.ok(!entries.includes(bare),
+      `init.md need[] unions bare "${bare}" into every adopted repo — use Edit(/**)`);
+  }
+  const unenforceable = entries.filter((r) => /^(Write|NotebookEdit|MultiEdit|Glob)\(/.test(r));
+  assert.deepStrictEqual(unenforceable, [],
+    'init.md need[] contains rules Claude Code never consults: ' + unenforceable.join(', '));
+  assert.ok(entries.includes('Edit(/**)'), 'init.md need[] must grant Edit(/**)');
+});
+
+// A merge that resolves badly can leave a VCS conflict marker in a committed
+// file. Everything under .claude/commands/ is a prompt Claude Code loads at
+// runtime, so a stray marker ships to every consumer of the plugin — and the
+// rest of the verify chain stays green with one present. Sweep for all three
+// marker forms across every tracked file.
+check('no merge-conflict marker survives in any tracked file', () => {
+  const markers = gitGrep('^(<<<<<<< |=======$|>>>>>>> )', ['.']);
+  assert.deepStrictEqual(markers, [],
+    'unresolved merge-conflict markers are committed:\n' + markers.join('\n'));
 });
 
 // --- 6. the npm installer is fully retired ---------------------------------

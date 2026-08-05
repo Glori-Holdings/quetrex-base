@@ -51,8 +51,10 @@ sub-branches, merging sub-branches locally, basing off an integration branch, di
 pipeline has no terminus.
 
 So the prefix is data, not a constant: `.quetrex/project.json` carries `branchPrefix`,
-defaulting to `feature/`. A repo that cannot be loosened sets `"claude/"` and everything
-downstream follows. Do not hardcode `feature/` in new code paths.
+defaulting to **`claude/`** — the one prefix that works for both local and cloud builds with
+no repo-admin setup, which is why `/quetrex:init` writes it without asking. A team that
+prefers another convention sets its own value and everything downstream follows. Do not
+hardcode any prefix in new code paths.
 
 ## Gotchas (all hit in practice)
 
