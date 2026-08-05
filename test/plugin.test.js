@@ -85,6 +85,45 @@ const ENGINE_GUARDS = ['deny-guard.sh', 'secret-scan.sh', 'enforce-branch.sh', '
 // owns: a non-blocking SessionStart nudge that a newer engine version exists.
 const KEPT_HOOKS = ['session-state.sh', 'edit-gate.sh', 'quetrex-update-check.sh'];
 
+// --- 0. THIS REPO IS THE PLUGIN -------------------------------------------
+// Everything at this repo root is shipped to every consumer of the `quetrex`
+// plugin, so a project-level config file here is not local — it is broadcast.
+//
+// That is not hypothetical. Versions 2.0.3 and 2.0.4 shipped a root
+// `.mcp.json` registering a `quetrex-kanban` http broker at
+// `<kanban>/api/mcp`, an endpoint that was never built. Because it travelled
+// INSIDE the plugin package, every repo with the plugin enabled tried to
+// connect it — regardless of whether that repo had an `.mcp.json` of its own.
+// Deleting the per-repo copies did not stop it; only removing it from the
+// shipped package did. The failure surfaced to operators as "the plugins
+// cannot connect to the dash" and cost a full debugging cycle.
+//
+// So this is a packaging guard, not a style rule: no MCP server may be
+// declared by anything this repo ships until the endpoint behind it exists and
+// answers an MCP `initialize`.
+check('the plugin package ships no .mcp.json (it would broadcast to every consumer)', () => {
+  assert.ok(
+    !exists('.mcp.json'),
+    'a root .mcp.json is shipped inside the plugin and registers an MCP server for EVERY repo that enables it — '
+      + 'this is exactly how the dead <kanban>/api/mcp broker reached every armed repo in 2.0.3/2.0.4. '
+      + 'Do not re-add it until the endpoint exists and answers an MCP initialize.',
+  );
+});
+
+check('no shipped file declares an mcpServers block', () => {
+  const hits = gitGrep('mcpServers', [
+    ':(exclude)test/**',
+    ':(exclude).claude/commands/**',
+    ':(exclude)bin/quetrex-arm',
+  ]);
+  assert.deepStrictEqual(
+    hits, [],
+    'mcpServers is declared in a shipped file: ' + hits.join(', ')
+      + '. Only the arming tool (which REMOVES the dead broker), its tests, and the command docs '
+      + 'that explain the removal may mention it.',
+  );
+});
+
 // --- 1. plugin.json manifest -----------------------------------------------
 check('.claude-plugin/plugin.json parses and carries the v2 identity', () => {
   const p = readJson('.claude-plugin/plugin.json');
