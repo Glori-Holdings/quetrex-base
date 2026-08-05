@@ -16,7 +16,8 @@ plugin in `enabledPlugins` (step 4h) — the build engine that ships the
 `verify-gate.sh`/`merge-gate.sh`/`secret-scan.sh` hooks and the fat pipeline agents, so
 they run **both locally and in cloud routines** with no per-project copy required. It
 also **unions in** the permissions the pipeline needs (4e), writes a `.worktreeinclude`
-so worktrees are actually runnable (4f), and **offers** `/install-github-app` (4g). It
+so worktrees are actually runnable (4f), and resolves the **required** Claude GitHub App
+step (4g) — required because without it PR-triggered review never fires and nothing says so. It
 never overwrites or silently deletes existing `.claude/`,
 `CLAUDE.md` body content, commands, other settings/hooks, or any git/Claude history, and
 it never removes or narrows a permission the repo already had. The **only** removals are
@@ -145,15 +146,22 @@ two options were never symmetric anyway:
 
 | Prefix | Local builds | Anthropic cloud routines |
 | --- | --- | --- |
-| `claude/` | works | **works, with no setup** |
-| anything else | works | blocked until a repo admin allows pushes to that prefix |
+| `claude/` | works | **always accepted** |
+| anything else | works | accepted only if it passes three checks (below) |
 
-An Anthropic cloud routine clones the default branch and can only push to `claude/*` unless
-that restriction is loosened per repo. Everything else survives the restriction — worktrees,
-local sub-branch commits, merging sub-branches locally, diffing `main...HEAD`. Only the push
-breaks, and with no push there is no PR, so the build finishes with nowhere to deliver the
-work. `claude/` therefore costs nothing and removes a whole class of silent failure, so it
-is the default rather than a choice.
+This is quoted from the routines documentation, not inferred:
+
+> "Claude pushes its work to branches prefixed with `claude/`, which are always accepted.
+> When your prompt directs Claude to push to another branch, Claude Code checks the push
+> first and rejects it if any of the following is true: the branch is protected on GitHub;
+> someone else has an open pull request from that branch; the branch carries commits
+> authored by someone other than you."
+
+So another prefix is not forbidden outright — but the third condition alone rules out any
+**shared** branch, which is exactly what a team's `feature/*` branches are. A cloud build
+that cannot push has nowhere to deliver its work: no push, no PR, no result. `claude/`
+costs nothing and removes that whole class of silent failure, so it is the default rather
+than a question.
 
 Report it as a statement, not a decision — one line, phrased for someone who has never seen
 this before:
@@ -544,29 +552,44 @@ worktree) and never list a directory of build output.
 
 ---
 
-## 4g. Offer `/install-github-app` (ask, never run unprompted)
+## 4g. Install the Claude GitHub App — REQUIRED, and the easiest thing to forget
 
-The GitHub Action path (`anthropics/claude-code-action@v1`) is how a check runs in CI
-rather than inside the agent that wrote the code — the only reviewer whose exit status the
-pipeline cannot self-report. Setting it up starts with `/install-github-app`, which needs
-**repo admin** and walks through installing the GitHub app and setting the API key secret.
+**Do not let a new project finish adoption without resolving this.** Two things silently do
+not work without the App installed **on this repository**:
 
-Detect whether it is already in place and offer it once:
+1. **PR-triggered review.** A routine that reviews each PR is delivered by GitHub webhooks,
+   and the docs are explicit that cloning access is not enough: *"Running `/web-setup` in
+   the CLI grants repository access for cloning, but it does not install the Claude GitHub
+   App and does not enable webhook delivery. GitHub triggers require installing the Claude
+   GitHub App."* So without it, PRs are simply never reviewed — and nothing errors. That
+   silence is the failure mode.
+2. **Auto-fix on a PR** (responding to failing checks / review comments) also requires it.
+
+Cloud *builds* still work without it — a routine can clone and push using the connected
+GitHub account. It is the **event-driven** half that needs the App.
+
+Detect it, and if it is missing, say so as an unfinished setup step rather than an optional
+extra:
 
 ```bash
-gh api "repos/$(git -C "$REPO_ROOT" remote get-url origin | sed -E 's#.*[:/]([^/]+/[^/]+?)(\.git)?$#\1#')/installation" >/dev/null 2>&1 \
-  && echo "Claude GitHub app: already installed." \
-  || echo "Claude GitHub app: not installed."
+SLUG="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null | sed -E 's#.*[:/]([^/]+/[^/]+?)(\.git)?$#\1#')"
+if [ -n "$SLUG" ] && gh api "repos/$SLUG/installation" >/dev/null 2>&1; then
+  echo "Claude GitHub App: installed on $SLUG — PR-triggered review can be wired."
+else
+  echo "Claude GitHub App: NOT installed on ${SLUG:-this repo} — PR review will never fire."
+fi
 ```
 
-If not installed, say:
+When it is missing, report it in the step-7 summary as an **outstanding action**, in these
+terms — one line, no jargon:
 
-> To run Quetrex's checks in CI on every PR, install the Claude GitHub app with
-> `/install-github-app` (needs repo admin). Want to do that now? It is optional — the
-> local gates work without it.
+> **Action needed:** install the Claude GitHub App on `<owner/repo>` (needs repo admin) —
+> run `/install-github-app`. Until then, pull requests in this repo are never reviewed
+> automatically, and nothing will warn you about it.
 
-**Do not run `/install-github-app` without an explicit yes**, and do not block adoption on
-it. If they decline, record it and move on.
+Ask once, and **do not run `/install-github-app` without an explicit yes**. Adoption still
+completes if they decline — but it is recorded as outstanding, not as "optional", and
+`/quetrex:doctor` keeps reporting it until it is done.
 
 ---
 
@@ -782,7 +805,7 @@ agent files into the repo. The confirmed stale removals from step 4c are already
 `main`.
 
 ```bash
-# Use the project's own prefix — a repo pinned to "claude/" cannot push a feature/ branch.
+# Use the project's own prefix — a cloud routine is only guaranteed to be able to push claude/*.
 BRANCH="${BRANCH_PREFIX}quetrex-init-adopt"
 git -C "$REPO_ROOT" checkout -b "$BRANCH" 2>/dev/null || git -C "$REPO_ROOT" checkout "$BRANCH"
 
@@ -846,7 +869,7 @@ Summarize for the user:
   the file path that now carries the `## Verification` section.
 - **Stale project commands** — which flagged command/skill artifacts were removed (by path)
   vs kept, or *"no stale project commands found"* if nothing matched.
-- **Branch prefix** — the value recorded in the binding (`feature/` by default), and, if it
+- **Branch prefix** — the value recorded in the binding (`claude/` by default), and, if it
   is not `claude/`, the one-line note that cloud routines need the repo's branch restriction
   loosened to push it.
 - **Permissions** — which pipeline entries were added to the customer's own
@@ -898,5 +921,5 @@ Summarize for the user:
 - Never hardcode a branch prefix, and never ask the user to pick one: `branchPrefix`
   defaults to `claude/` in step 3d, is recorded in the binding, and is used for this
   command's own adoption branch and by every downstream command.
-- `/install-github-app` is **offered**, never run unprompted, and adoption never blocks on
+- `/install-github-app` is **asked about once**, never run unprompted, and adoption never blocks on
   it.

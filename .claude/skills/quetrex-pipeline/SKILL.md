@@ -54,8 +54,11 @@ architect → developer(s) → QA → reviewer → git-workflow
 ## Workflow Rules
 
 - All work on feature branches — never commit directly to the default branch
-- One branch per unit of work: `feature/<short-description>`
-- Sub-branches for parallel developers: `feature/<desc>-api`, `feature/<desc>-ui`
+- One branch per unit of work: `claude/<short-description>` (the project's `branchPrefix`)
+- Sub-branches for parallel developers: `claude/<desc>-api`, `claude/<desc>-ui`
+- The prefix is `claude/` because a cloud routine's pushes to `claude/*` are *always*
+  accepted; any other branch is rejected if it is protected, already has someone else's PR,
+  or carries someone else's commits — which rules out shared `feature/*` branches
 - Regular merge: sub-branches → feature branch. Squash merge: feature branch → default branch
 - Max 3 QA failures before escalating to the user — do not loop forever
 - Isolated work and teardown are governed by the `worktree-workflow` skill: branch, commit in the worktree with `git -C <path>` so the enforce-branch hook sees the branch, PR, merge, then remove the worktree and both branches. Never leave a dangling worktree, an unmerged PR, or a stale local or remote branch.

@@ -173,6 +173,90 @@ check('every bash block embedded in every command is syntactically valid', () =>
   assert.deepStrictEqual(failures, [], 'bash syntax errors in shipped command blocks:\n  ' + failures.join('\n  '));
 });
 
+// --- 0c. THE MERGE PATH MUST STAY CONNECTED -------------------------------
+// The build runs in an Anthropic cloud sandbox, and `.quetrex/*` is git-ignored, so every
+// gate artifact it produces (ledger, verdict, security findings) stays in that sandbox. The
+// operator's merge-gate.sh then finds no verdict and denies the merge. That is why merging
+// was always done by hand on GitHub, and why the post-merge bookkeeping — status -> merged,
+// branch and worktree teardown — never ran and tasks stranded in in_progress.
+//
+// Two halves fix it and BOTH must stay present: the cloud routine PUBLISHES its evidence to
+// a gates branch, and /quetrex:merge FETCHES it, proves it is pinned to the PR head, and
+// merges through the same gate. Delete either half and merging silently breaks again with no
+// error anywhere — so each half is asserted here.
+check('the cloud routine publishes its gate artifacts (the transport half)', () => {
+  const routine = read('.claude/lib/cloud-build-routine.md');
+  assert.match(routine, /-gates/, 'the routine must push a gates branch — without it no evidence reaches the operator');
+  assert.match(routine, /gates-head/, 'the routine must record the head sha the artifacts describe, so staleness is detectable');
+  for (const artifact of ['verify-ledger.jsonl', 'review-verdict.json']) {
+    assert.ok(routine.includes(artifact), `the routine must publish ${artifact}`);
+  }
+  assert.match(routine, /git add -f/, 'the artifacts are git-ignored, so publishing them requires add -f');
+});
+
+check('/quetrex:merge exists, verifies the pin, and offers no bypass', () => {
+  assert.ok(exists('.claude/commands/merge.md'), '.claude/commands/merge.md must ship — it is the only merge path');
+  const m = read('.claude/commands/merge.md');
+  assert.match(m, /^---\ndescription: /, 'merge.md needs command frontmatter to be discoverable');
+  assert.match(m, /-gates/, 'merge.md must fetch the gates branch');
+  assert.match(m, /GATES_SHA.*PR_SHA|PR_SHA.*GATES_SHA/s, 'merge.md must compare the evidence sha to the PR head sha');
+  assert.match(m, /merge-gate/, 'merge.md must defer the decision to merge-gate.sh, not re-implement it');
+  assert.match(m, /task-status "\$TASK" merged/, 'merge.md must move the task to merged — the bookkeeping that never ran');
+  assert.match(m, /worktree remove/, 'merge.md must tear down the task worktree');
+  // The whole point is that it cannot be forced. These are the escape hatches that would
+  // turn the gate back into decoration.
+  assert.ok(!/--admin/.test(m), 'merge.md must not use gh --admin, which bypasses branch protection');
+  // Narrowly: a FORCED MERGE or a FORCED PUSH would defeat the gate. `worktree remove --force`
+  // is ordinary teardown and must stay allowed — an over-broad rule here fails on its own
+  // cleanup code, which is exactly what happened when this test was first written.
+  assert.ok(!/pr merge[^\n]*--force/.test(m), 'merge.md must not force a merge');
+  assert.ok(!/push[^\n]*(--force|\s-f\b)/.test(m), 'merge.md must not force-push');
+});
+
+check('task-build no longer claims there is no merge command', () => {
+  const tb = read('.claude/commands/task-build.md');
+  assert.ok(
+    !/no \`\/quetrex:task-merge\` command/.test(tb),
+    'task-build.md still says no merge command exists — it now does, and telling the user otherwise '
+      + 'sends them back to merging by hand, which skips every post-merge step',
+  );
+  assert.match(tb, /\/quetrex:merge/, 'task-build.md must point at /quetrex:merge as the terminus follow-up');
+});
+
+// --- 0d. THE BRANCH PREFIX RULE, STATED CORRECTLY -------------------------
+// claude/ is not a style choice and not cargo cult: the routines documentation says pushes to
+// claude/-prefixed branches "are always accepted", while any other branch is rejected if it is
+// protected, already has someone else's open PR, or carries someone else's commits — the last
+// of which rules out shared feature/* branches. Our prose used to give a fabricated reason
+// ("blocked until a repo admin allows that prefix"), which is how the rule got questioned as
+// cargo cult and nearly removed.
+check('no shipped file still prescribes a feature/ branch prefix', () => {
+  const offenders = [];
+  for (const rel of ['.claude/agents/developer.md', '.claude/lib/cloud-build-routine.md',
+                     '.claude/skills/quetrex-pipeline/SKILL.md']) {
+    const body = read(rel);
+    // A prescription looks like `feature/<...>` or `feature/` as the stated prefix. Prose
+    // EXPLAINING why shared feature/* branches fail is allowed and desirable.
+    for (const line of body.split('\n')) {
+      if (!/feature\//.test(line)) continue;
+      if (/rules out|rejected|someone else|why|not allowed|fails/i.test(line)) continue;
+      offenders.push(rel + ': ' + line.trim().slice(0, 100));
+    }
+  }
+  assert.deepStrictEqual(offenders, [], 'these still prescribe feature/ as the branch prefix:\n  ' + offenders.join('\n  '));
+});
+
+check('init states the Claude GitHub App as required, with the reason', () => {
+  const init = read('.claude/commands/init.md');
+  assert.match(init, /GitHub App/, 'init must cover the Claude GitHub App');
+  assert.match(init, /does not enable webhook delivery|never reviewed/,
+    'init must say WHY the App matters: without it PR-triggered review never fires and nothing errors');
+  assert.ok(
+    /REQUIRED|Action needed/.test(init),
+    'init must present the App as required/outstanding, not as an optional extra — it is the easiest step to forget',
+  );
+});
+
 // --- 1. plugin.json manifest -----------------------------------------------
 check('.claude-plugin/plugin.json parses and carries the v2 identity', () => {
   const p = readJson('.claude-plugin/plugin.json');

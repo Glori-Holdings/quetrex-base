@@ -18,7 +18,7 @@ it.
 | `{{REPO_URL}}` | the repo's `https://` clone URL |
 | `{{SPEC_BRANCH}}` | the helper branch carrying the approved spec, `quetrex-spec/{{TASK}}` |
 | `{{BASE_BRANCH}}` | the branch the resulting PR targets (`main`, or an epic's integration branch) |
-| `{{BRANCH_PREFIX}}` | the project's branch prefix (`feature/`, or `claude/` where push rules are tighter) |
+| `{{BRANCH_PREFIX}}` | the project's branch prefix — `claude/`, the only prefix a cloud routine is always allowed to push |
 
 ---
 
@@ -104,6 +104,39 @@ the PR — that is also a `transport_failure`, not a silent success.
 **Do NOT merge the PR.** An open PR into {{BASE_BRANCH}} is the terminus. Merge is decided
 downstream by the reviewer's AUTO_MERGE verdict, `merge-gate.sh`, and GitHub branch
 protection on the real repo — this routine bypasses none of them and merges nothing itself.
+
+### 5b. Publish the gate evidence — without this, the PR can never be merged
+
+Every gate artifact you just produced lives in **this** sandbox, and `.quetrex/*` is
+git-ignored, so a normal push leaves all of it behind. The operator's machine then runs
+`merge-gate.sh`, finds no verdict and no ledger, and denies the merge — which is exactly why
+merging used to require going around the gate by hand. **The evidence has to come home.**
+
+Push it to a dedicated branch, the same way the spec branch delivered the plan here:
+
+    HEAD_SHA="$(git rev-parse HEAD)"        # the exact commit the PR will merge
+    GATES_BRANCH="{{BRANCH_PREFIX}}{{TASK_ID}}-gates"
+    node -e 'const fs=require("fs");fs.writeFileSync(".quetrex/gates-head",process.argv[1]+"\n")' "$HEAD_SHA"
+    git checkout -q -b "$GATES_BRANCH"
+    git add -f .quetrex/verify-ledger.jsonl .quetrex/review-verdict.json \
+               .quetrex/qa-report.json .quetrex/security-findings.json \
+               .quetrex/gates-head 2>/dev/null || true
+    git -c user.name='quetrex-bot' -c user.email='quetrex-bot@users.noreply.github.com' \
+      commit -q -m "chore(gates): {{TASK_ID}} gate artifacts for $HEAD_SHA"
+    git push -f origin "$GATES_BRANCH"
+
+Rules that make this evidence and not decoration:
+
+- Publish the artifacts **exactly as the stages wrote them.** Do not edit, summarise,
+  re-time, or re-`sha` anything. If a gate is red, publish it red — `/quetrex:merge` is
+  supposed to refuse, and a doctored artifact is the one failure mode that would make the
+  whole gate meaningless.
+- `gates-head` must be the **same commit the PR merges.** If you push more commits after
+  writing it, re-run this step; a mismatch makes the local gate reject the artifacts as
+  stale, which is the correct outcome.
+- Include whichever of the four files exist. A missing `security-findings.json` on a neutral
+  diff is legitimate; a missing `review-verdict.json` is not, and the merge will be denied.
+- Say the gates branch name in your final message so the operator can see it.
 
 **Do NOT depend on cloud board-MCP.** Writing kanban status/comments needs interactive
 OAuth this headless session does not have. The local half already holds the spec and
