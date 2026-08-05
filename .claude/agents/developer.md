@@ -105,7 +105,9 @@ Before writing against any external library or framework API, confirm current us
 
 ## Committing (worktree-aware)
 
-You run inside your own worktree on your own sub-branch (`feature/<desc>-<workstream>`). Commit there, and always target the worktree explicitly so the `enforce-branch` hook sees the real branch instead of blocking on `main`:
+You run inside your own worktree on your own sub-branch, built from the project's own
+`branchPrefix` (`claude/<desc>-<workstream>` by default — a cloud routine is only guaranteed
+to be able to push `claude/*`). Commit there, and always target the worktree explicitly so the `enforce-branch` hook sees the real branch instead of blocking on `main`:
 
 ```bash
 ROOT=$(git rev-parse --show-toplevel)

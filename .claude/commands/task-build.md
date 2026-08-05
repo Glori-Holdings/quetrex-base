@@ -518,8 +518,14 @@ standalone task's BUILD half as a **fired cloud Routine** (Step 6A), an epic chi
 toward `pr_ready`. The pipeline's terminus is an open PR. Whether it then merges
 is decided by the reviewer's verdict and enforced by `merge-gate.sh` — `AUTO_MERGE` pinned
 to HEAD with a green ledger permits the squash merge; `REWORK` / `ESCALATE_HUMAN` sends the
-task to `needs_clarity` for `/quetrex:task-rework`. There is **no `/quetrex:task-merge` command**; do
-not tell the user to run one.
+task to `needs_clarity` for `/quetrex:task-rework`. The merge itself is **`/quetrex:merge <TASK-ID>`**, and you should tell the user to run
+it. It is not a bypass: the cloud build publishes its gate artifacts to
+`<branchPrefix><TASK>-gates` (see `.claude/lib/cloud-build-routine.md` step 5b), and
+`/quetrex:merge` fetches them, proves they are pinned to the PR head, and then merges
+through the same `merge-gate.sh` that has always run. Without that transport step the gate
+finds no verdict on the operator machine and denies every merge — which is why merging used
+to happen by hand on GitHub, and why the post-merge bookkeeping (status -> `merged`, branch
+and worktree teardown) never ran.
 
 **Epic, at the fixpoint.** Partition the children:
 
