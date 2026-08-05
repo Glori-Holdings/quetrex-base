@@ -71,6 +71,31 @@ else
   fail "behind on quetrex should print a /quetrex:update nudge (got: '$OUT', rc=$RC)"
 fi
 
+# --- 1b. behind on the REAL 2.0.0 -> 2.0.1 engine bump -----------------------
+# Proves the update-notification engine fires on the actual version bump this
+# workstream ships (plugin.json 2.0.0 -> 2.0.1 / marketplace.json quetrex
+# 2.0.1), against a fixture marketplace declaring 2.0.1 as latest.
+REAL_MARKET="$WORK/real-bump-marketplace.json"
+cat > "$REAL_MARKET" <<'JSON'
+{
+  "name": "quetrex",
+  "plugins": [
+    { "name": "quetrex", "version": "2.0.1" },
+    { "name": "quetrex-factory", "version": "1.5.0" }
+  ]
+}
+JSON
+OUT="$(CLAUDE_PLUGIN_DATA="$WORK/c1b" QX_UPDATE_MARKETPLACE_FILE="$REAL_MARKET" \
+       QX_UPDATE_TTL_SECONDS="${QX_UPDATE_TTL_SECONDS:-86400}" \
+       QX_UPDATE_INSTALLED_QUETREX=2.0.0 QX_UPDATE_INSTALLED_FACTORY=1.5.0 \
+       bash "$HOOK" </dev/null)"; RC=$?
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q '/quetrex:update' \
+   && printf '%s' "$OUT" | grep -q '2.0.1'; then
+  pass "the 2.0.0 -> 2.0.1 engine bump fires a /quetrex:update nudge naming 2.0.1"
+else
+  fail "installed 2.0.0 against a 2.0.1 fixture should print a /quetrex:update nudge naming 2.0.1 (got: '$OUT', rc=$RC)"
+fi
+
 # --- 2. behind on the factory pin -> prints, naming quetrex-factory ----------
 OUT="$(QX_UPDATE_INSTALLED_QUETREX=2.4.0 QX_UPDATE_INSTALLED_FACTORY=1.0.0 run_hook c2)"; RC=$?
 if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'quetrex-factory' \
