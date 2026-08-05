@@ -450,6 +450,31 @@ else
   fail "ALLOW(sensitive diff w/ artifact): expected exit 0 + empty stdout, got exit $CODE stdout: [$OUT]"
 fi
 
+# =============================================================================
+# SYNCING main FROM ITS OWN UPSTREAM IS NOT A SHIP.
+#
+# `git merge --ff-only origin/main` while on main brings down commits that
+# already went through a PR and through this gate. Denying it blocked the
+# routine post-merge return to main -- a large part of why post-merge cleanup
+# never became automatic, and why the gate was reported as blocking `git pull`.
+# A merge of anything ELSE into main is still a ship and still gated.
+#
+# The fixture is left in a DENYING state, so an 'allowed' result can only mean
+# the command was never classified as a merge vector.
+# =============================================================================
+write_ledger_at "0000000000000000000000000000000000000000"
+write_verdict_at "$HEAD_SHA"
+
+assert_allowed "ff-only sync of main from origin/main"       "git -C $FIXTURE merge --ff-only origin/$MAIN"
+assert_allowed "plain merge of origin/main into main"        "git -C $FIXTURE merge origin/$MAIN"
+assert_allowed "merge from the tracked upstream (@{u})"      "git -C $FIXTURE merge @{u}"
+assert_allowed "sync with extra flags"                       "git -C $FIXTURE merge --ff-only --no-edit upstream/$MAIN"
+
+assert_denied  "merging a FEATURE branch into main"          "git -C $FIXTURE merge claude/some-feature"
+assert_denied  "merging a remote feature ref into main"      "git -C $FIXTURE merge origin/claude/some-feature"
+assert_denied  "merging a bare sha into main"                "git -C $FIXTURE merge 1234abcd"
+assert_denied  "merge --no-ff of a feature branch into main" "git -C $FIXTURE merge --no-ff claude/some-feature"
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "merge-gate.test.sh: all checks passed"
