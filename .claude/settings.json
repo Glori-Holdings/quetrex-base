@@ -138,8 +138,6 @@
   "remoteControlAtStartup": false,
   "enabledPlugins": {
     "quetrex@quetrex": true,
-    "quetrex-factory@quetrex": [
-      "1.2.1"
-    ]
+    "quetrex-factory@quetrex": true
   }
 }

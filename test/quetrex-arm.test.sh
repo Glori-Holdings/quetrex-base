@@ -132,32 +132,24 @@ else
 fi
 
 FPIN="$(json_get "$SETTINGS1" 'enabledPlugins.quetrex-factory@quetrex')"
-FPIN_UNQUOTED="$(printf '%s' "$FPIN" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s)))}catch{process.stdout.write(s)}})')"
-if [ "$FPIN" != "true" ] && [ "$FPIN" != '"true"' ] && printf '%s' "$FPIN_UNQUOTED" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-  pass "enabledPlugins['quetrex-factory@quetrex'] is a concrete version, never true (got: $FPIN_UNQUOTED)"
+# NO VERSION PINS. This block used to REQUIRE a one-element array pin. That
+# requirement was the outage: a pinned entry makes the plugin count as DISABLED
+# for dependency resolution, so the whole /quetrex:* command layer failed to load
+# and no Quetrex command existed in any armed repo. Measured with
+# `claude plugin list` across four checkouts: pin absent -> enabled; true ->
+# enabled; ["1.2.1"] (the exact installed version) -> FAILED TO LOAD; ["1.1.0"] ->
+# FAILED TO LOAD. Booleans only now; the engine auto-updates and the version is
+# surfaced by bin/quetrex-version in the status bar.
+if [ "$FPIN" = "true" ]; then
+  pass "enabledPlugins['quetrex-factory@quetrex'] is exactly true (never a version pin)"
 else
-  fail "enabledPlugins['quetrex-factory@quetrex'] must be a concrete X.Y.Z version, never true (got: $FPIN)"
+  fail "enabledPlugins['quetrex-factory@quetrex'] must be true — a version pin stops the command layer from loading (got: $FPIN)"
 fi
 
-# NOTE: the "concrete version" check above (FPIN_UNQUOTED, via String(JSON.parse(...)))
-# CANNOT tell a one-element array pin apart from a bare version string — JS coerces
-# String(["1.0.0"]) to the exact same "1.0.0" as String("1.0.0"). It stays as
-# documentation of intent, but the shape assertion below is the one that actually
-# proves the on-disk value is the array Claude Code's settings schema requires
-# (enabledPlugins: record<string, string[] | boolean | undefined> — a bare string
-# fails validation with "Invalid input" and the entry is silently dropped).
-FPIN_IS_ARRAY="$(printf '%s' "$FPIN" | node -e '
-  let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
-    let v; try { v = JSON.parse(s); } catch { v = undefined; }
-    const ok = Array.isArray(v) && v.length === 1 && typeof v[0] === "string" && /^[0-9]+\.[0-9]+\.[0-9]+$/.test(v[0]);
-    process.stdout.write(ok ? "yes" : "no");
-  });
-')"
-if [ "$FPIN_IS_ARRAY" = "yes" ]; then
-  pass "enabledPlugins['quetrex-factory@quetrex'] is a one-element ARRAY pin, not a bare string (got: $FPIN)"
-else
-  fail "enabledPlugins['quetrex-factory@quetrex'] must be a one-element array like [\"1.0.0\"] — a bare string fails Claude Code's settings validation with Invalid input (got: $FPIN)"
-fi
+case "$FPIN" in
+  '['*|'"'*) fail "enabledPlugins['quetrex-factory@quetrex'] must not be an array or a string (got: $FPIN)" ;;
+  *)         pass "enabledPlugins['quetrex-factory@quetrex'] is neither an array nor a version string" ;;
+esac
 
 MKT="$(json_get "$SETTINGS1" 'extraKnownMarketplaces.quetrex.source')"
 EXPECT_MKT='{"source":"github","repo":"Glori-Holdings/quetrex-plugins"}'
@@ -412,50 +404,35 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Marketplace unreachable — fails OPEN on the factory pin, never writes a
-#    bogus/floating value, still enables quetrex@quetrex, and still exits 0.
-#    This is the exact branch AC5's "never true" guarantee depends on: a
-#    regression here could silently degrade to writing `true` (or crashing)
-#    the moment the marketplace manifest is unreachable, which is precisely
-#    when a fresh /quetrex:init is most likely to hit it (offline, DNS
-#    hiccup, GitHub raw outage).
+# 6. OFFLINE. Arming used to fetch the marketplace manifest to resolve a concrete
+#    factory version for the pin, and degraded when it could not. Nothing is
+#    pinned now, so there is no version to resolve and no network dependency at
+#    all: an unreachable marketplace must be a complete non-event.
 # ---------------------------------------------------------------------------
 REPO3="$WORK/repo3"
 mkdir -p "$REPO3"
 
-UNREACHABLE_OUT="$(QX_ARM_MARKET_URL="file://$WORK/does-not-exist.json" "$ARM" "$REPO3" "$KANBAN_URL" 2>&1)"
-RC_UNREACHABLE=$?
+OFFLINE_OUT="$(QX_ARM_MARKET_URL="file://$WORK/does-not-exist.json" "$ARM" "$REPO3" "$KANBAN_URL" 2>&1)"
+RC_OFFLINE=$?
 
-if [ "$RC_UNREACHABLE" -eq 0 ]; then
-  pass "unreachable marketplace still exits 0 (fails open on the pin, not on the run)"
+if [ "$RC_OFFLINE" -eq 0 ]; then
+  pass "arming with an unreachable marketplace exits 0 (no network dependency remains)"
 else
-  fail "unreachable marketplace should still exit 0 (got rc=$RC_UNREACHABLE, output: $UNREACHABLE_OUT)"
+  fail "arming offline should exit 0 (got rc=$RC_OFFLINE, output: $OFFLINE_OUT)"
 fi
 
 QPIN3="$(json_get "$REPO3/.claude/settings.json" 'enabledPlugins.quetrex@quetrex')"
-if [ "$QPIN3" = "true" ]; then
-  pass "unreachable marketplace still enables quetrex@quetrex"
+FPIN3="$(json_get "$REPO3/.claude/settings.json" 'enabledPlugins.quetrex-factory@quetrex')"
+if [ "$QPIN3" = "true" ] && [ "$FPIN3" = "true" ]; then
+  pass "arming offline still enables BOTH plugins with true"
 else
-  fail "unreachable marketplace should still enable quetrex@quetrex (got: $QPIN3)"
+  fail "arming offline must enable both plugins with true (quetrex=$QPIN3, factory=$FPIN3)"
 fi
 
-FPIN3_RAW="$(node -e '
-  const fs = require("fs");
-  let o = {};
-  try { o = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
-  const has = Object.prototype.hasOwnProperty.call(o.enabledPlugins || {}, "quetrex-factory@quetrex");
-  process.stdout.write(has ? JSON.stringify(o.enabledPlugins["quetrex-factory@quetrex"]) : "ABSENT");
-' "$REPO3/.claude/settings.json")"
-if [ "$FPIN3_RAW" = "ABSENT" ]; then
-  pass "unreachable marketplace defers the factory pin entirely (no key written, never true)"
+if printf '%s' "$OFFLINE_OUT" | grep -qi 'unreachable\|deferred'; then
+  fail "arming must no longer mention an unreachable marketplace or a deferred pin (got: $OFFLINE_OUT)"
 else
-  fail "unreachable marketplace must not write any quetrex-factory@quetrex value (got: $FPIN3_RAW)"
-fi
-
-if printf '%s' "$UNREACHABLE_OUT" | grep -qi 'marketplace unreachable'; then
-  pass "unreachable marketplace warns on stderr/stdout"
-else
-  fail "unreachable marketplace should warn about the deferred pin (got: $UNREACHABLE_OUT)"
+  pass "arming offline reports no marketplace/pin caveat — there is nothing to defer"
 fi
 
 echo

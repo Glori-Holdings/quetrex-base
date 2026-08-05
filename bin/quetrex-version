@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+#
+# quetrex-version — print the Quetrex engine version that is actually RUNNING.
+#
+# WHY THIS EXISTS. Quetrex no longer pins versions anywhere. A pinned
+# `enabledPlugins` entry makes the plugin count as DISABLED for dependency
+# resolution, so the whole `/quetrex:*` command layer failed to load in every
+# armed repo — the repos with the "correct" concrete pin were the broken ones.
+# Pins also broke updating: a stale pin, or one naming a version the machine does
+# not have, silently strands the team while every repo looks configured.
+#
+# So config carries no version, and the version becomes VISIBLE instead:
+# this tool prints it, and the status bar shows it. One place, always true,
+# nothing to bump.
+#
+# usage:
+#   quetrex-version            # -> "Quetrex v2.1.0"   (status-bar form)
+#   quetrex-version --plain    # -> "2.1.0"            (scripts)
+#
+# Resolution order:
+#   1. ${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json — authoritative when the
+#      caller is running inside the plugin.
+#   2. the manifest next to THIS SCRIPT (../.claude-plugin/plugin.json). bin/
+#      sits at the plugin root, so this is the package the tool actually shipped
+#      in — and it is the only source that works in a bare checkout with no
+#      plugin cache at all, which is exactly the CI case. Resolving purely from
+#      the cache made this tool fail on a clean runner.
+#   3. the newest version directory in the local plugin cache — for callers with
+#      neither, such as a status-line script running outside any plugin.
+# Prints nothing and exits 1 when no engine can be found, so a status line can
+# simply omit the segment.
+
+set -uo pipefail
+
+_qxv_read_version() {
+  [ -f "$1" ] || return 1
+  node -e '
+    let o; try { o = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); } catch { process.exit(1); }
+    if (!o || !o.version) { process.exit(1); }
+    process.stdout.write(String(o.version));
+  ' "$1" 2>/dev/null
+}
+
+_qxv_from_cache() {
+  local base="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/quetrex/quetrex"
+  [ -d "$base" ] || return 1
+  # Highest semver among the installed version directories. `sort -V` is not
+  # portable to macOS, so compare numerically field by field.
+  local best=""
+  for d in "$base"/*/; do
+    [ -d "$d" ] || continue
+    local v; v="$(basename "$d")"
+    case "$v" in
+      [0-9]*.[0-9]*.[0-9]*) ;;
+      *) continue ;;
+    esac
+    if [ -z "$best" ]; then best="$v"; continue; fi
+    best="$(printf '%s\n%s\n' "$best" "$v" | awk -F. '{ printf "%05d%05d%05d %s\n", $1, $2, $3, $0 }' | sort | tail -n1 | cut -d" " -f2)"
+  done
+  [ -n "$best" ] || return 1
+  # Prefer the manifest inside that directory; fall back to the directory name,
+  # which for a marketplace install IS the version.
+  _qxv_read_version "$base/$best/.claude-plugin/plugin.json" || printf '%s' "$best"
+}
+
+_qxv_self_root() {
+  local d
+  d="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd)" || return 1
+  printf '%s' "$d"
+}
+
+VERSION=""
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+  VERSION="$(_qxv_read_version "$CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json" || true)"
+fi
+if [ -z "$VERSION" ]; then
+  SELF_ROOT="$(_qxv_self_root || true)"
+  [ -n "$SELF_ROOT" ] && VERSION="$(_qxv_read_version "$SELF_ROOT/.claude-plugin/plugin.json" || true)"
+fi
+[ -n "$VERSION" ] || VERSION="$(_qxv_from_cache || true)"
+[ -n "$VERSION" ] || exit 1
+
+case "${1:-}" in
+  --plain) printf '%s\n' "$VERSION" ;;
+  *)       printf 'Quetrex v%s\n' "$VERSION" ;;
+esac
