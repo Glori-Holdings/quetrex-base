@@ -125,6 +125,26 @@ else
   fail "enabledPlugins['quetrex-factory@quetrex'] must be a concrete X.Y.Z version, never true (got: $FPIN)"
 fi
 
+# NOTE: the "concrete version" check above (FPIN_UNQUOTED, via String(JSON.parse(...)))
+# CANNOT tell a one-element array pin apart from a bare version string — JS coerces
+# String(["1.0.0"]) to the exact same "1.0.0" as String("1.0.0"). It stays as
+# documentation of intent, but the shape assertion below is the one that actually
+# proves the on-disk value is the array Claude Code's settings schema requires
+# (enabledPlugins: record<string, string[] | boolean | undefined> — a bare string
+# fails validation with "Invalid input" and the entry is silently dropped).
+FPIN_IS_ARRAY="$(printf '%s' "$FPIN" | node -e '
+  let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+    let v; try { v = JSON.parse(s); } catch { v = undefined; }
+    const ok = Array.isArray(v) && v.length === 1 && typeof v[0] === "string" && /^[0-9]+\.[0-9]+\.[0-9]+$/.test(v[0]);
+    process.stdout.write(ok ? "yes" : "no");
+  });
+')"
+if [ "$FPIN_IS_ARRAY" = "yes" ]; then
+  pass "enabledPlugins['quetrex-factory@quetrex'] is a one-element ARRAY pin, not a bare string (got: $FPIN)"
+else
+  fail "enabledPlugins['quetrex-factory@quetrex'] must be a one-element array like [\"1.0.0\"] — a bare string fails Claude Code's settings validation with Invalid input (got: $FPIN)"
+fi
+
 MKT="$(json_get "$SETTINGS1" 'extraKnownMarketplaces.quetrex.source')"
 EXPECT_MKT='{"source":"github","repo":"Glori-Holdings/quetrex-plugins"}'
 if [ "$MKT" = "$EXPECT_MKT" ]; then
