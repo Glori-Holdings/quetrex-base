@@ -20,10 +20,12 @@
 #   1. No .quetrex/ESCALATION file (a bounded loop hit its cap).
 #   2. .quetrex/review-verdict.json exists, .verdict == "AUTO_MERGE", its
 #      .sha == HEAD of the repo (so a verdict for an OLDER commit — i.e. new
-#      commits landed after review — cannot authorize this merge), AND its
-#      .inputs.nativeSecurityReview is "clean" or "issues" (proof the native
-#      security pass actually RAN — the reviewer cannot self-exempt from
-#      independent review and still auto-merge).
+#      commits landed after review — cannot authorize this merge), AND an
+#      INDEPENDENT security pass is on record: either
+#      .inputs.nativeSecurityReview is "clean"/"issues" (the native pass ran),
+#      or the separate security-reviewer agent's HEAD-pinned
+#      security-findings.json is clean, or no security review was required at
+#      all. The reviewer still cannot self-exempt and auto-merge (see GATE 2b).
 #   3. .quetrex/verify-ledger.jsonl is GREEN: for every command in the current
 #      verify chain, its MOST RECENT ledger entry exited 0 (a never-run or
 #      stale-red command blocks — this closes the stale-green hole).
@@ -43,6 +45,18 @@
 #
 # SCOPE: this hook only governs a repo that quetrex manages — one that has a
 # ./.quetrex/ directory. A repo without it is not gated (exit 0, silent).
+#
+# AND IT GOVERNS ONLY ACTUAL MERGES, IN THE REPO THE COMMAND ACTUALLY TARGETS.
+# Both halves were broken, and both mattered more than any gate this file adds:
+#   - It matched `push` and the token `main` anywhere in the command string, so
+#     `git push <feature-branch> && gh pr create --base main` was denied as a
+#     "push to main". Detection is now per-invocation and anchored.
+#   - It resolved the repo from the SESSION's project dir, not the directory the
+#     command names, so one repo's stale verdict blocked another repo's work.
+#     Resolution is now most-specific-first, and a `gh pr merge --repo` naming
+#     a different repository is refused rather than judged by these artifacts.
+# A gate that fires on non-merges gets routed around on reflex, and then it is
+# not gating anything. Precision IS the safety property here.
 #
 # HOOK SCHEMA: PreToolUse denies via
 #   {"hookSpecificOutput":{"hookEventName":"PreToolUse",
@@ -86,66 +100,172 @@ fi
 [ -z "$COMMAND" ] && exit 0
 
 # --- is this a merge-to-main vector at all? --------------------------------
-# A git subcommand invoked bare (`git merge`) or with a leading `-C <dir>`
-# (`git -C /worktree push`) — the form this workflow uses inside worktrees.
-GIT_PFX='git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+'
+#
+# Evaluated PER INVOCATION, never against the whole command string.
+#
+# THE DEFECT THIS REPLACES. The previous version asked two questions of the
+# entire command: does it contain a `git push`, and does it contain the token
+# `main`. So this — the standard "push a feature branch, then open its PR" —
+#
+#     git -C /wt push -u origin claude/my-feature && gh pr create --base main
+#
+# was classified "push to main" because `--base main` belonged to a DIFFERENT
+# sub-command. Opening a PR for a feature branch is not a merge. It denied with
+# a stale REWORK verdict from an unrelated task, and the workaround (`gh api`)
+# became routine. That is the worst failure mode a ship gate has: one that
+# cries wolf gets bypassed on reflex, and then it is not gating anything.
+#
+# Now: split the command on shell operators, normalize away wrappers, and
+# require the invocation to BEGIN its segment. The token `main` inside another
+# sub-command's flags, a commit message, a PR body, or a heredoc line can no
+# longer trigger the gate — while every genuine vector still does.
+#
+# Residual, and deliberately so: a vector constructed to hide from a regex
+# (git plumbing, a script file, a library binding) is not detected. This gate
+# mechanizes the pipeline's own policy against the pipeline's own commands; it
+# is not a sandbox, and pretending otherwise is what produced the false
+# positives in the first place.
+
+# Split on && || ; and |. awk, not sed: BSD sed does not interpret \n in a
+# replacement, so `sed 's/&&/\n/'` yields a literal "n" on macOS.
+SEGMENTS=$(printf '%s' "$COMMAND" | awk '{gsub(/&&|\|\||;|\|/, "\n"); print}')
+
+# Strip leading wrappers so `sudo git push …`, `FOO=1 git push …` and
+# `bash -c "git push …"` still anchor on the real invocation.
+normalize_segment() {
+  local s="$1" first
+  s=$(printf '%s' "$s" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  while [ -n "$s" ]; do
+    first="${s%%[[:space:]]*}"
+    case "$first" in
+      sudo|env|eval|command|nohup|time)
+        s="${s#"$first"}" ;;
+      bash|sh|zsh)
+        # bash -c '<payload>' — unwrap the payload, then keep normalizing it.
+        if [[ "$s" =~ ^(bash|sh|zsh)[[:space:]]+-c[[:space:]]+(.*)$ ]]; then
+          s="${BASH_REMATCH[2]}"
+          s="${s#[\"\']}"; s="${s%[\"\']}"
+        else
+          break
+        fi ;;
+      *)
+        # A leading VAR=value assignment only — matched with a regex, not a
+        # case glob: `git commit -m "a=b"` also contains `=`, and stripping to
+        # the first space there would drop the `git` and silently un-detect a
+        # real vector.
+        if [[ "$first" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+          s="${s#"$first"}"
+        else
+          break
+        fi ;;
+    esac
+    s=$(printf '%s' "$s" | sed 's/^[[:space:]]*//')
+  done
+  printf '%s' "$s"
+}
 
 # Tag pushes (deploy/version rollback tags) are exempt — they are not merges.
+# Takes the SEGMENT, not the whole command: a `git tag` earlier in a compound
+# command must not exempt a real push to main later in it.
 is_tag_push() {
-  [[ "$COMMAND" == *"git tag"* ]] || \
-  [[ "$COMMAND" == *"refs/tags/"* ]] || \
-  [[ "$COMMAND" =~ push[[:space:]]+(origin[[:space:]]+)?deploy/ ]] || \
-  [[ "$COMMAND" =~ push[[:space:]]+(origin[[:space:]]+)?v[0-9] ]]
+  local seg="$1"
+  [[ "$seg" == *"refs/tags/"* ]] || \
+  [[ "$seg" =~ ^git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+tag([[:space:]]|$) ]] || \
+  [[ "$seg" =~ push[[:space:]]+(--[^[:space:]]+[[:space:]]+)*(origin[[:space:]]+)?deploy/ ]] || \
+  [[ "$seg" =~ push[[:space:]]+(--[^[:space:]]+[[:space:]]+)*(origin[[:space:]]+)?v[0-9] ]]
 }
+
+# Does this segment's own argument list target the protected branch?
+targets_protected_branch() {
+  local seg="$1"
+  [[ "$seg" =~ (^|[[:space:]:/])(master|main)([[:space:]]|$) ]] || \
+  [[ "$seg" =~ :(refs/heads/)?(master|main)([[:space:]]|$) ]]
+}
+
+GIT_ANCHOR='^git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?([[:space:]]+-[^[:space:]]+)*[[:space:]]+'
 
 is_merge_vector=0
 merge_kind=""
+VECTOR_SEG=""
+PENDING_CD=""
 
-# (a) gh pr merge — the primary vector under the new policy.
-if [[ "$COMMAND" == *"gh pr merge"* ]]; then
-  is_merge_vector=1; merge_kind="gh pr merge"
-fi
+while IFS= read -r seg; do
+  [ -z "$seg" ] && continue
+  norm=$(normalize_segment "$seg")
+  [ -z "$norm" ] && continue
 
-# (b) git push targeting master/main (push straight to the protected branch,
-#     including from a feature branch — which enforce-branch does not catch).
-if [ "$is_merge_vector" -eq 0 ] && [[ "$COMMAND" =~ ${GIT_PFX}push ]] && ! is_tag_push; then
-  if [[ "$COMMAND" =~ (^|[[:space:]:/])(master|main)([[:space:]]|$) ]] || \
-     [[ "$COMMAND" =~ :(refs/heads/)?(master|main)([[:space:]]|$) ]]; then
-    is_merge_vector=1; merge_kind="push to main"
+  # Track `cd <dir>` so a later `git merge` in the same compound command is
+  # evaluated against the directory it will actually run in.
+  if [[ "$norm" =~ ^cd[[:space:]]+([^[:space:]]+) ]]; then
+    PENDING_CD=$(printf '%s' "${BASH_REMATCH[1]}" | sed 's/^["'\'']*//; s/["'\'']*$//')
+    continue
   fi
-fi
 
-# (c) git merge while ON master/main (a local merge into the protected branch).
-if [ "$is_merge_vector" -eq 0 ] && [[ "$COMMAND" =~ ${GIT_PFX}merge ]]; then
-  TDIR=""
-  if [[ "$COMMAND" =~ cd[[:space:]]+([^\&\;]+)[[:space:]]*\&\& ]]; then
-    TDIR=$(printf '%s' "${BASH_REMATCH[1]}" | sed 's/^[ "'\'']*//;s/[ "'\'']*$//')
-  elif [[ "$COMMAND" =~ git[[:space:]]+-C[[:space:]]+([^[:space:]]+) ]]; then
-    TDIR="${BASH_REMATCH[1]}"
+  # (a) gh pr merge — the primary vector under the new policy.
+  if [[ "$norm" =~ ^gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$) ]]; then
+    is_merge_vector=1; merge_kind="gh pr merge"; VECTOR_SEG="$norm"; break
   fi
-  BR=""
-  if [ -n "$TDIR" ] && [ -d "$TDIR" ]; then
-    BR=$(git -C "$TDIR" branch --show-current 2>/dev/null)
-  elif [ -n "$SESSION_CWD" ] && [ -d "$SESSION_CWD" ]; then
-    BR=$(git -C "$SESSION_CWD" branch --show-current 2>/dev/null)
-  else
-    BR=$(git branch --show-current 2>/dev/null)
+
+  # (b) git push whose OWN arguments target master/main (a push straight to the
+  #     protected branch, including from a feature branch — which
+  #     enforce-branch does not catch).
+  if [[ "$norm" =~ ${GIT_ANCHOR}push([[:space:]]|$) ]] && ! is_tag_push "$norm"; then
+    if targets_protected_branch "$norm"; then
+      is_merge_vector=1; merge_kind="push to main"; VECTOR_SEG="$norm"; break
+    fi
   fi
-  if [ "$BR" = "master" ] || [ "$BR" = "main" ]; then
-    is_merge_vector=1; merge_kind="merge into main"
+
+  # (c) git merge while ON master/main (a local merge into the protected branch).
+  if [[ "$norm" =~ ${GIT_ANCHOR}merge([[:space:]]|$) ]]; then
+    TDIR=""
+    if [[ "$norm" =~ git[[:space:]]+-C[[:space:]]+([^[:space:]]+) ]]; then
+      TDIR=$(printf '%s' "${BASH_REMATCH[1]}" | sed 's/^["'\'']*//; s/["'\'']*$//')
+    elif [ -n "$PENDING_CD" ]; then
+      TDIR="$PENDING_CD"
+    fi
+    BR=""
+    if [ -n "$TDIR" ] && [ -d "$TDIR" ]; then
+      BR=$(git -C "$TDIR" branch --show-current 2>/dev/null)
+    elif [ -n "$SESSION_CWD" ] && [ -d "$SESSION_CWD" ]; then
+      BR=$(git -C "$SESSION_CWD" branch --show-current 2>/dev/null)
+    else
+      BR=$(git branch --show-current 2>/dev/null)
+    fi
+    if [ "$BR" = "master" ] || [ "$BR" = "main" ]; then
+      is_merge_vector=1; merge_kind="merge into main"; VECTOR_SEG="$norm"; break
+    fi
   fi
-fi
+done <<< "$SEGMENTS"
 
 # Not a merge-to-main command -> nothing to gate.
 [ "$is_merge_vector" -eq 1 ] || exit 0
 
-# --- resolve repo root (worktree-safe) -------------------------------------
+# --- resolve the repo THIS COMMAND TARGETS (worktree-safe) ------------------
+#
+# THE SECOND DEFECT THIS REPLACES: resolution used to start from
+# CLAUDE_PROJECT_DIR — the SESSION's primary repo — so a command operating on
+# another checkout was judged against the session repo's artifacts. Observed in
+# the wild: branch cleanup in quetrex-plugins denied by quetrex-base's stale
+# review verdict. One repo's REWORK must never block another repo's merge.
+#
+# Order is now most-specific-first: the directory named by the command itself,
+# then the session cwd, and only then the project dir.
+TARGET_DIR=""
+if [[ "$VECTOR_SEG" =~ git[[:space:]]+-C[[:space:]]+([^[:space:]]+) ]]; then
+  TARGET_DIR=$(printf '%s' "${BASH_REMATCH[1]}" | sed 's/^["'\'']*//; s/["'\'']*$//')
+elif [ -n "$PENDING_CD" ]; then
+  TARGET_DIR="$PENDING_CD"
+fi
+
 ROOT=""
-if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "$CLAUDE_PROJECT_DIR" ]; then
-  ROOT=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || ROOT="$CLAUDE_PROJECT_DIR"
+if [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
+  ROOT=$(git -C "$TARGET_DIR" rev-parse --show-toplevel 2>/dev/null)
 fi
 if [ -z "$ROOT" ] && [ -n "$SESSION_CWD" ] && [ -d "$SESSION_CWD" ]; then
   ROOT=$(git -C "$SESSION_CWD" rev-parse --show-toplevel 2>/dev/null)
+fi
+if [ -z "$ROOT" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "$CLAUDE_PROJECT_DIR" ]; then
+  ROOT=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || ROOT="$CLAUDE_PROJECT_DIR"
 fi
 [ -z "$ROOT" ] && ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 
@@ -183,12 +303,108 @@ if ! command -v jq >/dev/null 2>&1; then
   deny "MERGE GATE (ESCALATE_HUMAN): jq is not installed, so the merge gate cannot verify the review verdict, verify ledger, or security findings for '$merge_kind'. A merge must never proceed unevaluated. Install jq, then re-run the pipeline's review-gate."
 fi
 
+# --- a --repo pointing somewhere else is not this repo's merge to judge -----
+# `gh pr merge --repo owner/name` can target a repository that is not the one
+# resolved above, and this repo's artifacts say nothing about that one. Judging
+# it by these artifacts is precisely the cross-repo leak fixed above, so refuse
+# to judge it at all — and refuse LOUDLY rather than allowing, because it IS a
+# merge and the gate must never wave one through unevaluated.
+if [ "$merge_kind" = "gh pr merge" ] && [[ "$VECTOR_SEG" =~ --repo[[:space:]=]+([^[:space:]]+) ]]; then
+  GH_REPO=$(printf '%s' "${BASH_REMATCH[1]}" | sed 's/^["'\'']*//; s/["'\'']*$//' | tr 'A-Z' 'a-z')
+  ORIGIN_SLUG=$(git -C "$ROOT" remote get-url origin 2>/dev/null \
+    | sed -e 's#\.git$##' -e 's#.*[:/]\([^/][^/]*/[^/][^/]*\)$#\1#' | tr 'A-Z' 'a-z')
+  if [ -n "$ORIGIN_SLUG" ] && [ -n "$GH_REPO" ] && [ "$GH_REPO" != "$ORIGIN_SLUG" ]; then
+    deny "MERGE GATE (ESCALATE_HUMAN): this command merges a PR in '$GH_REPO', but it is running against a checkout of '$ORIGIN_SLUG'. The gate artifacts here (review verdict, verify ledger, security findings) describe '$ORIGIN_SLUG' and say NOTHING about '$GH_REPO', so it cannot evaluate this merge — and it will not judge one repo by another repo's verdict. Run the merge from inside a checkout of '$GH_REPO' so that repo's own gates apply."
+  fi
+fi
+
 LEDGER="$QDIR/verify-ledger.jsonl"
 RV="$QDIR/review-verdict.json"
 SEC="$QDIR/security-findings.json"
 ESCALATION="$QDIR/ESCALATION"
 
 HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
+
+# ===========================================================================
+# PREAMBLE — is a security review REQUIRED for this diff, and what does the
+#            independent security artifact say?
+# ===========================================================================
+# Computed HERE, before GATE 2b, because 2b now needs both answers (it used to
+# demand a field the reviewer structurally cannot fill — see GATE 2b). Pure
+# reads, no side effects; GATE 4 and GATE 5 reuse the same values below.
+#
+# A security review is REQUIRED when EITHER of these holds:
+#   (a) the plan set security_review_required:true (router/architect forced it), OR
+#   (b) the ACTUAL diff being merged touches a sensitive surface — auth/authz,
+#       input handling, secrets/crypto, external calls, data-access, or a DB
+#       migration — regardless of what the plan says.
+# (b) is the floor that makes security non-bypassable: a plan that simply omits
+# the flag (defaulting it false) cannot ship sensitive code unreviewed, because
+# the gate inspects the diff itself, not the agent's classification of it.
+PLAN=""
+TASK=$(jq -r '.task // empty' "$QDIR/state.json" 2>/dev/null)
+if [ -n "$TASK" ] && [ -f "$QDIR/plan/$TASK.json" ]; then
+  PLAN="$QDIR/plan/$TASK.json"
+else
+  # Fall back to any single plan file if state.json is unavailable.
+  PLAN=$(ls -1 "$QDIR"/plan/*.json 2>/dev/null | head -n1)
+fi
+PLAN_SEC="false"
+[ -n "$PLAN" ] && PLAN_SEC=$(jq -r '.security_review_required // false' "$PLAN" 2>/dev/null)
+
+# --- (b) inspect the real diff for a sensitive surface ---------------------
+# Diff the feature tip against the base branch (main, else master). Three-dot
+# range = what this branch changed since it diverged.
+BASE_BRANCH="main"
+if ! git -C "$ROOT" rev-parse --verify --quiet main >/dev/null 2>&1; then
+  git -C "$ROOT" rev-parse --verify --quiet master >/dev/null 2>&1 && BASE_BRANCH="master"
+fi
+SENSITIVE_DIFF=0
+CHANGED=$(git -C "$ROOT" diff --name-only "$BASE_BRANCH"...HEAD 2>/dev/null)
+# Fall back to the last commit's files if the base range can't be computed.
+[ -z "$CHANGED" ] && CHANGED=$(git -C "$ROOT" diff --name-only HEAD~1..HEAD 2>/dev/null)
+SENSITIVE_PATH_RE='(auth|authz|authn|login|logout|signin|sign-in|session|oauth|openid|saml|sso|jwt|token|secret|credential|password|passwd|crypto|encrypt|decrypt|cipher|migration|migrate|schema|\.sql$|payment|billing|invoice|checkout|charge|stripe|paypal|permission|role|rbac|tenant|acl|middleware|guard|policy|webhook|\.github/workflows/|dockerfile|docker-compose|terraform|pulumi|kubernetes|k8s|helm)'
+if [ -n "$CHANGED" ] && printf '%s\n' "$CHANGED" | grep -qiE "$SENSITIVE_PATH_RE"; then
+  SENSITIVE_DIFF=1
+fi
+# Also scan ADDED lines for sensitive code patterns even when the path is neutral
+# (data-access by client id, whole-body binding, injection sinks, env/secret use,
+# external calls). Only added (+) lines to avoid flagging deletions.
+if [ "$SENSITIVE_DIFF" -eq 0 ]; then
+  ADDED=$(git -C "$ROOT" diff "$BASE_BRANCH"...HEAD 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+')
+  [ -z "$ADDED" ] && ADDED=$(git -C "$ROOT" diff HEAD~1..HEAD 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+')
+  SENSITIVE_CODE_RE='(findById|find_by_id|findOne|req\.(params|query|body)|request\.(args|form|json|params)|Object\.assign|dangerouslySetInnerHTML|innerHTML|v-html|child_process|execSync|spawnSync|[^a-zA-Z]eval\(|process\.env|os\.environ|getenv|jwt\.|bcrypt|scrypt|argon2|createHash|createCipher|\.raw\(|\$where|authorize\(|authenticate|passport|fetch\(|axios|http\.request|urllib|requests\.(get|post))'
+  if [ -n "$ADDED" ] && printf '%s' "$ADDED" | grep -qE "$SENSITIVE_CODE_RE"; then
+    SENSITIVE_DIFF=1
+  fi
+fi
+
+NEED_SEC="false"; SEC_WHY=""
+if [ "$PLAN_SEC" = "true" ]; then
+  NEED_SEC="true"; SEC_WHY="the plan set security_review_required:true"
+elif [ "$SENSITIVE_DIFF" -eq 1 ]; then
+  NEED_SEC="true"; SEC_WHY="the diff touches a sensitive surface (auth/authz/input/secrets/crypto/external-call/data-access/migration)"
+fi
+
+# sec_artifact_state — what the INDEPENDENT security-reviewer artifact proves
+# about the exact commit being merged. Echoes exactly one of:
+#   missing | malformed | unpinned | stale | critical | clean
+# Stricter than GATE 4 on one point: a head_sha is MANDATORY here, because in
+# GATE 2b this artifact is load-bearing as proof of an independent pass, and an
+# unpinned finding set proves nothing about this commit.
+sec_artifact_state() {
+  [ -f "$SEC" ] || { printf 'missing'; return; }
+  local findings sha crit
+  findings=$(jq -c 'if type == "object" then (.findings // []) else . end' "$SEC" 2>/dev/null)
+  if [ -z "$findings" ] || [ "$findings" = "null" ]; then printf 'malformed'; return; fi
+  sha=$(jq -r 'if type == "object" then (.head_sha // .sha // empty) else empty end' "$SEC" 2>/dev/null)
+  if [ -z "$sha" ]; then printf 'unpinned'; return; fi
+  if [ -n "$HEAD_SHA" ] && [ "$sha" != "$HEAD_SHA" ]; then printf 'stale'; return; fi
+  crit=$(printf '%s' "$findings" | jq '[ .[] | select((.severity // "" | ascii_downcase) == "critical" and (.status // "open" | ascii_downcase) == "open") ] | length' 2>/dev/null)
+  case "$crit" in ''|*[!0-9]*) printf 'malformed'; return ;; esac
+  if [ "$crit" -gt 0 ]; then printf 'critical'; return; fi
+  printf 'clean'
+}
 
 # ===========================================================================
 # GATE 1 — no ESCALATION marker
@@ -258,18 +474,54 @@ fi
 # AFFIRMATIVELY records that the native security pass actually executed:
 #   "clean"  -> it ran and found nothing
 #   "issues" -> it ran and found something the reviewer then adjudicated
-# Anything else — "not_run_no_pr", "not_available_in_env", "skipped", an
-# unrecognized string, or the field/`inputs` object being ABSENT — means no
-# independent security review is on record, so this is not a human-free ship.
-# Absence is treated exactly like an excuse string, on purpose: this file's
-# GATE 4 already establishes that omitting a field must never be a cheaper way
-# past a gate than filling it in honestly. Only AUTO_MERGE is checked; REWORK
-# and ESCALATE_HUMAN already hold the merge above.
+# WHY THIS NO LONGER DEMANDS THE NATIVE FIELD *ONLY*. Requiring
+# nativeSecurityReview to be "clean"/"issues" made AUTO_MERGE UNREACHABLE, and
+# so made this whole pipeline a manual one. `/security-review` is a
+# SlashCommand, and the reviewer subagent does not have SlashCommand in its
+# runtime tool set — observed repeatedly, the agent reporting "my tool set is
+# Read and Bash only" — even though reviewer.md declares it. The field is
+# therefore STRUCTURALLY unfillable: every verdict recorded
+# "not_available_in_env", every clean pipeline was denied, every merge was done
+# by hand on GitHub, and none of the pipeline's post-merge bookkeeping ever ran
+# (which is also why tasks stranded in in_progress).
+#
+# The requirement this gate actually encodes is INDEPENDENCE: the agent that
+# decided the verdict must not be the only thing asserting security was
+# reviewed. The dedicated security-reviewer AGENT satisfies that on its own —
+# a different agent, fresh context, whose ONLY write is
+# .quetrex/security-findings.json. So independence may now be proven EITHER
+# way, and nothing else:
+#
+#   1. the native pass actually ran            -> nativeSecurityReview clean|issues
+#   2. the independent security-reviewer ran   -> security-findings.json, pinned
+#                                                 to HEAD, zero open Critical
+#   3. no security review was required at all  -> neutral diff AND no plan flag
+#                                                 AND no artifact to contradict
+#
+# Everything else still denies, including a missing field with no artifact, an
+# unpinned or stale artifact, and any open Critical. Omitting a field remains
+# no cheaper than filling it in honestly, and an open Critical is still
+# unbypassable (GATE 4 re-checks it independently of this gate).
 RV_NATIVE_SEC=$(jq -r '(.inputs.nativeSecurityReview // .nativeSecurityReview // empty) | ascii_downcase' "$RV" 2>/dev/null)
 case "$RV_NATIVE_SEC" in
   clean|issues) : ;;
   *)
-    deny "MERGE GATE (ESCALATE_HUMAN): the verdict is AUTO_MERGE, but review-verdict.json records inputs.nativeSecurityReview = '${RV_NATIVE_SEC:-<missing>}' — not 'clean' or 'issues'. That means the native /security-review never actually ran (or its result was not recorded), so no INDEPENDENT security pass backs this auto-merge; the reviewer graded its own homework. A human-free merge requires the native security pass to have executed. Re-run the review-gate so /security-review runs against the current HEAD and records 'clean' or 'issues', or have a human decide."
+    SEC_STATE=$(sec_artifact_state)
+    case "$SEC_STATE" in
+      clean)
+        # (2) An independent pass IS on record for this exact commit.
+        : ;;
+      missing)
+        if [ "$NEED_SEC" = "true" ]; then
+          deny "MERGE GATE (REWORK): the verdict is AUTO_MERGE and the native /security-review did not run (inputs.nativeSecurityReview = '${RV_NATIVE_SEC:-<missing>}'), so the independent security-reviewer artifact is the only thing that could back this merge — and .quetrex/security-findings.json does not exist. A security review is required here because $SEC_WHY. Run the security-reviewer agent against the current HEAD, then re-run the review-gate."
+        fi
+        # (3) Not required, nothing sensitive, no artifact to contradict: there
+        #     is no security review to be independent ABOUT. Allow.
+        ;;
+      *)
+        deny "MERGE GATE (ESCALATE_HUMAN): the verdict is AUTO_MERGE and the native /security-review did not run (inputs.nativeSecurityReview = '${RV_NATIVE_SEC:-<missing>}'), so .quetrex/security-findings.json must supply the independent pass — but that artifact is '$SEC_STATE'$([ "$SEC_STATE" = "stale" ] && printf ' (it records a different commit than HEAD %s)' "${HEAD_SHA:0:12}")$([ "$SEC_STATE" = "unpinned" ] && printf ' (it records no head_sha, so it proves nothing about this commit)')$([ "$SEC_STATE" = "critical" ] && printf ' (it has open Critical finding(s) — see GATE 4)'). Re-run the security-reviewer against the current HEAD so a pinned, clean finding set exists, or have a human decide."
+        ;;
+    esac
     ;;
 esac
 
@@ -324,59 +576,8 @@ fi
 # GATE 4 — security findings: no open Critical, pinned to HEAD; required-but-
 #          missing is a failure. NON-BYPASSABLE-BY-OMISSION.
 # ===========================================================================
-# A security review is REQUIRED when EITHER of these holds:
-#   (a) the plan set security_review_required:true (router/architect forced it), OR
-#   (b) the ACTUAL diff being merged touches a sensitive surface — auth/authz,
-#       input handling, secrets/crypto, external calls, data-access, or a DB
-#       migration — regardless of what the plan says.
-# (b) is the floor that makes security non-bypassable: a plan that simply omits
-# the flag (defaulting it false) cannot ship sensitive code unreviewed, because
-# the gate inspects the diff itself, not the agent's classification of it.
-PLAN=""
-TASK=$(jq -r '.task // empty' "$QDIR/state.json" 2>/dev/null)
-if [ -n "$TASK" ] && [ -f "$QDIR/plan/$TASK.json" ]; then
-  PLAN="$QDIR/plan/$TASK.json"
-else
-  # Fall back to any single plan file if state.json is unavailable.
-  PLAN=$(ls -1 "$QDIR"/plan/*.json 2>/dev/null | head -n1)
-fi
-PLAN_SEC="false"
-[ -n "$PLAN" ] && PLAN_SEC=$(jq -r '.security_review_required // false' "$PLAN" 2>/dev/null)
-
-# --- (b) inspect the real diff for a sensitive surface ---------------------
-# Diff the feature tip against the base branch (main, else master). Three-dot
-# range = what this branch changed since it diverged.
-BASE_BRANCH="main"
-if ! git -C "$ROOT" rev-parse --verify --quiet main >/dev/null 2>&1; then
-  git -C "$ROOT" rev-parse --verify --quiet master >/dev/null 2>&1 && BASE_BRANCH="master"
-fi
-SENSITIVE_DIFF=0
-CHANGED=$(git -C "$ROOT" diff --name-only "$BASE_BRANCH"...HEAD 2>/dev/null)
-# Fall back to the last commit's files if the base range can't be computed.
-[ -z "$CHANGED" ] && CHANGED=$(git -C "$ROOT" diff --name-only HEAD~1..HEAD 2>/dev/null)
-SENSITIVE_PATH_RE='(auth|authz|authn|login|logout|signin|sign-in|session|oauth|openid|saml|sso|jwt|token|secret|credential|password|passwd|crypto|encrypt|decrypt|cipher|migration|migrate|schema|\.sql$|payment|billing|invoice|checkout|charge|stripe|paypal|permission|role|rbac|tenant|acl|middleware|guard|policy|webhook|\.github/workflows/|dockerfile|docker-compose|terraform|pulumi|kubernetes|k8s|helm)'
-if [ -n "$CHANGED" ] && printf '%s\n' "$CHANGED" | grep -qiE "$SENSITIVE_PATH_RE"; then
-  SENSITIVE_DIFF=1
-fi
-# Also scan ADDED lines for sensitive code patterns even when the path is neutral
-# (data-access by client id, whole-body binding, injection sinks, env/secret use,
-# external calls). Only added (+) lines to avoid flagging deletions.
-if [ "$SENSITIVE_DIFF" -eq 0 ]; then
-  ADDED=$(git -C "$ROOT" diff "$BASE_BRANCH"...HEAD 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+')
-  [ -z "$ADDED" ] && ADDED=$(git -C "$ROOT" diff HEAD~1..HEAD 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+')
-  SENSITIVE_CODE_RE='(findById|find_by_id|findOne|req\.(params|query|body)|request\.(args|form|json|params)|Object\.assign|dangerouslySetInnerHTML|innerHTML|v-html|child_process|execSync|spawnSync|[^a-zA-Z]eval\(|process\.env|os\.environ|getenv|jwt\.|bcrypt|scrypt|argon2|createHash|createCipher|\.raw\(|\$where|authorize\(|authenticate|passport|fetch\(|axios|http\.request|urllib|requests\.(get|post))'
-  if [ -n "$ADDED" ] && printf '%s' "$ADDED" | grep -qE "$SENSITIVE_CODE_RE"; then
-    SENSITIVE_DIFF=1
-  fi
-fi
-
-NEED_SEC="false"; SEC_WHY=""
-if [ "$PLAN_SEC" = "true" ]; then
-  NEED_SEC="true"; SEC_WHY="the plan set security_review_required:true"
-elif [ "$SENSITIVE_DIFF" -eq 1 ]; then
-  NEED_SEC="true"; SEC_WHY="the diff touches a sensitive surface (auth/authz/input/secrets/crypto/external-call/data-access/migration)"
-fi
-
+# PLAN_SEC, SENSITIVE_DIFF, CHANGED, NEED_SEC and SEC_WHY are all computed in
+# the PREAMBLE above (GATE 2b needs them too). This gate consumes them.
 if [ ! -f "$SEC" ]; then
   if [ "$NEED_SEC" = "true" ]; then
     deny "MERGE GATE (REWORK): a security review is required because $SEC_WHY, but .quetrex/security-findings.json is missing — the mandatory security-reviewer stage did not run for this change. Run the security-reviewer against the current HEAD before merging. This requirement cannot be bypassed by omitting the plan flag."

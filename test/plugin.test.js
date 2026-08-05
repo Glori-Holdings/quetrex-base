@@ -89,7 +89,13 @@ const KEPT_HOOKS = ['session-state.sh', 'edit-gate.sh', 'quetrex-update-check.sh
 check('.claude-plugin/plugin.json parses and carries the v2 identity', () => {
   const p = readJson('.claude-plugin/plugin.json');
   assert.strictEqual(p.name, 'quetrex', 'plugin name is the slash-command namespace — must be "quetrex"');
-  assert.strictEqual(p.version, '2.0.4');
+  // Asserted against package.json rather than a hardcoded literal: the two
+  // files are the same release and MUST agree (the marketplace publishes from
+  // plugin.json, the update-check nudge compares against it), and a literal
+  // here meant every version bump broke this test for no signal.
+  const pkg = readJson('package.json');
+  assert.match(p.version, /^2\.\d+\.\d+$/, 'plugin version must be a concrete 2.x.y — the v2 identity');
+  assert.strictEqual(p.version, pkg.version, 'plugin.json and package.json must declare the same version');
   assert.strictEqual(p.displayName, 'Quetrex');
 });
 

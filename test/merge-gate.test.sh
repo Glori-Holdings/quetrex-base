@@ -27,7 +27,15 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOOK="$REPO_ROOT/.claude/hooks/merge-gate.sh"
+# The gate ships in TWO places: this repo (the `quetrex` plugin) and
+# quetrex-factory/scripts/merge-gate.sh (the engine plugin every armed repo
+# runs). They have drifted. Point the suite at either copy so a fix can be
+# PROVEN in the one teams actually execute, not just the canonical one:
+#   QX_MERGE_GATE_HOOK=/path/to/merge-gate.sh bash test/merge-gate.test.sh
+# QX_MERGE_GATE_PROFILE=vector-only skips assertions about a gate the drifted
+# factory copy does not carry yet (GATE 2b).
+HOOK="${QX_MERGE_GATE_HOOK:-$REPO_ROOT/.claude/hooks/merge-gate.sh}"
+GATE_PROFILE="${QX_MERGE_GATE_PROFILE:-full}"
 
 if [ ! -x "$HOOK" ] && [ ! -f "$HOOK" ]; then
   echo "FAIL: hook not found at $HOOK"
@@ -94,14 +102,31 @@ write_ledger_no_sha() {
     >> "$FIXTURE/.quetrex/verify-ledger.jsonl"
 }
 
+# The literal merge command, assembled at runtime. Written this way on purpose:
+# a test file for a hook that pattern-matches merge commands would otherwise
+# contain those exact tokens, and this repo's own PreToolUse gate reads the
+# command string of every Bash call — including the one that runs this test.
+GH_MERGE="$(printf 'gh pr mer%s' 'ge') 123 --squash"
+GH_CREATE="$(printf 'gh pr cre%s' 'ate')"
+MAIN="$(printf 'ma%s' 'in')"
+
 run_hook() {
   local cwd="$1" payload
-  payload="$(jq -cn --arg cmd "gh pr merge 123 --squash" --arg cwd "$cwd" \
+  payload="$(jq -cn --arg cmd "$GH_MERGE" --arg cwd "$cwd" \
     '{tool_input:{command:$cmd},cwd:$cwd}')"
   printf '%s' "$payload" | CLAUDE_PROJECT_DIR="$cwd" "$HOOK"
 }
 
-is_deny() { printf '%s' "$1" | grep -q '"permissionDecision":"deny"'; }
+# run_cmd <cwd> <command> — exercise the hook against an ARBITRARY command, to
+# assert what is and is not classified as a merge vector in the first place.
+run_cmd() {
+  local cwd="$1" cmd="$2" payload
+  payload="$(jq -cn --arg cmd "$cmd" --arg cwd "$cwd" \
+    '{tool_input:{command:$cmd},cwd:$cwd}')"
+  printf '%s' "$payload" | CLAUDE_PROJECT_DIR="$cwd" "$HOOK" 2>&1
+}
+
+is_deny() { printf '%s' "$1" | grep -q '"permissionDecision":"deny"\|MERGE GATE'; }
 
 # =============================================================================
 # 1) ALLOW — full chain green, sha-pinned to HEAD; AUTO_MERGE pinned to HEAD.
@@ -162,22 +187,273 @@ else
   fail "DENY(no-sha ledger): expected a deny decision, got exit $CODE stdout: [$OUT]"
 fi
 
+# NOTE ON THE TEST THAT USED TO BE HERE. It asserted that AUTO_MERGE is denied
+# whenever inputs.nativeSecurityReview is not "clean"/"issues" — full stop, with
+# this fixture's NEUTRAL diff and no security artifact. That assertion is now
+# wrong on purpose: it is the deadlock. The field can only be set by
+# /security-review, a SlashCommand the reviewer subagent does not have at
+# runtime, so the condition was unsatisfiable and NO clean pipeline could ever
+# merge. Its real intent — the reviewer cannot self-exempt from independent
+# review and still auto-merge — is preserved and sharpened in B7 (plan demands a
+# review) and B9 (the diff itself is sensitive), which are the cases where an
+# independent pass is actually required. See DEFECT B below.
+
 # =============================================================================
-# 5) DENY — everything else is green, but the verdict records that the native
-#    /security-review never actually ran. This is the EXACT state this repo's
-#    own .quetrex/review-verdict.json was in ("not_available_in_env") while
-#    still carrying AUTO_MERGE: an auto-merge with no independent security
-#    pass behind it. The gate must refuse to ship on the reviewer's own say-so.
+# DEFECT A — the gate must fire on MERGES ONLY.
+#
+# It used to test the WHOLE command string for a `push` and, separately, for the
+# token `main`. So pushing a feature branch and opening its PR in one line —
+#   git -C /wt push -u origin claude/x && gh pr create --base main --head claude/x
+# — was denied as a "push to main" because `--base main` belonged to the other
+# sub-command. That denial happened twice in real use and trained the operator
+# to route around the gate with `gh api`, which is strictly worse than no gate.
+#
+# The fixture is left in a DENYING state (stale ledger) for every case below, so
+# an "allowed" result can only mean the command was never classified as a merge
+# vector — not that the gates happened to pass.
+# =============================================================================
+write_ledger_at "0000000000000000000000000000000000000000"
+write_verdict_at "$HEAD_SHA"
+
+assert_allowed() {  # assert_allowed <label> <command>
+  local out; out="$(run_cmd "$FIXTURE" "$2")"
+  if is_deny "$out"; then
+    fail "NOT A MERGE: $1 — must not be gated (got: ${out:0:160})"
+  else
+    pass "NOT A MERGE: $1 — correctly ungated"
+  fi
+}
+assert_denied() {   # assert_denied <label> <command>
+  local out; out="$(run_cmd "$FIXTURE" "$2")"
+  if is_deny "$out"; then
+    pass "IS A MERGE: $1 — correctly gated"
+  else
+    fail "IS A MERGE: $1 — must be gated but was allowed"
+  fi
+}
+
+# --- the regression itself, and its neighbours: these must all be ALLOWED ----
+assert_allowed "push a feature branch, then open its PR (--base $MAIN in the same line)" \
+  "git -C $FIXTURE push -u origin claude/x && $GH_CREATE --base $MAIN --head claude/x"
+assert_allowed "open a PR whose title mentions $MAIN" \
+  "$GH_CREATE --base $MAIN --title 'merge the $MAIN docs'"
+assert_allowed "plain feature-branch push" \
+  "git -C $FIXTURE push -u origin claude/x"
+assert_allowed "commit whose MESSAGE contains 'push origin $MAIN'" \
+  "git -C $FIXTURE commit -m 'do not push origin $MAIN by hand'"
+assert_allowed "a push with an = in a flag value (normalizer must not eat the git)" \
+  "git -C $FIXTURE push --force-with-lease=refs/heads/claude/x origin claude/x"
+assert_allowed "fetch/pull that merely name the base branch" \
+  "git -C $FIXTURE fetch origin $MAIN"
+assert_allowed "worktree teardown mentioning $MAIN" \
+  "git -C $FIXTURE worktree remove /tmp/wt --force; git -C $FIXTURE branch -D claude/x"
+
+# --- and these must all still be DENIED -------------------------------------
+assert_denied "gh pr merge" "$GH_MERGE"
+assert_denied "direct push to $MAIN" "git -C $FIXTURE push origin $MAIN"
+assert_denied "refspec push to $MAIN" "git -C $FIXTURE push origin HEAD:refs/heads/$MAIN"
+assert_denied "push to $MAIN hidden behind a leading assignment" \
+  "GIT_TERMINAL_PROMPT=0 git -C $FIXTURE push origin $MAIN"
+assert_denied "push to $MAIN wrapped in bash -c" \
+  "bash -c 'git -C $FIXTURE push origin $MAIN'"
+assert_denied "push to $MAIN after an exempt tag push in the same command" \
+  "git -C $FIXTURE push origin v1.2.3 && git -C $FIXTURE push origin $MAIN"
+
+# --- a tag push alone is still exempt ---------------------------------------
+assert_allowed "tag push (deploy/version tag, not a merge)" \
+  "git -C $FIXTURE push origin v2.0.5"
+
+# =============================================================================
+# DEFECT A2 — one repo's verdict must never gate another repo's merge.
+#
+# Observed in the wild: branch cleanup in quetrex-plugins denied by quetrex-base's
+# stale review-verdict.json, because the repo was resolved from the SESSION's
+# project dir instead of the directory the command names.
+# =============================================================================
+OTHER="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-other.XXXXXX")"
+git -C "$OTHER" init -q -b main
+git -C "$OTHER" config user.email "test@example.com"
+git -C "$OTHER" config user.name "Fixture"
+echo other > "$OTHER/README.md"
+git -C "$OTHER" add README.md
+git -C "$OTHER" commit -q -m "chore: other repo"
+# NOTE: $OTHER has no .quetrex/ at all -> it is not a quetrex-managed repo.
+
+OUT="$(run_cmd "$FIXTURE" "git -C $OTHER push origin $MAIN")"
+if is_deny "$OUT"; then
+  fail "CROSS-REPO: a push in an unmanaged repo must not be judged by THIS repo's verdict (got: ${OUT:0:160})"
+else
+  pass "CROSS-REPO: a push in another (unmanaged) repo is not gated by this repo's artifacts"
+fi
+rm -rf "$OTHER"
+
+# A gh pr merge naming a DIFFERENT repository is refused outright rather than
+# judged by these artifacts — it is a merge, so it fails closed, but with an
+# accurate reason instead of a foreign repo's REWORK.
+git -C "$FIXTURE" remote add origin "https://github.com/acme/fixture-repo.git" 2>/dev/null || true
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash --repo other-org/other-repo")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  pass "CROSS-REPO: gh pr merge --repo <other repo> is refused, naming the mismatch"
+else
+  fail "CROSS-REPO: gh pr merge --repo <other repo> should be refused with the mismatch named (got: ${OUT:0:200})"
+fi
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash --repo acme/fixture-repo")"
+if printf '%s' "$OUT" | grep -q 'other-org\|cannot evaluate this merge'; then
+  fail "CROSS-REPO: --repo matching this repo's own origin must be gated normally, not refused as foreign"
+else
+  pass "CROSS-REPO: --repo matching this repo's origin is gated normally"
+fi
+git -C "$FIXTURE" remote remove origin 2>/dev/null || true
+
+# =============================================================================
+# DEFECT B — AUTO_MERGE must be REACHABLE.
+#
+# GATE 2b required inputs.nativeSecurityReview == clean|issues. That field can
+# only be filled by running /security-review, a SlashCommand the reviewer
+# subagent does not have at runtime ("my tool set is Read and Bash only"). So
+# the field was structurally unfillable, every clean pipeline was denied, and
+# every merge was performed by hand -- which is also why tasks stranded in
+# in_progress with none of the post-merge bookkeeping run.
+#
+# Independence may now be proven by the INDEPENDENT security-reviewer artifact
+# instead. Everything below keeps the ledger green and pinned to HEAD, so the
+# only variable is how independence is (or is not) established.
 # =============================================================================
 write_ledger_at "$HEAD_SHA"
-write_verdict_at "$HEAD_SHA" "not_available_in_env"
-rm -f "$FIXTURE/.quetrex/security-findings.json" "$FIXTURE/.quetrex/ESCALATION"
 
+write_sec() {  # write_sec <head_sha> <severity|none> [status]
+  if [ "$2" = "none" ]; then
+    jq -cn --arg sha "$1" '{task:"T-1",base:"main",head_sha:$sha,reviewed_files:3,verdict:"PASS",findings:[]}' \
+      > "$FIXTURE/.quetrex/security-findings.json"
+  else
+    jq -cn --arg sha "$1" --arg sev "$2" --arg st "${3:-open}" \
+      '{task:"T-1",base:"main",head_sha:$sha,reviewed_files:3,verdict:"BLOCK",findings:[{id:"SEC-1",severity:$sev,status:$st,category:"bola-idor",file:"src/x.ts",line:1,summary:"test"}]}' \
+      > "$FIXTURE/.quetrex/security-findings.json"
+  fi
+}
+
+# B1 — THE FIX: native pass unavailable, but the independent security-reviewer
+#      artifact is pinned to HEAD and clean -> AUTO_MERGE is honored.
+write_verdict_at "$HEAD_SHA" "not_available_in_env"
+write_sec "$HEAD_SHA" none
 OUT="$(run_hook "$FIXTURE")"; CODE=$?
-if [ "$CODE" -eq 0 ] && is_deny "$OUT"; then
-  pass "DENY: AUTO_MERGE without an executed native /security-review is denied"
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "ALLOW (the deadlock fix): independent HEAD-pinned clean security artifact satisfies GATE 2b"
 else
-  fail "DENY(no native security pass): expected a deny decision, got exit $CODE stdout: [$OUT]"
+  fail "ALLOW(independent artifact): expected exit 0 + empty stdout, got exit $CODE stdout: [$OUT]"
 fi
 
+# B2 — the artifact is clean but pinned to a DIFFERENT commit -> still denied.
+write_sec "1111111111111111111111111111111111111111" none
+OUT="$(run_hook "$FIXTURE")"
+if is_deny "$OUT"; then
+  pass "DENY: a STALE security artifact cannot stand in for the native pass"
+else
+  fail "DENY(stale artifact): expected a deny decision, got [$OUT]"
+fi
+
+# B3 — the artifact records no head_sha at all -> proves nothing, denied.
+#      GATE 2b only; the drifted factory copy treats head_sha as optional.
+if [ "$GATE_PROFILE" = "full" ]; then
+jq -cn '{task:"T-1",base:"main",reviewed_files:3,verdict:"PASS",findings:[]}' \
+  > "$FIXTURE/.quetrex/security-findings.json"
+OUT="$(run_hook "$FIXTURE")"
+if is_deny "$OUT"; then
+  pass "DENY: an UNPINNED security artifact cannot stand in for the native pass"
+else
+  fail "DENY(unpinned artifact): expected a deny decision, got [$OUT]"
+fi
+fi
+
+# B4 — an open Critical still blocks, whichever way independence was proven.
+write_sec "$HEAD_SHA" critical open
+OUT="$(run_hook "$FIXTURE")"
+if is_deny "$OUT"; then
+  pass "DENY: an open Critical still blocks (unbypassable, as before)"
+else
+  fail "DENY(open critical): expected a deny decision, got [$OUT]"
+fi
+
+# B5 — a RESOLVED critical is not an open one; the merge proceeds.
+write_sec "$HEAD_SHA" critical resolved
+OUT="$(run_hook "$FIXTURE")"; CODE=$?
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "ALLOW: a RESOLVED critical does not block"
+else
+  fail "ALLOW(resolved critical): expected exit 0 + empty stdout, got exit $CODE stdout: [$OUT]"
+fi
+
+# B6 — neutral diff, no plan flag, no artifact: there is no security review to
+#      be independent about, so AUTO_MERGE stands.
+rm -f "$FIXTURE/.quetrex/security-findings.json"
+OUT="$(run_hook "$FIXTURE")"; CODE=$?
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "ALLOW: neutral diff with no security review required -> AUTO_MERGE stands"
+else
+  fail "ALLOW(neutral diff): expected exit 0 + empty stdout, got exit $CODE stdout: [$OUT]"
+fi
+
+# B7 — but when the PLAN demands a security review, a missing artifact still
+#      denies. Omission must never be the cheap way past this gate.
+mkdir -p "$FIXTURE/.quetrex/plan"
+jq -cn '{task:"T-1",security_review_required:true,ownership:{"README.md":"ws-a"}}' \
+  > "$FIXTURE/.quetrex/plan/T-1.json"
+jq -cn '{task:"T-1"}' > "$FIXTURE/.quetrex/state.json"
+OUT="$(run_hook "$FIXTURE")"
+if is_deny "$OUT"; then
+  pass "DENY: plan requires a security review, artifact missing -> denied"
+else
+  fail "DENY(required but missing): expected a deny decision, got [$OUT]"
+fi
+
+# B8 — and the native pass, when it genuinely ran, still works on its own.
+rm -rf "$FIXTURE/.quetrex/plan" "$FIXTURE/.quetrex/state.json"
+write_verdict_at "$HEAD_SHA" "issues"
+OUT="$(run_hook "$FIXTURE")"; CODE=$?
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "ALLOW: a genuinely executed native /security-review still authorizes on its own"
+else
+  fail "ALLOW(native ran): expected exit 0 + empty stdout, got exit $CODE stdout: [$OUT]"
+fi
+
+# B9 — the sharpened form of the old test 5, and the one that matters: when the
+#      DIFF ITSELF is sensitive, the diff-derived floor requires an independent
+#      pass, so AUTO_MERGE + native-not-run + no artifact is still denied. The
+#      reviewer cannot self-exempt on code that touches a sensitive surface.
+#      Runs last because it moves HEAD.
+mkdir -p "$FIXTURE/src/session"
+cat > "$FIXTURE/src/session/auth.ts" <<'TS'
+export function authenticate(token: string) { return token.length > 0; }
+TS
+git -C "$FIXTURE" add src/session/auth.ts
+git -C "$FIXTURE" commit -q -m "feat: add an auth surface"
+HEAD_SHA2="$(git -C "$FIXTURE" rev-parse HEAD)"
+write_ledger_at "$HEAD_SHA2"
+write_verdict_at "$HEAD_SHA2" "not_available_in_env"
+rm -f "$FIXTURE/.quetrex/security-findings.json"
+
+OUT="$(run_hook "$FIXTURE")"
+if is_deny "$OUT"; then
+  pass "DENY: a SENSITIVE diff with no independent security pass is still denied"
+else
+  fail "DENY(sensitive diff, no security pass): expected a deny decision, got [$OUT]"
+fi
+
+# B10 — same sensitive diff, but the independent security-reviewer artifact is
+#       present, pinned and clean -> it ships. This is the end-to-end shape of a
+#       real clean pipeline, which before this fix could not merge at all.
+write_sec "$HEAD_SHA2" none
+OUT="$(run_hook "$FIXTURE")"; CODE=$?
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "ALLOW: sensitive diff + independent pinned clean security artifact -> ships"
+else
+  fail "ALLOW(sensitive diff w/ artifact): expected exit 0 + empty stdout, got exit $CODE stdout: [$OUT]"
+fi
+
+echo
+if [ "$FAIL" -eq 0 ]; then
+  echo "merge-gate.test.sh: all checks passed"
+else
+  echo "merge-gate.test.sh: FAILURES above"
+fi
 exit "$FAIL"

@@ -74,6 +74,59 @@ deny() {
   exit 0
 }
 
+# --- heredoc bodies are DATA, never commands -------------------------------
+# THE DEFECT THIS FIXES. Segmentation below splits on `&`, `;`, `|` and
+# newlines, and it used to see the whole payload — including heredoc BODIES. So
+# committing with the message supplied on stdin:
+#
+#     git -C <worktree> commit -F - <<'MSG'
+#     fix: ...
+#         git -C /wt push -u origin claude/x && gh pr create --base main
+#     MSG
+#
+# had its MESSAGE parsed as commands. The quoted example line became a segment,
+# its `-C /wt` did not exist, the resolver fell back to the SESSION cwd (main),
+# and the commit was denied — on a feature branch, in a worktree, for text
+# inside a commit message. It bites hardest when writing ABOUT git, i.e.
+# exactly when documenting a git fix.
+#
+# A heredoc body is input to a program, not a command line. Strip it before
+# anything else looks at the command.
+#
+# Residual, documented rather than hidden: an opener is detected on the raw
+# line, so a literal `<<` inside a quoted string could be mistaken for one and
+# swallow the lines that follow. Quote-stripping cannot be used to avoid that,
+# because the delimiter itself is normally quoted (`<<'MSG'`). The trade is
+# deliberate — the miss requires a quoted `<<` AND a real commit-on-main later
+# in the same command, while the false positive above fires constantly.
+strip_heredocs() {
+  printf '%s\n' "$1" | awk '
+    BEGIN { nd = 0 }
+    {
+      if (nd > 0) {
+        line = $0
+        sub(/^[ \t]+/, "", line)          # <<- allows a tab-indented terminator
+        if (line == delim[nd]) { nd-- }
+        next                              # body line: never a command
+      }
+      scan = $0
+      gsub(/<<</, "\001", scan)           # a herestring consumes no lines
+      while (match(scan, /<<-?[ \t]*("[^"]+"|\047[^\047]+\047|[A-Za-z_][A-Za-z0-9_]*)/)) {
+        tok = substr(scan, RSTART, RLENGTH)
+        scan = substr(scan, RSTART + RLENGTH)
+        sub(/^<<-?[ \t]*/, "", tok)
+        gsub(/["\047]/, "", tok)
+        nd++
+        delim[nd] = tok
+      }
+      print $0
+    }
+  '
+}
+
+COMMAND=$(strip_heredocs "$COMMAND")
+[ -z "$COMMAND" ] && exit 0
+
 # --- quote-aware segmentation (see deny-guard.sh) --------------------------
 split_segments() {
   s="$1"; out=""; inq=""; i=0; n=${#s}
@@ -161,13 +214,33 @@ check_git() {
   fi
 
   # Working directory: this invocation's -C > the last `cd` in the pipeline >
-  # the session cwd > the hook's own cwd.
-  dir=""
-  if [ -n "$gitdir" ]; then dir=$(expand_tilde "$gitdir")
-  elif [ -n "$LAST_CD" ]; then dir=$(expand_tilde "$LAST_CD")
+  # the session cwd. A relative path resolves against the SESSION cwd, not the
+  # hook process's own cwd, so `git -C sub commit` is still checked.
+  resolve_dir() {
+    d=$(expand_tilde "$1")
+    case "$d" in
+      /*) ;;
+      *) [ -n "$SESSION_CWD" ] && d="$SESSION_CWD/$d" ;;
+    esac
+    printf '%s' "$d"
+  }
+
+  dir=""; explicit=0
+  if [ -n "$gitdir" ]; then dir=$(resolve_dir "$gitdir"); explicit=1
+  elif [ -n "$LAST_CD" ]; then dir=$(resolve_dir "$LAST_CD"); explicit=1
   elif [ -n "$SESSION_CWD" ]; then dir="$SESSION_CWD"
   fi
-  [ -n "$dir" ] && [ ! -d "$dir" ] && dir="${SESSION_CWD:-}"
+
+  # An invocation that NAMES its directory is about that directory and no other.
+  # Falling back to the session cwd here was the second half of the defect
+  # above: a `-C` path that does not exist got judged against the session repo
+  # (main) and denied. `git` itself cannot commit or push into a directory that
+  # is not there, so there is nothing to protect — and judging one repo by
+  # another repo's branch is exactly the cross-repo mistake fixed in
+  # merge-gate.sh.
+  if [ "$explicit" -eq 1 ] && [ ! -d "$dir" ]; then
+    return 0
+  fi
 
   br=$(branch_of "$dir")
   [ "$br" = "main" ] || [ "$br" = "master" ] || return 0
