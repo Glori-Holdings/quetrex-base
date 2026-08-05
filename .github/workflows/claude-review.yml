@@ -21,8 +21,15 @@
 # # `-p`/--print is likewise off-limits here: it skips hook auto-discovery.   #
 # ############################################################################
 #
-# OWNER ACTION: run /install-github-app once (needs repo admin) and set the
-# ANTHROPIC_API_KEY secret, or this workflow cannot start.
+# OWNER ACTION (once, needs repo admin): this workflow cannot start without a
+# credential, and until then EVERY pull request shows a red review gate.
+#
+#   claude setup-token                       # mints a 1-year subscription token
+#   gh secret set CLAUDE_CODE_OAUTH_TOKEN    # paste it
+#
+# On a Pro/Max/Team/Enterprise plan that is all you need — no Console API key,
+# no separate per-token billing. ANTHROPIC_API_KEY remains supported for
+# API-billed setups; set one or the other, not both.
 name: claude-review
 
 on:
@@ -62,6 +69,18 @@ jobs:
       - name: Run the review-gate contract
         uses: anthropics/claude-code-action@v1
         with:
+          # Either credential works; set ONE of these repo secrets.
+          #
+          # CLAUDE_CODE_OAUTH_TOKEN is preferred on a Pro/Max/Team/Enterprise
+          # plan: run `claude setup-token` once, which mints a one-year token
+          # against the SUBSCRIPTION YOU ALREADY PAY FOR. An ANTHROPIC_API_KEY is
+          # a Console credential billed separately per token, which is pure
+          # duplicate spend for a subscriber. The token can only make model
+          # requests — exactly what this job needs.
+          #
+          # Rotate it yearly; when it lapses this job fails closed (no verdict ->
+          # red gate), which is the correct direction to fail.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: |
