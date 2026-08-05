@@ -450,7 +450,7 @@ node -e '
   const need=[
     "Bash(git push:*)","Bash(gh pr:*)","Bash(git worktree:*)","Bash(git checkout:*)",
     "Bash(git merge:*)","Bash(git diff:*)","Bash(git rev-parse:*)","Bash(git add:*)",
-    "Bash(git commit:*)","Bash(jq:*)","Bash(mkdir:*)","Write","Edit"
+    "Bash(git commit:*)","Bash(jq:*)","Bash(mkdir:*)","Edit(/**)"
   ];
   let o={};
   try { o=JSON.parse(fs.readFileSync(file,"utf8")); } catch {}
@@ -464,6 +464,19 @@ node -e '
   console.log("Added " + added.length + " pipeline permission(s): " + added.join(", "));
 ' "$REPO_ROOT/.claude/settings.json"
 ```
+
+**The file-edit grant is `Edit(/**)`, never a bare `Write`/`Edit`.** Two reasons, both
+load-bearing:
+
+- **Scope.** Under `defaultMode: "dontAsk"` the allow-list is the *complete* grant set, not
+  a prompt-suppression list. A bare `Edit` matches every path on the machine — `~/.ssh/*`,
+  `~/.zshrc`, `~/.claude/settings.json` — with no prompt to catch it. `Edit(/**)` anchors at
+  the customer's project root (a `/path` pattern resolves against the settings source), so a
+  write outside the repo is auto-denied instead of silently permitted.
+- **`Edit`, not `Write`.** Claude Code checks file permissions against `Edit(path)` and
+  `Read(path)` rules ONLY. A `Write(path)` rule is accepted, never consulted, and warns at
+  startup. `Edit(path)` already covers Write, NotebookEdit and MultiEdit — writing
+  `Write(...)` here would look correct and enforce nothing.
 
 **Never remove or narrow an entry the repo already had**, and never touch
 `permissions.deny` or `permissions.ask` — those are the customer's. This step only ever

@@ -287,6 +287,42 @@ check('every pin writer emits the array form, never a bare version string', () =
   }
 });
 
+// --- 5c. the file-edit grant stays scoped and enforceable ------------------
+// defaultMode "dontAsk" makes permissions.allow the COMPLETE grant set, so a
+// bare "Edit"/"Write" grants every path on the machine with no prompt. And
+// Claude Code consults Edit(path)/Read(path) rules ONLY — a Write(path) rule is
+// accepted, never enforced, and warns at startup. Both mistakes look correct in
+// review, so assert against both, here and in the need[] array /quetrex:init
+// unions into every customer repo.
+const BARE_EDIT_GRANTS = ['Write', 'Edit', 'NotebookEdit', 'MultiEdit'];
+check('the file-edit permission grant is path-scoped and uses an enforceable Edit() rule', () => {
+  const allow = readJson('.claude/settings.json').permissions.allow;
+  for (const bare of BARE_EDIT_GRANTS) {
+    assert.ok(!allow.includes(bare),
+      `permissions.allow contains bare "${bare}" — under dontAsk that grants every path on the machine; use Edit(/**)`);
+  }
+  const unenforceable = allow.filter((r) => /^(Write|NotebookEdit|MultiEdit|Glob)\(/.test(r));
+  assert.deepStrictEqual(unenforceable, [],
+    'these rules are accepted but never consulted (only Edit(path)/Read(path) are): ' + unenforceable.join(', '));
+  assert.ok(allow.includes('Edit(/**)'),
+    'the pipeline needs a project-scoped file-edit grant: Edit(/**)');
+});
+
+check('init.md seeds customer repos with the same scoped, enforceable grant', () => {
+  const body = read('.claude/commands/init.md');
+  const need = body.match(/const need\s*=\s*\[[\s\S]*?\]/);
+  assert.ok(need, 'init.md must still declare the need[] permission array');
+  const entries = [...need[0].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  for (const bare of BARE_EDIT_GRANTS) {
+    assert.ok(!entries.includes(bare),
+      `init.md need[] unions bare "${bare}" into every adopted repo — use Edit(/**)`);
+  }
+  const unenforceable = entries.filter((r) => /^(Write|NotebookEdit|MultiEdit|Glob)\(/.test(r));
+  assert.deepStrictEqual(unenforceable, [],
+    'init.md need[] contains rules Claude Code never consults: ' + unenforceable.join(', '));
+  assert.ok(entries.includes('Edit(/**)'), 'init.md need[] must grant Edit(/**)');
+});
+
 // A merge that resolves badly can leave a VCS conflict marker in a committed
 // file. Everything under .claude/commands/ is a prompt Claude Code loads at
 // runtime, so a stray marker ships to every consumer of the plugin — and the

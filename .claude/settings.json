@@ -23,8 +23,7 @@
       "Bash(git commit:*)",
       "Bash(jq:*)",
       "Bash(mkdir:*)",
-      "Write",
-      "Edit"
+      "Edit(/**)"
     ],
     "deny": [
       "Bash(rm -rf /)",
