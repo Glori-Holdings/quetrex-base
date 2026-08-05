@@ -116,12 +116,28 @@ else
   fail "behind on factory should name quetrex-factory (got: '$OUT', rc=$RC)"
 fi
 
-# --- 3. current on both -> SILENT --------------------------------------------
+# --- 3. current on both -> CONFIRMS explicitly -------------------------------
+# Silence used to mean both "you are current" and "I could not check". Those are
+# not the same claim and must not look the same, so being current now says so.
 OUT="$(QX_UPDATE_INSTALLED_QUETREX=2.4.0 QX_UPDATE_INSTALLED_FACTORY=1.5.0 run_hook c3)"; RC=$?
-if [ "$RC" -eq 0 ] && [ -z "$OUT" ]; then
-  pass "current on both versions is silent"
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'latest' \
+   && printf '%s' "$OUT" | grep -q '2.4.0' && printf '%s' "$OUT" | grep -q '1.5.0'; then
+  pass "up-to-date states it explicitly, naming both versions"
 else
-  fail "up-to-date should print nothing (got: '$OUT', rc=$RC)"
+  fail "up-to-date must confirm 'latest' and name both versions (got: '$OUT', rc=$RC)"
+fi
+
+# --- 3b. up-to-date must never be CLAIMED without checking -------------------
+# The dangerous failure is a confident "latest" that was never verified. With no
+# manifest and no cache the hook cannot know, so it must stay silent rather than
+# vouch for anything.
+OUT="$(CLAUDE_PLUGIN_DATA="$WORK/c3b" QX_UPDATE_MARKETPLACE_FILE="" QX_UPDATE_OFFLINE=1 \
+       QX_UPDATE_INSTALLED_QUETREX=2.4.0 QX_UPDATE_INSTALLED_FACTORY=1.5.0 \
+       hook_env bash "$HOOK" </dev/null)"; RC=$?
+if [ "$RC" -eq 0 ] && ! printf '%s' "$OUT" | grep -q 'latest'; then
+  pass "unverifiable state never claims 'latest'"
+else
+  fail "must not claim 'latest' when the manifest could not be read (got: '$OUT', rc=$RC)"
 fi
 
 # --- 4. offline with no cache -> SILENT, exit 0 ------------------------------
