@@ -21,10 +21,15 @@
 # Resolution order:
 #   1. ${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json — authoritative when the
 #      caller is running inside the plugin.
-#   2. the newest version directory in the local plugin cache — for callers with
-#      no plugin context, such as a status-line script.
-# Prints nothing and exits 1 when no installed engine can be found, so a status
-# line can simply omit the segment.
+#   2. the manifest next to THIS SCRIPT (../.claude-plugin/plugin.json). bin/
+#      sits at the plugin root, so this is the package the tool actually shipped
+#      in — and it is the only source that works in a bare checkout with no
+#      plugin cache at all, which is exactly the CI case. Resolving purely from
+#      the cache made this tool fail on a clean runner.
+#   3. the newest version directory in the local plugin cache — for callers with
+#      neither, such as a status-line script running outside any plugin.
+# Prints nothing and exits 1 when no engine can be found, so a status line can
+# simply omit the segment.
 
 set -uo pipefail
 
@@ -59,9 +64,19 @@ _qxv_from_cache() {
   _qxv_read_version "$base/$best/.claude-plugin/plugin.json" || printf '%s' "$best"
 }
 
+_qxv_self_root() {
+  local d
+  d="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd)" || return 1
+  printf '%s' "$d"
+}
+
 VERSION=""
 if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
   VERSION="$(_qxv_read_version "$CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json" || true)"
+fi
+if [ -z "$VERSION" ]; then
+  SELF_ROOT="$(_qxv_self_root || true)"
+  [ -n "$SELF_ROOT" ] && VERSION="$(_qxv_read_version "$SELF_ROOT/.claude-plugin/plugin.json" || true)"
 fi
 [ -n "$VERSION" ] || VERSION="$(_qxv_from_cache || true)"
 [ -n "$VERSION" ] || exit 1
