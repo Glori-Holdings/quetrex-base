@@ -21,12 +21,12 @@
 #
 #   .claude/settings.json
 #     enabledPlugins["quetrex@quetrex"]        = true
-#     enabledPlugins["quetrex-factory@quetrex"] = [<concrete version>]  (a
-#       one-element ARRAY — the schema accepts a boolean or an array of semver
-#       ranges, and a bare version string is rejected as `Invalid input`; never a
-#       floating `true` — resolved from the public marketplace manifest; if the
-#       marketplace is unreachable, quetrex@quetrex is still enabled and the
-#       factory pin is deferred with a note to run /quetrex:update)
+#     enabledPlugins["quetrex-factory@quetrex"] = true
+#       NO VERSION PINS. A pinned (array or string) value makes the plugin count
+#       as DISABLED for dependency resolution, which stopped the whole quetrex
+#       command layer from loading in every armed repo. Booleans only; the engine
+#       tracks the marketplace via autoUpdate. Any legacy pin found is rewritten
+#       to true.
 #     extraKnownMarketplaces.quetrex =
 #       {"source":{"source":"github","repo":"Glori-Holdings/quetrex-plugins"},
 #        "autoUpdate":true}
@@ -97,21 +97,43 @@ _qxarm_resolve_factory_version() {
 _qxarm_write_settings() {
   node -e '
     const fs = require("fs"), path = require("path");
-    const [file, factory] = process.argv.slice(1);
+    const [file] = process.argv.slice(1);
 
     let o = {};
     try { o = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
 
     o.enabledPlugins = o.enabledPlugins || {};
     const beforePins = JSON.stringify(o.enabledPlugins);
-    o.enabledPlugins["quetrex@quetrex"] = true;
-    // A one-element ARRAY, never the bare version string. The settings schema is
-    // enabledPlugins: record<string, string[] | boolean | undefined> — a string
-    // value fails validation with `Invalid input` and the entry is dropped, so the
-    // repo looks pinned while having no pin at all.
+    // NO VERSION PINS. EVER. Both plugins are enabled with a plain boolean and
+    // track the marketplace automatically.
+    //
+    // WHY, measured rather than argued: a version-pinned entry
+    // (enabledPlugins["quetrex-factory@quetrex"] = ["1.2.1"]) makes the plugin
+    // count as DISABLED for dependency resolution, so the quetrex command layer
+    // failed to load entirely and NO /quetrex:* command existed in any armed
+    // repo. Verified across four checkouts: pin absent -> enabled; pin true ->
+    // enabled; pin ["1.2.1"] (the exact installed version) -> failed to load;
+    // pin ["1.1.0"] -> failed to load. The repos with the "correct" concrete pin
+    // were the broken ones, and the one that worked did so only because its pin
+    // was the floating boolean.
+    //
+    // Pinning also broke updates in practice: a pin naming a version the machine
+    // does not have, or a stale pin nobody bumps, silently strands the engine.
+    // Auto-update via extraKnownMarketplaces.autoUpdate is the whole mechanism
+    // now. The running version is surfaced in the status bar, not in config.
     // (No apostrophes in this block: the whole node program is a single-quoted
     // shell string, and one would terminate it.)
-    if (factory) { o.enabledPlugins["quetrex-factory@quetrex"] = [factory]; }
+    o.enabledPlugins["quetrex@quetrex"] = true;
+    o.enabledPlugins["quetrex-factory@quetrex"] = true;
+    // Strip any legacy version pin left by an older engine: while it is present,
+    // the command layer does not load.
+    for (const k of Object.keys(o.enabledPlugins)) {
+      if (Array.isArray(o.enabledPlugins[k]) || typeof o.enabledPlugins[k] === "string") {
+        if (k === "quetrex@quetrex" || k === "quetrex-factory@quetrex") {
+          o.enabledPlugins[k] = true;
+        }
+      }
+    }
     const pinsChanged = JSON.stringify(o.enabledPlugins) !== beforePins;
 
     o.extraKnownMarketplaces = o.extraKnownMarketplaces || {};
@@ -139,14 +161,12 @@ _qxarm_write_settings() {
     const parts = [];
     if (pinsChanged) {
       parts.push(
-        "enabledPlugins (quetrex@quetrex=true"
-        + (factory ? ", quetrex-factory@quetrex=" + factory : "; factory pin deferred — marketplace unreachable, run /quetrex:update once online")
-        + ")"
+        "enabledPlugins (quetrex@quetrex=true, quetrex-factory@quetrex=true — no version pins; the engine auto-updates)"
       );
     }
     if (mktChanged) { parts.push("extraKnownMarketplaces.quetrex"); }
     console.log("settings.json: wrote " + parts.join(", "));
-  ' "$1" "$2"
+  ' "$1"
 }
 
 # _qxarm_purge_dead_mcp <file>
@@ -217,13 +237,9 @@ _qxarm_main() {
     return 1
   fi
 
-  local factory_version=""
-  factory_version="$(_qxarm_resolve_factory_version)"
-  if [ -z "$factory_version" ]; then
-    echo "quetrex-arm: marketplace unreachable at $MARKET_URL — enabling quetrex@quetrex only; run /quetrex:update once online to pin quetrex-factory." >&2
-  fi
-
-  _qxarm_write_settings "$repo_root/.claude/settings.json" "$factory_version" || return 1
+  # No marketplace lookup: there is no version to resolve because nothing is
+  # pinned. Arming is now fully offline-capable.
+  _qxarm_write_settings "$repo_root/.claude/settings.json" || return 1
   # <kanban-url> is still required (see the -z check above) so the call
   # signature every installed /quetrex:init uses keeps working, but the MCP
   # step no longer builds a URL from it — it only purges the retired broker.

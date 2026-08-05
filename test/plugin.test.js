@@ -187,11 +187,20 @@ check('.claude-plugin/plugin.json parses and carries the v2 identity', () => {
   assert.strictEqual(p.displayName, 'Quetrex');
 });
 
-check('plugin.json depends on quetrex-factory (the build engine)', () => {
+// REPLACED, deliberately. This used to REQUIRE `dependencies: ["quetrex-factory"]`.
+// That declaration is what turned a version-pinned engine into a hard failure:
+// `claude plugin list` reported
+//   quetrex@quetrex  ✘ failed to load
+//   Error: Dependency "quetrex-factory@quetrex" is disabled
+// even while the factory itself showed ✔ enabled, because a pinned entry does not
+// count as enabled for dependency resolution. So NO /quetrex:* command existed in
+// any armed repo. Verified: deleting the field loads cleanly even with a pin
+// present. The engine is still installed by the marketplace; /quetrex:doctor
+// reports it if it is missing. The inverted assertion lives in section 5b.
+check('plugin.json still declares the paths and identity the marketplace needs', () => {
   const p = readJson('.claude-plugin/plugin.json');
-  assert.ok(Array.isArray(p.dependencies), 'dependencies must be an array');
-  assert.ok(p.dependencies.includes('quetrex-factory'),
-    'quetrex installs the engine automatically — quetrex-factory must be a declared dependency');
+  assert.strictEqual(p.name, 'quetrex');
+  assert.ok(Array.isArray(p.agents) && p.agents.length > 0, 'the engine agents must still be declared');
 });
 
 check('plugin.json declares custom paths that keep content under .claude/', () => {
@@ -311,74 +320,89 @@ check('zero broad /q-<anything> command references remain under .claude/ (catche
     'every legacy /q-<verb> reference under .claude/ (including glob-style mentions like /q-task-*) must be rewritten to /quetrex:*:\n' + hits.join('\n'));
 });
 
-// --- 5b. the engine pin is a shape Claude Code actually accepts -------------
-// Claude Code's settings schema is:
-//   enabledPlugins: record<string, string[] | boolean | undefined>
-// A bare version STRING (`"quetrex-factory@quetrex": "1.0.0"`) fails validation
-// with `Invalid input`, and the entry is dropped — the repo silently loses its
-// engine pin while looking pinned. The array form is the documented "extended
-// format with version constraints", and Claude Code treats an array value as
-// enabled (`value === true || Array.isArray(value)`).
-const FACTORY_PIN_KEY = 'quetrex-factory@quetrex';
-const isValidEnabledPluginsValue = (v) =>
-  typeof v === 'boolean' ||
-  (Array.isArray(v) && v.length > 0 && v.every((r) => typeof r === 'string' && r.length > 0));
+// --- 5b. NO VERSION PINS, ANYWHERE ----------------------------------------
+// A pinned enabledPlugins entry makes the plugin count as DISABLED for
+// dependency resolution, so the entire /quetrex:* command layer FAILED TO LOAD
+// in every armed repo. Measured across four checkouts with `claude plugin list`:
+//
+//   pin absent            -> quetrex@quetrex ✔ enabled
+//   pin true              -> quetrex@quetrex ✔ enabled
+//   pin ["1.2.1"]         -> quetrex@quetrex ✘ failed to load   (exact installed version!)
+//   pin ["1.1.0"]         -> quetrex@quetrex ✘ failed to load
+//
+// The repos carrying the "correct" concrete pin were precisely the broken ones,
+// and the one that worked did so only because its pin was the floating boolean
+// the old doctrine called wrong. Pinning also broke updating: a stale pin, or one
+// naming a version a machine does not have, strands the team while every repo
+// looks configured.
+//
+// So: booleans only, auto-update via extraKnownMarketplaces, and the running
+// version is surfaced in the status bar (bin/quetrex-version) instead of frozen
+// into config. These tests previously ENFORCED the array pin; they now forbid it.
+const PIN_KEYS = ['quetrex@quetrex', 'quetrex-factory@quetrex'];
+const isVersionPin = (v) => Array.isArray(v) || typeof v === 'string';
 
-check('the enabledPlugins validator rejects a bare version string and accepts the array pin', () => {
-  // The exact shape that shipped broken — this is the regression this test owns.
-  assert.ok(!isValidEnabledPluginsValue('1.0.0'),
-    'a bare version string must be rejected — Claude Code reports it as Invalid input');
-  assert.ok(!isValidEnabledPluginsValue([]), 'an empty array pins nothing');
-  assert.ok(!isValidEnabledPluginsValue(null), 'null is not a valid enabledPlugins value');
-  // The shapes the schema does accept.
-  assert.ok(isValidEnabledPluginsValue(true), 'true (unversioned enable) is valid');
-  assert.ok(isValidEnabledPluginsValue(false), 'false (explicit disable) is valid');
-  assert.ok(isValidEnabledPluginsValue(['1.0.0']), 'a one-element semver array is the concrete pin');
-});
-
-check('committed .claude/settings.json enabledPlugins values all satisfy the schema', () => {
+check('committed enabledPlugins uses booleans only — never a version pin', () => {
   const entries = Object.entries(readJson('.claude/settings.json').enabledPlugins || {});
-  assert.ok(entries.length > 0, '.claude/settings.json must pin the engine for teammates and cloud routines');
-  for (const [key, value] of entries) {
-    assert.ok(isValidEnabledPluginsValue(value),
-      `enabledPlugins["${key}"] = ${JSON.stringify(value)} is not a boolean or a non-empty string array`);
+  assert.ok(entries.length > 0, '.claude/settings.json must still enable the engine');
+  for (const key of PIN_KEYS) {
+    const value = Object.fromEntries(entries)[key];
+    assert.strictEqual(
+      value, true,
+      `enabledPlugins["${key}"] = ${JSON.stringify(value)} — it must be exactly true. `
+        + 'A version pin (array or string) makes the plugin count as disabled for dependency '
+        + 'resolution and NO /quetrex:* command loads in this repo.',
+    );
   }
-  const pin = Object.fromEntries(entries)[FACTORY_PIN_KEY];
-  assert.ok(Array.isArray(pin),
-    `${FACTORY_PIN_KEY} must be a concrete array pin, not ${JSON.stringify(pin)} — cloud routines need an exact engine`);
 });
 
-// Every place that WRITES the pin. bin/quetrex-arm is the deterministic arming
-// executable /quetrex:init shells out to; update.md carries the bump snippet.
-// Discovered by repo-wide grep rather than hardcoded, so a new writer added
-// elsewhere cannot reintroduce the bare-string form unnoticed.
-check('every pin writer emits the array form, never a bare version string', () => {
-  const ASSIGN_RE = new RegExp('enabledPlugins\\["' + FACTORY_PIN_KEY + '"\\]\\s*=\\s*[^;\\n]+', 'g');
-  // Drop comment lines (`#` in shell, `//` in the embedded node programs) — a
-  // doc comment describing the pin must not satisfy "this file writes the pin",
-  // or deleting the real write would still pass.
+check('no shipped writer emits a version pin for either quetrex plugin', () => {
   const isComment = (line) => /^\s*(#|\/\/)/.test(line);
-  // gitGrep does NOT pass -n, so each row is `path:content` — split on the FIRST
-  // colon only. (Slicing at a later colon silently disables the comment filter.)
-  const rowPath = (row) => row.slice(0, row.indexOf(':'));
   const rowText = (row) => row.slice(row.indexOf(':') + 1);
-  const hits = gitGrep('enabledPlugins\\["' + FACTORY_PIN_KEY + '"\\][[:space:]]*=', [':!test/'])
-    .filter((row) => !isComment(rowText(row)));
-  const unique = [...new Set(hits.map(rowPath))];
-  assert.ok(unique.length > 0, 'the repo must still write the engine pin somewhere');
-  assert.ok(unique.includes('bin/quetrex-arm'),
-    'bin/quetrex-arm is the deterministic arming writer — it must still write the pin');
-  for (const rel of unique) {
-    const body = read(rel);
-    const assignments = (body.match(ASSIGN_RE) || [])
-      .filter((a) => !isComment(a));
-    assert.ok(assignments.length > 0, `${rel} must still write the ${FACTORY_PIN_KEY} pin`);
-    for (const a of assignments) {
-      const rhs = a.slice(a.indexOf('=') + 1).trim();
-      assert.ok(rhs.startsWith('['),
-        `${rel} assigns a non-array pin (${rhs}) — a bare version string fails settings validation`);
+  const offenders = [];
+  for (const key of PIN_KEYS) {
+    const hits = gitGrep('enabledPlugins\\["' + key + '"\\][[:space:]]*=', [':!test/'])
+      .filter((row) => !isComment(rowText(row)));
+    for (const row of hits) {
+      const rhs = rowText(row).split('=').slice(1).join('=');
+      // A pin is an array literal or a quoted string on the right-hand side.
+      if (/\[|"\d|'\d/.test(rhs)) offenders.push(row.trim());
     }
   }
+  assert.deepStrictEqual(
+    offenders, [],
+    'a shipped file assigns a VERSION PIN to a quetrex plugin:\n  ' + offenders.join('\n  ')
+      + '\nAssign true instead — a pin disables the command layer.',
+  );
+});
+
+check('bin/quetrex-arm still enables both plugins, with true', () => {
+  const body = read('bin/quetrex-arm');
+  for (const key of PIN_KEYS) {
+    const re = new RegExp('enabledPlugins\\["' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"\\]\\s*=\\s*true');
+    assert.ok(re.test(body), `bin/quetrex-arm must set enabledPlugins["${key}"] = true`);
+  }
+});
+
+check('the plugin declares no hard dependency (it made a pinned engine fatal)', () => {
+  const m = readJson('.claude-plugin/plugin.json');
+  assert.ok(
+    m.dependencies === undefined,
+    'plugin.json must not declare "dependencies": with it, a version-pinned quetrex-factory '
+      + 'resolved as disabled and the whole command layer failed to load with '
+      + '"Dependency \"quetrex-factory@quetrex\" is disabled". Verified: removing the field '
+      + 'loads cleanly even with a pin present.',
+  );
+});
+
+check('the version reporter used by the status bar ships and is executable', () => {
+  assert.ok(exists('bin/quetrex-version'), 'bin/quetrex-version must ship — it is where the version is surfaced now');
+  const st = fs.statSync(path.join(REPO_ROOT, 'bin/quetrex-version'));
+  assert.ok((st.mode & 0o111) !== 0, 'bin/quetrex-version must be executable');
+  const out = execFileSync('bash', [path.join(REPO_ROOT, 'bin/quetrex-version'), '--plain'], { encoding: 'utf8' }).trim();
+  assert.match(out, /^\d+\.\d+\.\d+$/, 'quetrex-version --plain must print a bare semver, got: ' + out);
+  const pretty = execFileSync('bash', [path.join(REPO_ROOT, 'bin/quetrex-version')], { encoding: 'utf8' }).trim();
+  assert.match(pretty, /^Quetrex v\d+\.\d+\.\d+$/, 'quetrex-version must print "Quetrex vX.Y.Z", got: ' + pretty);
 });
 
 // --- 5bb. one branch-prefix default, and it is claude/ ---------------------

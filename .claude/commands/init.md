@@ -1,5 +1,5 @@
 ---
-description: Link this repo to a Quetrex project (writes ./.quetrex/project.json with its branchPrefix) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, pin the quetrex-factory engine in enabledPlugins so its build gates run locally and in cloud routines, union in the permissions the pipeline needs, generate .worktreeinclude, offer /install-github-app, offer to import local env creds into the vault, open a PR). Usage: /quetrex:init [project name]
+description: Link this repo to a Quetrex project (writes ./.quetrex/project.json with its branchPrefix) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, enable the quetrex-factory engine in enabledPlugins (never version-pinned) so its build gates run locally and in cloud routines, union in the permissions the pipeline needs, generate .worktreeinclude, offer /install-github-app, offer to import local env creds into the vault, open a PR). Usage: /quetrex:init [project name]
 argument-hint: "[project name — only used when the repo is not yet linked]"
 ---
 
@@ -591,14 +591,16 @@ fi
 
 `quetrex-arm` idempotently and non-destructively writes, into `$REPO_ROOT`:
 
-- `.claude/settings.json` `enabledPlugins`: `"quetrex@quetrex": true` (the command layer,
-  not version-gated per repo) and `"quetrex-factory@quetrex": ["<concrete version>"]` — a
-  **concrete version pin**, never a floating `true`, resolved from the public marketplace
-  manifest on GitHub raw. The value is a one-element **array**: Claude Code's
-  `enabledPlugins` schema accepts a boolean or an array of semver ranges, and a bare version
-  *string* fails settings validation with `Invalid input`, silently dropping the pin. If the
-  marketplace is unreachable it still enables `quetrex@quetrex` and reports that the factory
-  pin is deferred until `/quetrex:update` is run online.
+- `.claude/settings.json` `enabledPlugins`: `"quetrex@quetrex": true` and
+  `"quetrex-factory@quetrex": true` — **booleans, never version pins.** A pinned entry
+  (array or string) makes the plugin count as *disabled* for dependency resolution, and the
+  whole `/quetrex:*` command layer then fails to load: measured across four checkouts, pin
+  absent → enabled, `true` → enabled, `["1.2.1"]` (the exact installed version) → **failed
+  to load**, `["1.1.0"]` → **failed to load**. Pinning also broke updates — a stale pin, or
+  one naming a version a machine lacks, strands the team while every repo looks configured.
+  The engine tracks the marketplace via `autoUpdate` and the running version is surfaced in
+  the status bar (`quetrex-version`), not frozen into config. Any legacy pin found is
+  rewritten to `true`. Arming needs no network for this.
 - `.claude/settings.json` `extraKnownMarketplaces.quetrex.source`:
   `{"source":"github","repo":"Glori-Holdings/quetrex-plugins"}` — without this the
   `quetrex-factory` pin above cannot resolve.

@@ -1,5 +1,5 @@
 ---
-description: Diagnose this repo's Quetrex health — board reachable, engine pinned to the latest, no leftover legacy artifacts, no dead MCP broker, verify chain configured, deploy target set, vault wired — in the checkmark / here's-the-fix style of the native /doctor. Usage: /quetrex:doctor
+description: Diagnose this repo's Quetrex health — board reachable, engine enabled and auto-updating (never pinned), no leftover legacy artifacts, no dead MCP broker, verify chain configured, deploy target set, vault wired — in the checkmark / here's-the-fix style of the native /doctor. Usage: /quetrex:doctor
 argument-hint: ""
 ---
 
@@ -66,44 +66,59 @@ fi
 
 ---
 
-## Check 2 — Engine pinned to the latest
+## Check 2 — Engine present, auto-updating, and NOT pinned
 
-The version that teammates and cloud routines actually run is the committed
-`enabledPlugins` pin in `.claude/settings.json`. Compare it to the marketplace
-latest (there is no version-check API — fetch the manifest from GitHub raw).
-Flag a floating (`true`) factory pin as a problem in its own right — routines
-must resolve one exact engine:
+Quetrex pins nothing. A pinned `enabledPlugins` entry makes the plugin count as
+**disabled** for dependency resolution, and the whole `/quetrex:*` command layer
+then fails to load — measured across four checkouts: pin absent → enabled;
+`true` → enabled; `["1.2.1"]` (the exact installed version) → **failed to load**;
+`["1.1.0"]` → **failed to load**. So a pin is now a DEFECT, and the version lives
+in the status bar instead of in config:
 
 ```bash
-PIN="$(node -e '
-  const fs=require("fs");
-  let o; try{o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{process.exit(0)}
-  const p=o.enabledPlugins && o.enabledPlugins["quetrex-factory@quetrex"];
-  process.stdout.write(p===undefined?"":String(p));
-' "$SETTINGS")"
+RUNNING="$(quetrex-version --plain 2>/dev/null || echo "")"
+PINS="$(node -e '
+  let o={}; try{o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))}catch{}
+  const e=o.enabledPlugins||{};
+  const bad=Object.keys(e).filter(function(k){return /^quetrex(-factory)?@quetrex$/.test(k) && e[k]!==true && e[k]!==false});
+  process.stdout.write(bad.map(function(k){return k+"="+JSON.stringify(e[k])}).join(", "));
+' "$SETTINGS" 2>/dev/null)"
+ENABLED="$(node -e '
+  let o={}; try{o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))}catch{}
+  const e=o.enabledPlugins||{};
+  process.stdout.write(String(e["quetrex@quetrex"]===true && e["quetrex-factory@quetrex"]===true));
+' "$SETTINGS" 2>/dev/null)"
+AUTOUP="$(node -e '
+  let o={}; try{o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))}catch{}
+  process.stdout.write(String(((o.extraKnownMarketplaces||{}).quetrex||{}).autoUpdate===true));
+' "$SETTINGS" 2>/dev/null)"
 
-LATEST_FACTORY="$(curl -fsS --max-time 6 "$MARKET_URL" 2>/dev/null | node -e '
-  let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-    let o; try{o=JSON.parse(s)}catch{process.exit(0)}
-    const p=(o.plugins||[]).find(x=>x&&x.name==="quetrex-factory");
-    process.stdout.write(p&&p.version?String(p.version):"");
-  })' 2>/dev/null)"
-
-if [ -z "$PIN" ]; then
-  echo "✗ Engine pinned — no quetrex-factory pin in enabledPlugins."
-  echo "    Fix: run /quetrex:init (writes the pin) or /quetrex:update (bumps it)."
-elif [ "$PIN" = "true" ]; then
-  echo "✗ Engine pinned — quetrex-factory is enabled but not pinned to a concrete version (cloud routines need an exact engine)."
-  echo "    Fix: run /quetrex:update to write a concrete version pin."
-elif [ -z "$LATEST_FACTORY" ]; then
-  echo "✓ Engine pinned — quetrex-factory $PIN (could not reach the marketplace to check for a newer one; see native /doctor for connectivity)."
-elif [ "$PIN" = "$LATEST_FACTORY" ]; then
-  echo "✓ Engine pinned — quetrex-factory $PIN (latest)."
+if [ -n "$PINS" ]; then
+  echo "✗ Engine — this repo PINS a version ($PINS). While a pin is present the quetrex command layer does not load here, so no /quetrex:* command exists."
+  echo "    Fix: run /quetrex:init — arming rewrites any pin to true."
+elif [ "$ENABLED" != "true" ]; then
+  echo "✗ Engine — quetrex and/or quetrex-factory are not enabled in this repo's committed settings."
+  echo "    Fix: run /quetrex:init"
+elif [ "$AUTOUP" != "true" ]; then
+  echo "✗ Engine — extraKnownMarketplaces.quetrex.autoUpdate is not true, so this repo will never see a published fix."
+  echo "    Fix: run /quetrex:init"
+elif [ -n "$RUNNING" ]; then
+  echo "✓ Engine — enabled, unpinned, auto-updating (running Quetrex v$RUNNING)."
 else
-  echo "✗ Engine pinned — quetrex-factory $PIN, but $LATEST_FACTORY is published."
-  echo "    Fix: run /quetrex:update"
+  echo "✓ Engine — enabled, unpinned, auto-updating."
+fi
+
+# The LOAD is the thing that matters, so assert it rather than infer it from config.
+if command -v claude >/dev/null 2>&1; then
+  if claude plugin list 2>/dev/null | grep -A3 "quetrex@quetrex" | grep -q "failed to load"; then
+    echo "✗ Engine loads — claude plugin list reports quetrex@quetrex as FAILED TO LOAD in this repo, so no /quetrex:* command is available."
+    echo "    Fix: clear any version pin (above), then restart Claude Code."
+  fi
 fi
 ```
+
+Report the running version from `quetrex-version` / the status bar, never from
+config — config carries no version by design.
 
 ---
 
