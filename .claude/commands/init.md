@@ -584,7 +584,6 @@ fi
 - `.mcp.json` `mcpServers.quetrex-kanban`: `{"type":"http","url":"<kanbanUrl>/api/mcp"}` —
   **endpoint only, no secret value**. The broker authenticates cloud sessions and
   auto-rotates their credentials.
->>>>>>> origin/main
 
 Every write merges — it never clobbers any other `enabledPlugins` entry, any other
 `extraKnownMarketplaces` entry, any other `mcpServers` entry, or any other settings key.

@@ -260,15 +260,24 @@ check('committed .claude/settings.json enabledPlugins values all satisfy the sch
 // elsewhere cannot reintroduce the bare-string form unnoticed.
 check('every pin writer emits the array form, never a bare version string', () => {
   const ASSIGN_RE = new RegExp('enabledPlugins\\["' + FACTORY_PIN_KEY + '"\\]\\s*=\\s*[^;\\n]+', 'g');
-  const writers = gitGrep('enabledPlugins\\["' + FACTORY_PIN_KEY + '"\\][[:space:]]*=', [':!test/'])
-    .map((line) => line.split(':')[0]);
-  const unique = [...new Set(writers)];
+  // Drop comment lines (`#` in shell, `//` in the embedded node programs) — a
+  // doc comment describing the pin must not satisfy "this file writes the pin",
+  // or deleting the real write would still pass.
+  const isComment = (line) => /^\s*(#|\/\/)/.test(line);
+  // gitGrep does NOT pass -n, so each row is `path:content` — split on the FIRST
+  // colon only. (Slicing at a later colon silently disables the comment filter.)
+  const rowPath = (row) => row.slice(0, row.indexOf(':'));
+  const rowText = (row) => row.slice(row.indexOf(':') + 1);
+  const hits = gitGrep('enabledPlugins\\["' + FACTORY_PIN_KEY + '"\\][[:space:]]*=', [':!test/'])
+    .filter((row) => !isComment(rowText(row)));
+  const unique = [...new Set(hits.map(rowPath))];
   assert.ok(unique.length > 0, 'the repo must still write the engine pin somewhere');
   assert.ok(unique.includes('bin/quetrex-arm'),
     'bin/quetrex-arm is the deterministic arming writer — it must still write the pin');
   for (const rel of unique) {
     const body = read(rel);
-    const assignments = body.match(ASSIGN_RE) || [];
+    const assignments = (body.match(ASSIGN_RE) || [])
+      .filter((a) => !isComment(a));
     assert.ok(assignments.length > 0, `${rel} must still write the ${FACTORY_PIN_KEY} pin`);
     for (const a of assignments) {
       const rhs = a.slice(a.indexOf('=') + 1).trim();
@@ -276,6 +285,17 @@ check('every pin writer emits the array form, never a bare version string', () =
         `${rel} assigns a non-array pin (${rhs}) — a bare version string fails settings validation`);
     }
   }
+});
+
+// A merge that resolves badly can leave a VCS conflict marker in a committed
+// file. Everything under .claude/commands/ is a prompt Claude Code loads at
+// runtime, so a stray marker ships to every consumer of the plugin — and the
+// rest of the verify chain stays green with one present. Sweep for all three
+// marker forms across every tracked file.
+check('no merge-conflict marker survives in any tracked file', () => {
+  const markers = gitGrep('^(<<<<<<< |=======$|>>>>>>> )', ['.']);
+  assert.deepStrictEqual(markers, [],
+    'unresolved merge-conflict markers are committed:\n' + markers.join('\n'));
 });
 
 // --- 6. the npm installer is fully retired ---------------------------------

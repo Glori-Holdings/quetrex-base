@@ -153,8 +153,11 @@ fi
 
 - The marketplace fetch is REQUIRED here (unlike the passive SessionStart nudge):
   never pin to a version you could not confirm from the manifest.
-- The `quetrex-factory` pin is always a **concrete version string**, never a
-  floating `true` — routines and teammates must all resolve the exact same engine.
+- The `quetrex-factory` pin is always a **one-element array holding a concrete
+  version** (`["1.5.0"]`), never a bare version string and never a floating `true`
+  — routines and teammates must all resolve the exact same engine. A bare string
+  fails Claude Code's settings validation with `Invalid input` and the entry is
+  dropped, leaving the repo unpinned while appearing pinned.
 - Never commit the pin bump to `main`; always a branch + PR so the move is
   reviewed and adopted team-wide at once.
 - Build all JSON with `node` / `JSON.stringify`; never hand-edit settings with
