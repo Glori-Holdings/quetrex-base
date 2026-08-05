@@ -153,6 +153,19 @@ else
   fail "extraKnownMarketplaces.quetrex.source mismatch (got: $MKT, want: $EXPECT_MKT)"
 fi
 
+# Third-party marketplaces default to auto-update OFF. Without this declared, the
+# catalog freezes at whatever it was when the marketplace was added, the
+# SessionStart update check compares against stale data, and the whole team runs
+# an old engine indefinitely — which is exactly how a shipped merge-gate fix
+# failed to reach anyone. Declaring it in settings syncs it to
+# known_marketplaces.json for every member of the repo.
+AUTOUP="$(json_get "$SETTINGS1" 'extraKnownMarketplaces.quetrex.autoUpdate')"
+if [ "$AUTOUP" = "true" ]; then
+  pass "extraKnownMarketplaces.quetrex.autoUpdate is true (team tracks published engine fixes)"
+else
+  fail "extraKnownMarketplaces.quetrex.autoUpdate must be true — third-party marketplaces default to OFF and silently strand the team on a stale engine (got: $AUTOUP)"
+fi
+
 MCPTYPE="$(json_get "$MCP1" 'mcpServers.quetrex-kanban.type')"
 MCPURL="$(json_get "$MCP1" 'mcpServers.quetrex-kanban.url')"
 if [ "$MCPTYPE" = '"http"' ] && [ "$MCPURL" = '"https://kanban.example.test/api/mcp"' ]; then

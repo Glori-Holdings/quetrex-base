@@ -27,8 +27,11 @@
 #       floating `true` — resolved from the public marketplace manifest; if the
 #       marketplace is unreachable, quetrex@quetrex is still enabled and the
 #       factory pin is deferred with a note to run /quetrex:update)
-#     extraKnownMarketplaces.quetrex.source =
-#       {"source":"github","repo":"Glori-Holdings/quetrex-plugins"}
+#     extraKnownMarketplaces.quetrex =
+#       {"source":{"source":"github","repo":"Glori-Holdings/quetrex-plugins"},
+#        "autoUpdate":true}
+#       autoUpdate is required: third-party marketplaces default to OFF, which
+#       freezes the catalog and silently strands the whole team on an old engine.
 #
 #   .mcp.json
 #     mcpServers.quetrex-kanban = {"type":"http","url":"<kanban-url>/api/mcp"}
@@ -100,8 +103,15 @@ _qxarm_write_settings() {
 
     o.extraKnownMarketplaces = o.extraKnownMarketplaces || {};
     const beforeMkt = JSON.stringify(o.extraKnownMarketplaces.quetrex || null);
+    // autoUpdate is REQUIRED, not a nicety. Third-party marketplaces default to
+    // auto-update OFF, which leaves the catalog frozen at whatever it was when the
+    // marketplace was first added: the session-start update check then compares
+    // against stale data, teammates silently run an old engine for weeks, and a
+    // published fix never reaches anyone. Declaring it here syncs it to
+    // known_marketplaces.json for every member of the repo, with no UI toggle.
     o.extraKnownMarketplaces.quetrex = {
-      source: { source: "github", repo: "Glori-Holdings/quetrex-plugins" }
+      source: { source: "github", repo: "Glori-Holdings/quetrex-plugins" },
+      autoUpdate: true
     };
     const mktChanged = JSON.stringify(o.extraKnownMarketplaces.quetrex) !== beforeMkt;
 

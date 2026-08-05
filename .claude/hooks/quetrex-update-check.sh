@@ -145,5 +145,20 @@ if behind "$INSTALLED_FACTORY" "$LATEST_FACTORY"; then
   fi
 fi
 
-[ -n "$MSG" ] && echo "[quetrex] $MSG — run /quetrex:update"
+if [ -n "$MSG" ]; then
+  echo "[quetrex] ⚠ $MSG — run /quetrex:update"
+  exit 0
+fi
+
+# UP TO DATE -> say so explicitly. Silence used to mean two different things —
+# "you are current" and "I could not check" — which is indistinguishable at the
+# moment you most need to trust it. Only claim "latest" for a component whose
+# latest version was actually resolved from the manifest; a component we could
+# not resolve is omitted rather than vouched for.
+CONFIRM=""
+[ -n "$INSTALLED_QUETREX" ] && [ -n "$LATEST_QUETREX" ] && CONFIRM="Quetrex $INSTALLED_QUETREX"
+if [ -n "$INSTALLED_FACTORY" ] && [ -n "$LATEST_FACTORY" ]; then
+  [ -n "$CONFIRM" ] && CONFIRM="$CONFIRM · engine $INSTALLED_FACTORY" || CONFIRM="engine $INSTALLED_FACTORY"
+fi
+[ -n "$CONFIRM" ] && echo "[quetrex] ✓ $CONFIRM — latest"
 exit 0
