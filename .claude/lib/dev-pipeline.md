@@ -272,6 +272,78 @@ judgment would be relabelled without being re-made).
 
 ---
 
+## The two env shape contracts
+
+Two artifacts carry environment-variable information between stages that cannot see each other's
+source. Each has exactly one shape, decided **here** and nowhere else — `.claude/agents/architect.md`
+and `bin/quetrex-cloud-prep` both cite this section by name ("Contract A"/"Contract B" in **The two
+env shape contracts**) instead of re-specifying the shape, precisely so four files never guess at
+it independently and drift.
+
+### Contract A — `required_env` (the plan field)
+
+`required_env` is an **array of OBJECTS**, never of bare strings and never a `{NAME: value}` map.
+Each entry carries exactly these four keys and no others:
+
+- `name` — the variable name **alone** (no `$`, no `process.env.` prefix, no value, ever). **The
+  only key any consumer projects.**
+- `read_at` — `file:line` of the fallback-less read that demands it, repo-root relative.
+- `placeholderable` — `true` iff a syntactically valid, credential-less placeholder value satisfies
+  that read for the whole `verify` chain.
+- `why` — one sentence naming the verify command that needs it.
+
+**Produced by:** the **architect**, from its own fallback-less grep unioned with whatever
+`bin/quetrex-env-derive verify-json` already wrote into the committed `.quetrex/verify.json`'s
+`requiredEnv` map (it reads that file at plan time — see step 3 above); and then, deterministically,
+by the **dispatcher** (`/quetrex:task-build`), which calls `bin/quetrex-env-derive plan
+"$TMP_WT/.quetrex/plan/$TASK_ID.json" "$REPO_ROOT"` immediately after `quetrex-plan-stamp`, before
+the spec worktree is committed and pushed. The dispatcher call exists because the architect's
+frontmatter grants `tools: Read, Grep, Glob, Write` with **no Bash**, so it cannot run the shared
+discovery tool itself — the stamp is a union-only backstop that repairs a miss, never a
+replacement for the architect's own entries.
+
+**Consumed by:** `bin/quetrex-cloud-prep hydrate`, which projects `.name` **only** —
+`(plan.required_env || []).map(e => e && e.name).filter(...)` — and writes one credential-less
+placeholder `export` per name into a sourceable env file. The measured defect this shape closes: an
+earlier, wrong projection (`.join("\n")` over the object array) collapsed to the literal string
+`"[object Object]"`, hydrated nothing, and the run still exited 0 — the whole feature silently
+inert while every gate stayed green.
+
+### Contract B — `env_placeholdered` (the provenance field)
+
+Written by `bin/quetrex-cloud-prep hydrate` into `.quetrex/env-provenance.json`, alongside
+`required_env` (a verbatim mirror of the plan's array — informational only, read by no consumer)
+and `hydrated_at`. `env_placeholdered` is a **flat array of NAMES ONLY, never values** — exactly
+the names hydrate actually placeholdered, nothing more. The measured defect this shape closes: a
+producer/consumer key-name mismatch (`env_placeholdered` written, `.placeholdered` read) silently
+degraded a positive claim ("this chain ran against real placeholders") into an empty list — which
+reads as "this chain proved itself against the real environment," **inverting** the evidence rather
+than merely losing it.
+
+### The shared discovery tool
+
+Both projections come from **one** static discovery pass, `bin/quetrex-env-derive`, so the
+candidate-selection rule (a committed `.env.example`/`.env.sample` key intersected with a
+fallback-less read in tracked source) and the command-attribution rule (scope-filtered through the
+chain command's own leaf script, resolved through the repo's own manifest) are never re-specified
+in a second place:
+
+- `quetrex-env-derive verify-json <repo-root>` writes the `requiredEnv` map into the COMMITTED
+  `.quetrex/verify.json` that `verify-gate.sh`'s declarative env skip reads — called from
+  `/quetrex:init` step 4b.
+- `quetrex-env-derive plan <plan.json> <repo-root>` stamps Contract A `required_env[]` entries into
+  a plan artifact — called from the `/quetrex:task-build` dispatcher, one line after
+  `quetrex-plan-stamp`.
+- `quetrex-env-derive missing <repo-root>` is report-only, used by `/quetrex:doctor` Check 5.
+
+Both writing subcommands are **union-only and never-narrow**: they add names, never remove or
+narrow an existing entry, and neither ever writes a `requiredEnv`/`required_env` key that is not
+already a member of the resulting `.verify[]`. Static discovery only — the tool never executes,
+evals, or shells out to a string it reads from `verify.json`, a `package.json` script, or a
+Makefile recipe.
+
+---
+
 ## Background + visibility
 
 The caller does **not** parse engine output inline. Progress is visible on the board (status
