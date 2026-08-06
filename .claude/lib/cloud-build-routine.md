@@ -54,6 +54,38 @@ Validate the result parses as JSON and names a non-empty `ownership` map before 
 If it does not, this is a transport problem, not a code problem — stop and report
 `transport_failure` (rule 5 below) rather than fabricating a plan.
 
+### 2b. Sync to the approved base, then hydrate the build environment
+
+Two measured failures killed real cloud builds, and `quetrex-cloud-prep` (on the plugin's
+PATH, callable by name) fixes both. Run it before ANY stage — a stage that runs the verify
+chain without this is guaranteed to fail.
+
+    quetrex-cloud-prep sync {{BASE_BRANCH}} "$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync("/tmp/plan-{{TASK}}.json","utf8")).base_sha||""))')" {{BRANCH_PREFIX}}{{TASK}}
+    quetrex-cloud-prep hydrate /tmp/plan-{{TASK}}.json --env-file /tmp/quetrex-env-{{TASK}}.sh
+
+WHY `sync`. The clone you were handed cannot be trusted: routines start "from the default
+branch" with no ref you can request, and the environment cache is "a filesystem snapshot …
+reused as the starting point for later sessions". A run that trusted its checkout built on a
+base a day old, then opened three unrelated PRs trying to unblock itself instead of doing its
+task. `sync` fetches the base, decides by ANCESTRY (never by string compare) whether the base
+is behind the approved sha — in which case it exits non-zero and pushes nothing, because a
+build on a base nobody approved is worse than no build — or merely ahead, which is legitimate
+and proceeds. It also publishes an empty first commit immediately, so a run that dies early is
+visible instead of silent.
+
+WHY `hydrate`. `.env*` is git-ignored, so a fresh clone has no environment at all, and a
+verify chain whose build reads one variable fails on that alone. `hydrate` projects the names
+from the plan's `required_env` — nothing is hardcoded — and writes credential-less
+PLACEHOLDER values, never real credentials. It never overwrites a name already set.
+
+**Every stage runs in its own shell and inherits nothing.** Source the env file at the start of
+each stage that runs the verify chain, or that stage fails exactly as before:
+
+    . /tmp/quetrex-env-{{TASK}}.sh
+
+If either command exits non-zero, that is a `transport_failure` (rule 5) — report it and stop.
+Do not invent a value, and do not "fix" an unrelated failing test to get the chain green.
+
 ### 3. Run THE DEV PIPELINE, in cloud, stage by stage
 Follow the exact stage order and gates .claude/lib/dev-pipeline.md defines — architect,
 developer(s), QA, reviewer, git-workflow — against base branch {{BASE_BRANCH}} / branch
@@ -115,14 +147,14 @@ merging used to require going around the gate by hand. **The evidence has to com
 Push it to a dedicated branch, the same way the spec branch delivered the plan here:
 
     HEAD_SHA="$(git rev-parse HEAD)"        # the exact commit the PR will merge
-    GATES_BRANCH="{{BRANCH_PREFIX}}{{TASK_ID}}-gates"
+    GATES_BRANCH="{{BRANCH_PREFIX}}{{TASK}}-gates"
     node -e 'const fs=require("fs");fs.writeFileSync(".quetrex/gates-head",process.argv[1]+"\n")' "$HEAD_SHA"
     git checkout -q -b "$GATES_BRANCH"
     git add -f .quetrex/verify-ledger.jsonl .quetrex/review-verdict.json \
                .quetrex/qa-report.json .quetrex/security-findings.json \
                .quetrex/gates-head 2>/dev/null || true
     git -c user.name='quetrex-bot' -c user.email='quetrex-bot@users.noreply.github.com' \
-      commit -q -m "chore(gates): {{TASK_ID}} gate artifacts for $HEAD_SHA"
+      commit -q -m "chore(gates): {{TASK}} gate artifacts for $HEAD_SHA"
     git push -f origin "$GATES_BRANCH"
 
 Rules that make this evidence and not decoration:

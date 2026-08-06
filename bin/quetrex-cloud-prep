@@ -1,0 +1,637 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+#
+# quetrex-cloud-prep — the two things a cloud build MUST do before it builds.
+#
+#   quetrex-cloud-prep sync <base-branch> <base-sha> <unit-branch> [--repo <dir>]
+#   quetrex-cloud-prep hydrate <plan.json> [--env-file <path>] [--repo <dir>]
+#
+# ---------------------------------------------------------------------------
+# WHY THIS IS AN EXECUTABLE AND NOT PROSE IN A PROMPT
+# ---------------------------------------------------------------------------
+# bin/quetrex-arm exists because cloud-arming logic written as inline node
+# prose inside a slash command "did not reliably execute" (read its header).
+# This tool exists for the SAME reason plus a second, sharper one that was
+# measured twice on this exact feature:
+#
+#   Every Bash tool call is a FRESH SHELL. A shell FUNCTION defined in one
+#   call, and any variable that was not exported, DO NOT EXIST in the next
+#   one. The sync/hydrate logic used to live as shell snippets inside a prose
+#   prompt (.claude/lib/cloud-build-routine.md steps 0b/0c), where each
+#   snippet is a separate tool call. Result, twice: helper functions were
+#   undefined at their call sites and the variables they were supposed to set
+#   were empty — so the "hardening" was inert while the whole test suite was
+#   green, because the tests were greps over the prose and a grep cannot fail
+#   when the behaviour is broken.
+#
+# ONE SCRIPT = ONE PROCESS = STATE PERSISTS. That is the entire architectural
+# point of this file. Anything a cloud session must do across more than one
+# variable lives here, is exercised by test/cloud-prep.test.sh by EXECUTION,
+# and either exits 0 or fails loudly.
+#
+# ---------------------------------------------------------------------------
+# WHAT `sync` FIXES (measured)
+# ---------------------------------------------------------------------------
+# The Routines platform clones "each repository ... at the start of a run,
+# starting from the default branch" — there is no ref parameter — and the
+# environment cache is "a filesystem snapshot ... reused as the starting point
+# for later sessions". So the checkout a cloud session wakes up on can be days
+# old and there is no way to ask for a newer one. Measured: three PRs were
+# parented on main-as-of-Aug-4 while main had moved on Aug-5, and one run
+# burned itself out opening unrelated housekeeping PRs to unblock a stale tree
+# instead of building its task.
+#
+# Therefore: never trust the handed checkout. Fetch the base yourself, and
+# decide the direction by ANCESTRY — never by string inequality and never by
+# timestamps. A DIFFERING sha is the NORMAL, HEALTHY case (another task merged
+# into the base while this one was in flight); aborting on difference would
+# fail every healthy run, and proceeding on non-ancestry would build on a base
+# no human ever approved. Only the ancestry question separates the two.
+#
+# ---------------------------------------------------------------------------
+# WHAT `hydrate` FIXES (measured)
+# ---------------------------------------------------------------------------
+# A bare clone has no .env (they are git-ignored) and the verify chain reads
+# process.env. Measured in a bare clone of the target repo: lint 0,
+# type-check 0, test 0 (2447/2447 pass), build 1 — build alone, and only
+# because one database-connection variable is unset. A single credential-less
+# placeholder turns the chain 4/4 green with no database anywhere.
+#
+# Two hard constraints on those placeholder VALUES, both measured:
+#
+#   1. CREDENTIAL-LESS BY CONSTRUCTION. .claude/hooks/secret-scan.sh:151
+#      matches a db/amqp scheme followed by //user:password@ — with such a
+#      segment the value is DENIED on Write/Edit, denied when a Bash command
+#      writes it to a file, and otherwise silently rewritten to
+#      __QUETREX_REDACTED_SECRET__, i.e. the build would run against a mangled
+#      value and go red for a reason nobody could diagnose. No user:pass@
+#      segment appears in any value this script can emit.
+#
+#   2. SCHEME AWARENESS IS REQUIRED. A blanket "anything ending in _URL gets
+#      http://…" map is what re-reds the very build this exists to green: a
+#      redis / amqp / mongo client handed an http:// URI throws on parse before
+#      it ever connects. The value is therefore chosen from the SCHEME INTENT
+#      encoded in the name, not from its suffix alone.
+#
+# And one hard constraint on the NAMES: not one of them is hardcoded here.
+# Every name comes from the plan's `required_env`. A name list baked into this
+# file would be wrong for the next repo and, worse, a stale baked list reads
+# like doctrine while hiding the reads actually present. Hydrating a plan with
+# an empty `required_env` therefore exports exactly nothing — which is the
+# executable proof of that rule.
+#
+# ---------------------------------------------------------------------------
+# CONTRACTS (decided in .claude/lib/dev-pipeline.md — "The two env shape
+# contracts". Do not re-decide them here.)
+# ---------------------------------------------------------------------------
+# Contract A — `required_env` is an array of OBJECTS, {name, read_at,
+#   placeholderable, why}, and `name` is the ONLY key a consumer reads. The
+#   canonical node projection is used verbatim below. The measured defect it
+#   replaces: `(p.required_env||[]).join("\n")` over objects yields the single
+#   string "[object Object]", so the hydration loop iterated "[object" and
+#   "Object]", exported NOTHING, and exited 0 — the whole feature inert, every
+#   test green. The name-shape filter is not decoration: it is what stops a
+#   malformed entry from being `export`ed as a shell fragment, and it is why a
+#   projection that accidentally yields VALUES collapses to nothing instead of
+#   smuggling a connection string into an artifact.
+#
+# Contract B — the provenance field is spelled `env_placeholdered`, identically
+#   everywhere, and holds NAMES ONLY, never values. The measured defect: the
+#   producer wrote `env_placeholdered` while consumers read `.placeholdered`,
+#   so every artifact recorded `[]` — which is a POSITIVE claim that the chain
+#   was proven against the real environment. A key typo did not degrade the
+#   evidence, it INVERTED it. And a value in that artifact would make it a
+#   credential sink that secret-scan.sh:242-260 would refuse to write at all.
+#
+# ---------------------------------------------------------------------------
+# OUTPUT CONTRACT (both subcommands)
+# ---------------------------------------------------------------------------
+# stdout is ONLY machine-readable `QX_NAME='value'` lines, single-quoted so the
+# caller can `eval "$(quetrex-cloud-prep …)"` safely. Every human sentence goes
+# to stderr. That split is why a caller can consume this tool without parsing
+# prose — the failure mode that made the prompt-embedded version unusable.
+#
+# Exit codes:
+#   0  success
+#   1  local/usage-adjacent failure (bad repo, unwritable path, bad plan)
+#   2  usage error
+#   3  transport_failure — the environment served a base this run must not
+#      build on. Distinct on purpose: `needs_clarity` means the CODE or SPEC
+#      needs a human; transport_failure means the RUN needs re-firing, and
+#      conflating them sends a human down the wrong path.
+#
+# Requires: git, node (>=18).
+
+set -uo pipefail
+
+PROG="quetrex-cloud-prep"
+E_FAIL=1
+E_USAGE=2
+E_TRANSPORT=3
+
+BOT_NAME="quetrex-bot"
+BOT_EMAIL="quetrex-bot@users.noreply.github.com"
+
+# --------------------------------------------------------------------------
+# Temp-file discipline. Every temp this script creates is registered here and
+# removed by the EXIT trap, so nothing is left behind on success OR on throw
+# (die/transport_failure both `exit`, so the trap always runs). A plain
+# space-separated string, not an array: /usr/bin/env bash is 3.2 on macOS,
+# where "${ARR[@]}" under `set -u` errors on an EMPTY array — which would
+# itself become a failure in the cleanup path.
+# --------------------------------------------------------------------------
+_QXCP_TMPS=""
+_QXCP_LAST_TMP=""
+
+_qxcp_cleanup() {
+  local t
+  for t in $_QXCP_TMPS; do
+    [ -n "$t" ] && rm -f "$t"
+  done
+}
+trap _qxcp_cleanup EXIT
+
+# _qxcp_mktemp <dir>
+#   A temp file INSIDE <dir>, so the final `mv` onto the target is a rename on
+#   the same filesystem (atomic: a reader never sees a half-written artifact).
+#   The path is returned in the GLOBAL _QXCP_LAST_TMP, and callers must NOT wrap
+#   this in a command substitution.
+#
+#   WHY, measured while writing this file: the first version printed the path to
+#   stdout so callers wrote `t="$(_qxcp_mktemp "$dir")"`. A command substitution
+#   is a SUBSHELL, so `_QXCP_TMPS="$_QXCP_TMPS $t"` executed in a child and the
+#   parent's list stayed EMPTY — the EXIT trap then had nothing to clean and
+#   every run left .qxcp.* files behind, on the success path and the throw path
+#   alike. That is the same class of defect as the one that made the prose
+#   version of this logic inert (a fresh shell keeps none of the previous one's
+#   state), reappearing one scope down. Assign to a global, call it as a plain
+#   statement, and the registration happens where the trap can see it.
+_qxcp_mktemp() {
+  local dir="$1" t
+  t="$(mktemp "$dir/.qxcp.XXXXXX" 2>/dev/null)" || return 1
+  _QXCP_TMPS="$_QXCP_TMPS $t"
+  _QXCP_LAST_TMP="$t"
+  return 0
+}
+
+die() { printf '%s: %s\n' "$PROG" "$1" >&2; exit "${2:-$E_FAIL}"; }
+note() { printf '%s: %s\n' "$PROG" "$1" >&2; }
+
+# transport_failure — the ONE failure shape a watcher must be able to tell
+# apart. The word is printed literally so the caller can string-match it, and
+# the caller's contract is: push nothing, open nothing, re-fire is a human
+# decision.
+transport_failure() {
+  printf '%s: transport_failure — %s\n' "$PROG" "$1" >&2
+  exit "$E_TRANSPORT"
+}
+
+# out <NAME> <value> — one machine-readable stdout line, eval-safe.
+out() { printf "%s='%s'\n" "$1" "$2"; }
+
+usage() {
+  cat >&2 <<EOF
+usage:
+  $PROG sync <base-branch> <base-sha> <unit-branch> [--repo <dir>]
+      Fetch <base-branch> from origin, prove <base-sha> is an ancestor of it,
+      then create OR RESUME <unit-branch> and publish it immediately.
+      Prints: QX_APPROVED_BASE_SHA QX_LIVE_BASE_SHA QX_BASE_STATE
+              QX_UNIT_BRANCH QX_BRANCH_STATE QX_UNIT_HEAD_SHA
+
+  $PROG hydrate <plan.json> [--env-file <path>] [--repo <dir>]
+      Project plan.required_env (Contract A), write a sourceable env file of
+      credential-less placeholders for the names not already set, and record
+      NAMES ONLY in <repo>/.quetrex/env-provenance.json (Contract B).
+      Prints: QX_ENV_FILE QX_ENV_PROVENANCE QX_ENV_PLACEHOLDERED QX_ENV_PRESET
+
+Exit: 0 ok · 1 failure · 2 usage · 3 transport_failure
+EOF
+}
+
+# ==========================================================================
+# sync
+# ==========================================================================
+
+# _qxcp_git <repo> <args...>
+#   `git -C <repo>` everywhere: the enforce-branch hook keys off the branch of
+#   the directory git is actually operating in, and a `cd` in a compound
+#   command is what makes it block on main instead.
+_qxcp_git() {
+  local repo="$1"; shift
+  git -C "$repo" "$@"
+}
+
+cmd_sync() {
+  local base_branch="" base_sha="" unit_branch="" repo="$PWD"
+  local positional=0
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --repo)
+        [ "$#" -ge 2 ] || { usage; exit "$E_USAGE"; }
+        repo="$2"; shift 2 ;;
+      --repo=*) repo="${1#--repo=}"; shift ;;
+      -*) note "unknown option for sync: $1"; usage; exit "$E_USAGE" ;;
+      *)
+        positional=$((positional + 1))
+        case "$positional" in
+          1) base_branch="$1" ;;
+          2) base_sha="$1" ;;
+          3) unit_branch="$1" ;;
+          *) note "too many arguments for sync: $1"; usage; exit "$E_USAGE" ;;
+        esac
+        shift ;;
+    esac
+  done
+
+  if [ -z "$base_branch" ] || [ -z "$base_sha" ] || [ -z "$unit_branch" ]; then
+    usage; exit "$E_USAGE"
+  fi
+  command -v git >/dev/null 2>&1 || die "git is required"
+  [ -d "$repo" ] || die "not a directory: $repo"
+  _qxcp_git "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || die "not a git work tree: $repo"
+  _qxcp_git "$repo" remote get-url origin >/dev/null 2>&1 \
+    || die "no 'origin' remote in $repo — nothing to sync against"
+
+  # ----------------------------------------------------------------------
+  # 1. Fetch the base with an EXPLICIT refspec.
+  #
+  # `git fetch origin <branch>` only guarantees FETCH_HEAD; whether it also
+  # advances refs/remotes/origin/<branch> depends on the clone's fetch
+  # refspec, which a platform-provided checkout does not promise. Naming the
+  # destination ref makes the remote-tracking ref the thing we then reason
+  # about, in every clone shape. The leading + is a forced update of the
+  # TRACKING ref only (never of a remote branch): if the cached snapshot
+  # carries a diverged tracking ref, the truth from origin must win.
+  # ----------------------------------------------------------------------
+  _qxcp_git "$repo" fetch -q --no-tags origin \
+    "+refs/heads/$base_branch:refs/remotes/origin/$base_branch" \
+    || transport_failure "cannot fetch base branch '$base_branch' from origin"
+
+  local live_base
+  live_base="$(_qxcp_git "$repo" rev-parse -q --verify \
+    "refs/remotes/origin/$base_branch^{commit}" 2>/dev/null)"
+  [ -n "$live_base" ] \
+    || transport_failure "origin/$base_branch does not resolve to a commit after fetch"
+
+  # ----------------------------------------------------------------------
+  # 2. DIRECTION BY ANCESTRY. Not string comparison, not timestamps.
+  # ----------------------------------------------------------------------
+  local approved
+  approved="$(_qxcp_git "$repo" rev-parse -q --verify "$base_sha^{commit}" 2>/dev/null)"
+  # An approved base this clone has never heard of is the staleness bug in its
+  # purest form: the snapshot predates the commit a human approved. Say so
+  # precisely rather than letting merge-base emit "Not a valid object name".
+  [ -n "$approved" ] \
+    || transport_failure "approved base $base_sha is not present in this clone (fetched origin/$base_branch = $live_base) — the environment served a stale or rewritten base"
+
+  local base_state
+  if _qxcp_git "$repo" merge-base --is-ancestor "$approved" "$live_base"; then
+    if [ "$approved" = "$live_base" ]; then
+      base_state="equal"
+      note "base $base_branch is exactly the approved base $approved"
+    else
+      # THE HEALTHY CASE THAT A STRING COMPARE WOULD KILL: another task
+      # legitimately merged while this one was in flight. Proceed from the
+      # newer base and say which sha was actually used, because every
+      # downstream marker and report has to name it.
+      base_state="ahead"
+      note "base $base_branch moved AHEAD of the approved base (approved $approved, live $live_base) and contains it — proceeding from the live sha $live_base"
+    fi
+  else
+    # Not an ancestor: this environment's view of the repo does not contain
+    # work a human already approved. A run that builds on a base the approver
+    # never saw is worse than a run that does nothing.
+    transport_failure "approved base $approved is NOT an ancestor of origin/$base_branch ($live_base) — stale or rewritten base; pushing nothing"
+  fi
+
+  # ----------------------------------------------------------------------
+  # 3. Create OR RESUME the unit branch. Decided FIRST, before any checkout.
+  #
+  # A re-fire after a transport death already has commits on the remote, and
+  # those commits are the resume point. Branching from the base over the top
+  # of them discards them and the very next push fails
+  # "! [rejected] (non-fast-forward)" — which is how a "resume" quietly became
+  # a data-loss bug.
+  #
+  # AUTHORITY: `git ls-remote`, i.e. the remote itself. NOT the local
+  # remote-tracking ref — the reused filesystem snapshot can carry a
+  # refs/remotes/origin/<unit> for work that is no longer on the remote, and
+  # resuming from a phantom is its own kind of stale base. The phantom is
+  # deleted rather than tolerated, so nothing downstream can resolve
+  # origin/<unit> to a commit the remote does not have.
+  # ----------------------------------------------------------------------
+  local lsout remote_tip branch_state resume_sha
+  lsout="$(_qxcp_git "$repo" ls-remote --heads origin "$unit_branch" 2>/dev/null)" \
+    || transport_failure "cannot reach origin to look up '$unit_branch'"
+  # ls-remote's pattern matches on a path-tail basis (refs/heads/a/x matches
+  # the pattern "x"), so require the ref name to be EXACTLY ours.
+  remote_tip="$(printf '%s\n' "$lsout" \
+    | awk -v want="refs/heads/$unit_branch" '$2 == want { print $1; exit }')"
+
+  if [ -n "$remote_tip" ]; then
+    _qxcp_git "$repo" fetch -q --no-tags origin \
+      "+refs/heads/$unit_branch:refs/remotes/origin/$unit_branch" \
+      || transport_failure "cannot fetch existing unit branch '$unit_branch'"
+    resume_sha="$(_qxcp_git "$repo" rev-parse -q --verify \
+      "refs/remotes/origin/$unit_branch^{commit}" 2>/dev/null)"
+    [ -n "$resume_sha" ] \
+      || transport_failure "'$unit_branch' exists on origin but did not fetch to a commit"
+
+    # If a local branch of that name already contains the pushed tip (a re-run
+    # inside the SAME container), keep it: a `checkout -B` there would throw
+    # away commits made since the last push. Otherwise reset onto the fetched
+    # remote tip. Neither path uses --force anywhere.
+    if _qxcp_git "$repo" rev-parse -q --verify "refs/heads/$unit_branch" >/dev/null 2>&1 \
+       && _qxcp_git "$repo" merge-base --is-ancestor "$resume_sha" "refs/heads/$unit_branch"; then
+      _qxcp_git "$repo" checkout -q "$unit_branch" \
+        || die "could not check out existing local branch '$unit_branch'"
+    else
+      _qxcp_git "$repo" checkout -q -B "$unit_branch" "refs/remotes/origin/$unit_branch" \
+        || die "could not check out '$unit_branch' from its pushed tip"
+    fi
+
+    # Same ancestry question, asked of the resume point. Work pushed on top of
+    # a base the approver never saw is not a resume point at all.
+    _qxcp_git "$repo" merge-base --is-ancestor "$approved" HEAD \
+      || transport_failure "resume point $resume_sha does not contain approved base $approved — that branch was built on a snapshot the approver never saw"
+
+    # Do NOT rebase / reset / force-push onto the newer base. Every one of
+    # those rewrites commits that are already on the remote, i.e. exactly the
+    # loss this branch exists to prevent. Let the PR merge integrate the base.
+    branch_state="resumed"
+    note "resuming '$unit_branch' from pushed commit $resume_sha (no rebase, no force)"
+  else
+    if _qxcp_git "$repo" rev-parse -q --verify "refs/remotes/origin/$unit_branch" >/dev/null 2>&1; then
+      _qxcp_git "$repo" update-ref -d "refs/remotes/origin/$unit_branch" \
+        || die "could not delete the stale remote-tracking ref for '$unit_branch'"
+      note "deleted a PHANTOM remote-tracking ref for '$unit_branch' — origin has no such branch, so this is a first fire, not a resume"
+    fi
+    _qxcp_git "$repo" checkout -q -B "$unit_branch" "refs/remotes/origin/$base_branch" \
+      || die "could not create '$unit_branch' from origin/$base_branch"
+
+    # THE FIRST COMMIT IS EMPTY, AND IT IS PUSHED IMMEDIATELY. This is not
+    # ceremony: it makes "no branch on the remote minutes after firing" a real
+    # observable signal instead of an assumption. A run died before publishing
+    # anything and was invisible for 15h.
+    # A fresh clone has no committer identity, so it is set inline or the
+    # commit aborts.
+    _qxcp_git "$repo" -c "user.name=$BOT_NAME" -c "user.email=$BOT_EMAIL" \
+      commit -q --allow-empty -m "chore(start): $unit_branch sync to $live_base" \
+      || die "could not create the empty start commit on '$unit_branch'"
+    branch_state="created"
+    note "created '$unit_branch' from $live_base with an empty start commit"
+  fi
+
+  # Fast-forward push, explicit refspec, NO --force on the unit branch ever.
+  # On the resume path this is "Everything up-to-date" until the first new
+  # slice lands, which is correct: the branch is already the heartbeat.
+  _qxcp_git "$repo" push -q origin "refs/heads/$unit_branch:refs/heads/$unit_branch" \
+    || transport_failure "could not publish '$unit_branch' to origin — without it, this run is invisible"
+
+  local head_sha
+  head_sha="$(_qxcp_git "$repo" rev-parse HEAD)"
+
+  out QX_APPROVED_BASE_SHA "$approved"
+  out QX_LIVE_BASE_SHA "$live_base"
+  out QX_BASE_STATE "$base_state"
+  out QX_UNIT_BRANCH "$unit_branch"
+  out QX_BRANCH_STATE "$branch_state"
+  out QX_UNIT_HEAD_SHA "$head_sha"
+  return 0
+}
+
+# ==========================================================================
+# hydrate
+# ==========================================================================
+
+# _qxcp_placeholder_for <NAME>
+#   Choose a credential-less placeholder from the SCHEME INTENT encoded in the
+#   name. Read the two constraints in the header before changing anything here.
+#
+#   These globs are CLASSIFIERS, not a name list: they match shapes and
+#   keywords, and no complete environment-variable name appears anywhere in
+#   this function. The names being classified always come from the plan.
+_qxcp_placeholder_for() {
+  local n="$1"
+  # Case-fold so a lowercase or mixed-case name classifies identically.
+  # `tr` rather than ${n^^}: /usr/bin/env bash is 3.2 on macOS.
+  local u
+  u="$(printf '%s' "$n" | tr '[:lower:]' '[:upper:]')"
+
+  case "$u" in
+    # Shape first: a host/port name must NOT receive a URI, and a port must be
+    # numeric or a parseInt read yields NaN. Nothing is listening on any of
+    # these either way — the point is only that the value PARSES.
+    *_PORT)
+      printf '%s' '3000' ;;
+    *_HOST|*_HOSTNAME)
+      printf '%s' 'localhost' ;;
+
+    # URI-shaped names — and only here does the scheme question arise.
+    *_URL|*_URI|*_DSN|*_ENDPOINT|*_ORIGIN|*DATABASE*|*POSTGRES*)
+      case "$u" in
+        # SCHEME AWARENESS. A blanket http:// for every *_URL is what re-reds
+        # the build this whole tool exists to green: these clients throw on
+        # parse, before any connection is attempted, when the scheme is wrong.
+        *REDIS*)
+          printf '%s' 'redis://localhost:6379' ;;
+        *MONGO*)
+          printf '%s' 'mongodb://localhost:27017/quetrex_placeholder_db' ;;
+        *AMQP*|*RABBIT*)
+          printf '%s' 'amqp://localhost:5672' ;;
+        *MYSQL*|*MARIADB*)
+          printf '%s' 'mysql://localhost:3306/quetrex_placeholder_db' ;;
+        *SMTP*|*MAILER*)
+          printf '%s' 'smtp://localhost:1025' ;;
+        *POSTGRES*|*DATABASE*|*_DSN)
+          # Postgres scheme + localhost host:port + a placeholder db name, and
+          # NO user:pass@ segment — the only shape that survives
+          # secret-scan.sh:151 unredacted.
+          printf '%s' 'postgres://localhost:5432/quetrex_placeholder_db' ;;
+        *)
+          printf '%s' 'http://localhost:3000' ;;
+      esac ;;
+
+    # Everything else: a SHORT literal on purpose. secret-scan.sh Tier B denies
+    # a >=20-char high-entropy value assigned to a secret-named key, and a fair
+    # share of these names contain SECRET or TOKEN.
+    *)
+      printf '%s' 'placeholder' ;;
+  esac
+}
+
+cmd_hydrate() {
+  local plan="" env_file="" repo="$PWD"
+  local positional=0
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --env-file)
+        [ "$#" -ge 2 ] || { usage; exit "$E_USAGE"; }
+        env_file="$2"; shift 2 ;;
+      --env-file=*) env_file="${1#--env-file=}"; shift ;;
+      --repo)
+        [ "$#" -ge 2 ] || { usage; exit "$E_USAGE"; }
+        repo="$2"; shift 2 ;;
+      --repo=*) repo="${1#--repo=}"; shift ;;
+      -*) note "unknown option for hydrate: $1"; usage; exit "$E_USAGE" ;;
+      *)
+        positional=$((positional + 1))
+        case "$positional" in
+          1) plan="$1" ;;
+          *) note "too many arguments for hydrate: $1"; usage; exit "$E_USAGE" ;;
+        esac
+        shift ;;
+    esac
+  done
+
+  [ -n "$plan" ] || { usage; exit "$E_USAGE"; }
+  command -v node >/dev/null 2>&1 || die "node (>=18) is required"
+  [ -f "$plan" ] || die "plan artifact not found: $plan"
+  [ -d "$repo" ] || die "not a directory: $repo"
+
+  local prov_dir="$repo/.quetrex"
+  [ -n "$env_file" ] || env_file="$prov_dir/env.sh"
+  local env_dir
+  env_dir="$(dirname "$env_file")"
+  mkdir -p "$env_dir" || die "could not create $env_dir"
+  mkdir -p "$prov_dir" || die "could not create $prov_dir"
+
+  # ----------------------------------------------------------------------
+  # Contract A projection, verbatim. This is the hydration SOURCE and it is a
+  # projection of the plan file — never a literal list.
+  # ----------------------------------------------------------------------
+  local names_tmp
+  _qxcp_mktemp "$env_dir" || die "could not create a temp file in $env_dir"
+  names_tmp="$_QXCP_LAST_TMP"
+  node -e '
+    const fs = require("fs");
+    const planPath = process.argv[1];
+    let plan;
+    try { plan = JSON.parse(fs.readFileSync(planPath, "utf8")); }
+    catch (e) { process.stderr.write("plan does not parse as JSON: " + e.message + "\n"); process.exit(1); }
+    // CONTRACT A, character for character. `.map(e => e && e.name)` is the
+    // whole fix for the "[object Object]" defect; the name-shape filter is
+    // what stops a malformed entry from being export-ed as a shell fragment
+    // and what collapses an accidental VALUE projection to nothing.
+    //
+    // Array.isArray FIRST, and this guard was added because the test caught the
+    // literal crash: Contract A names two wrong shapes it rules out, and one of
+    // them — a {NAME: value} MAP — has no .map method, so the canonical
+    // projection written bare (`(plan.required_env || []).map(...)`) throws
+    // TypeError and the whole hydrate step dies with exit 1. A malformed plan
+    // must be DROPPED, not fatal: dying here turns "the architect emitted the
+    // old shape" into a dead run instead of a chain that proves itself against
+    // the real environment and says so via an empty env_placeholdered. Same
+    // reason `plan &&` guards the read: JSON.parse("null") / "7" / "\"x\"" all
+    // succeed and all make a bare property read throw.
+    const entries = (plan && Array.isArray(plan.required_env)) ? plan.required_env : [];
+    const names = entries
+      .map(e => e && e.name)
+      .filter(n => typeof n === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(n));
+    process.stdout.write(names.length ? names.join("\n") + "\n" : "");
+  ' "$plan" > "$names_tmp" || die "could not read required_env from $plan"
+
+  local body_tmp placeholdered="" preset="" name value
+  _qxcp_mktemp "$env_dir" || die "could not create a temp file in $env_dir"
+  body_tmp="$_QXCP_LAST_TMP"
+  {
+    echo "# generated by $PROG hydrate — PLACEHOLDER values, not real credentials."
+    echo "# names projected from required_env in: $plan"
+    echo "# every stage runs in its own shell and inherits nothing, so each one"
+    echo "# must source this file before it runs the verify chain."
+  } > "$body_tmp" || die "could not write $body_tmp"
+
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    # NEVER overwrite a name the environment already set: a real value beats a
+    # placeholder every time, and clobbering it would silently downgrade the
+    # run from "proven against a real service" to "proven against nothing"
+    # while the provenance artifact claimed the opposite.
+    # The indirect expansion is safe only because the Contract A filter above
+    # already proved this name is shell-identifier-shaped.
+    if [ -n "${!name:-}" ]; then
+      preset="$preset $name"
+      continue
+    fi
+    value="$(_qxcp_placeholder_for "$name")"
+    printf "export %s='%s'\n" "$name" "$value" >> "$body_tmp" \
+      || die "could not append to $body_tmp"
+    placeholdered="$placeholdered $name"
+  done < "$names_tmp"
+
+  mv "$body_tmp" "$env_file" || die "could not write $env_file"
+
+  # ----------------------------------------------------------------------
+  # Contract B. NAMES ONLY — no ${!NAME}, no printenv, no process.env anywhere
+  # in this writer. A value here would turn the anti-green-washing record into
+  # a credential sink, and secret-scan.sh:242-260 would refuse the write.
+  # ----------------------------------------------------------------------
+  local prov="$prov_dir/env-provenance.json" prov_tmp
+  _qxcp_mktemp "$prov_dir" || die "could not create a temp file in $prov_dir"
+  prov_tmp="$_QXCP_LAST_TMP"
+  node -e '
+    const fs = require("fs");
+    const [planPath, outPath, ph] = process.argv.slice(1);
+    let plan;
+    try { plan = JSON.parse(fs.readFileSync(planPath, "utf8")); }
+    catch (e) { process.stderr.write("plan does not parse as JSON: " + e.message + "\n"); process.exit(1); }
+    const names = String(ph || "").split(/\s+/).filter(Boolean);
+    // Exactly these four keys (Contract B). `required_env` mirrors the plan
+    // array verbatim — objects, informational for a human reading the file.
+    // `env_placeholdered` is names-only strings and the only field a consumer
+    // may read. Renaming either silently empties every consumer, and an empty
+    // list is a POSITIVE claim ("nothing was hydrated"), so the typo does not
+    // degrade the evidence, it inverts it.
+    // Array.isArray again, and here it is a LEAK guard, not just a crash guard.
+    // "Mirror the plan array verbatim" is only safe when it IS an array: mirror a
+    // {NAME: value} map instead and the artifact now carries VALUES, which is
+    // exactly the credential sink Contract B forbids — and a jq consumer reading
+    // `.required_env[]?` over an object iterates its VALUES, so the leaked
+    // connection string would be handed straight to the next stage. A shape that
+    // is not the contract mirrors as [].
+    const mirrored = (plan && Array.isArray(plan.required_env)) ? plan.required_env : [];
+    fs.writeFileSync(outPath, JSON.stringify({
+      required_env: mirrored,
+      env_placeholdered: names,
+      hydrated_at: new Date().toISOString(),
+      note: "verified against placeholders, not real services"
+    }, null, 2) + "\n");
+  ' "$plan" "$prov_tmp" "$placeholdered" || die "could not build $prov"
+  mv "$prov_tmp" "$prov" || die "could not write $prov"
+
+  placeholdered="${placeholdered# }"
+  preset="${preset# }"
+
+  if [ -n "$placeholdered" ]; then
+    note "hydrated placeholders for: $placeholdered"
+  else
+    note "hydrated nothing — required_env projected to no usable names (that is a positive claim: this chain describes the real environment)"
+  fi
+  [ -n "$preset" ] && note "left already-set names untouched: $preset"
+
+  out QX_ENV_FILE "$env_file"
+  out QX_ENV_PROVENANCE "$prov"
+  out QX_ENV_PLACEHOLDERED "$placeholdered"
+  out QX_ENV_PRESET "$preset"
+  return 0
+}
+
+# ==========================================================================
+# main
+# ==========================================================================
+_qxcp_main() {
+  local sub="${1:-}"
+  [ "$#" -gt 0 ] && shift
+  case "$sub" in
+    sync)    cmd_sync "$@" ;;
+    hydrate) cmd_hydrate "$@" ;;
+    -h|--help|help) usage; return 0 ;;
+    "")      usage; return "$E_USAGE" ;;
+    *)       note "unknown subcommand: $sub"; usage; return "$E_USAGE" ;;
+  esac
+}
+
+_qxcp_main "$@"

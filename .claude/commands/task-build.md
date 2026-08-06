@@ -377,6 +377,20 @@ git -C "$REPO_ROOT" fetch origin "$BASE_BRANCH_FOR_SPEC" --quiet
 git -C "$REPO_ROOT" worktree add --detach --quiet "$TMP_WT" "origin/$BASE_BRANCH_FOR_SPEC"
 mkdir -p "$TMP_WT/.quetrex/plan"
 printf '%s\n' "$PLAN_JSON" > "$TMP_WT/.quetrex/plan/$TASK_ID.json"
+# Stamp the APPROVED base sha into the plan the cloud session will read. This
+# worktree is detached at `origin/$BASE_BRANCH_FOR_SPEC` (fetched two lines up), so
+# the spec commit's parent IS the sha the human approved — quetrex-plan-stamp
+# resolves that same ref and records it as `base_sha`. WHY IT MATTERS: a routine
+# gets no ref parameter (the platform clones "the default branch" and reuses a
+# filesystem SNAPSHOT of the environment), so a run can silently start BEHIND the
+# approved base — #318/#319/#321 were all parented on Aug-4 `main` and spent the run
+# opening housekeeping PRs to unblock themselves. With the sha recorded, the run can
+# tell a stale environment (base behind ⇒ transport_failure) from a base that
+# legitimately moved ahead (⇒ proceed and record what it used). WHY AN EXECUTABLE:
+# prose in a command file is model-instructions, not guaranteed execution, and a
+# stamp that silently does not happen leaves the routine trusting the handed
+# checkout — the exact root cause. It fails loudly instead.
+quetrex-plan-stamp "$TMP_WT/.quetrex/plan/$TASK_ID.json" "$REPO_ROOT" "$BASE_BRANCH_FOR_SPEC" || exit 1
 git -C "$TMP_WT" checkout -q -b "$SPEC_BRANCH"
 git -C "$TMP_WT" add -f ".quetrex/plan/$TASK_ID.json"
 git -C "$TMP_WT" -c user.name='quetrex-bot' -c user.email='quetrex-bot@users.noreply.github.com' \
@@ -401,6 +415,14 @@ RUN_AT="$(date -u -v+2M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+2 minute
 REPO_URL="$(git -C "$REPO_ROOT" remote get-url origin | sed -E 's#^git@([^:]+):#https://\1/#; s#\.git$##')"
 TASK_TITLE="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).title)' "$PAYLOAD")"
 ```
+
+The five-name substitution list in the next paragraph is the **single authority** for what
+gets filled, and it is a **checked contract** with the placeholder table at the top of
+`.claude/lib/cloud-build-routine.md` (:13-22), not documentation: `test/placeholder-substitution.test.sh`
+asserts every placeholder appearing anywhere in that template is named here, and that the
+table names exactly this set — because a template placeholder this list forgot once shipped
+to the cloud unfilled, the run pushed its gate evidence to a branch named after the literal
+unsubstituted text, and `/quetrex:merge` found nothing on every single run.
 
 Load `.claude/lib/cloud-build-routine.md`, substitute its `{{TASK}}`, `{{REPO_URL}}`,
 `{{SPEC_BRANCH}}`, `{{BASE_BRANCH}}`, `{{BRANCH_PREFIX}}` placeholders with `$TASK_ID`,

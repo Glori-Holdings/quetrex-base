@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+#
+# quetrex-plan-stamp — stamp the APPROVED base sha into the plan JSON that
+# /quetrex:task-build publishes to the spec branch (SPEC R1.1, dispatcher half).
+#
+# WHY THIS EXISTS. A cloud routine has no ref parameter: the platform clones
+# "the default branch" at the start of a run and reuses a filesystem SNAPSHOT of
+# the environment as the starting point for later sessions. So a run can begin
+# BEHIND the base a human approved, non-deterministically — PRs #318/#319/#321
+# were all parented on `main` as of Aug 4 and missed a test fix merged Aug 5,
+# then burned the run opening housekeeping PRs to unblock themselves. A run
+# cannot tell "stale environment" from "base legitimately moved ahead" unless it
+# is told which sha was approved. This tool records that sha.
+#
+# WHY A bin/ EXECUTABLE AND NOT PROSE IN task-build.md. Every defect that
+# reached an operator in this engine shared one shape: a code path that had
+# never once been EXECUTED (test/plugin.test.js:127-141). A markdown command's
+# prose is model-instructions, not a guaranteed execution — the same failure
+# mode that made /quetrex:init finish with empty enabledPlugins and that made
+# bin/quetrex-arm necessary. A stamp that silently does not happen is worse than
+# no stamp: the routine then reads a plan with no `base_sha` and falls back to
+# trusting the handed checkout, which is exactly RC1. As a real executable this
+# either runs and exits 0, or it fails loudly — and it is covered by
+# `npm run check:sh` (which globs `bin/*`) for free.
+#
+# usage:
+#   quetrex-plan-stamp <plan.json> <repo-root> <base-branch>
+#
+# Resolves `refs/remotes/origin/<base-branch>` in <repo-root> and writes it into
+# <plan.json> as `base_sha`.
+#
+#   - The ref is spelled out in FULL (`refs/remotes/origin/<base>`) rather than
+#     as `origin/<base>`: the short form would also resolve a LOCAL branch
+#     literally named `origin/<base>`, and stamping a local sha as the approved
+#     base is the very confusion this tool exists to remove. task-build.md has
+#     already fetched that ref and created the spec worktree from it, so the
+#     stamped sha IS the parent of the spec commit the cloud reads.
+#   - The value is written with node + JSON.stringify, never by echoing text into
+#     the file: a hand-spliced string cannot round-trip an arbitrary plan and one
+#     bad quote would hand the routine an unparseable plan, which it is required
+#     to treat as `transport_failure`.
+#   - Refuses (non-zero, message on stderr) when the ref is unresolvable or the
+#     plan does not parse, and writes NOTHING in either case — a half-stamped
+#     plan would ship a wrong "approved" sha, which is worse than a loud stop.
+#   - Idempotent: re-running with the same inputs produces a byte-identical
+#     file, so it is safe on a retried dispatch.
+#   - The plan is REPLACED BY rename(2) and never written in place. This is a
+#     load-bearing property, not a style choice, and `copyFileSync` (or any
+#     direct write to the plan path) is a REGRESSION even though it produces the
+#     same final bytes:
+#       (a) rename is atomic — a reader (task-build's own `git add` of the plan,
+#           or a concurrent dispatch) sees either the old plan or the new one,
+#           never a truncated prefix. A copy/direct write opens the real plan and
+#           truncates it, so a crash mid-write leaves an unparseable plan, which
+#           the routine is required to treat as `transport_failure`.
+#       (b) a copy leaves the `.stamp.<pid>` temp file behind, next to a plan that
+#           task-build.md then stages out of `.quetrex/plan/` — a stray temp file
+#           committed to the spec branch.
+#     test/plan-stamp.test.sh section (vi) proves this behaviourally by tracing
+#     the process's fs writes: nothing but rename may target the plan path.
+#
+# Requires node (>=18) and git.
+
+set -uo pipefail
+
+die() { printf 'quetrex-plan-stamp: %s\n' "$1" >&2; exit 1; }
+
+PLAN="${1:-}"
+REPO_ROOT="${2:-}"
+BASE="${3:-}"
+
+[ -n "$PLAN" ] && [ -n "$REPO_ROOT" ] && [ -n "$BASE" ] \
+  || die "usage: quetrex-plan-stamp <plan.json> <repo-root> <base-branch>"
+[ -f "$PLAN" ] || die "plan file not found: $PLAN"
+[ -d "$REPO_ROOT" ] || die "repo root not found: $REPO_ROOT"
+command -v node >/dev/null 2>&1 || die "node (>=18) is required to rewrite the plan JSON"
+command -v git  >/dev/null 2>&1 || die "git is required to resolve the base sha"
+
+REF="refs/remotes/origin/$BASE"
+# `--verify --quiet` + the `^{commit}` peel: resolve exactly one commit or
+# nothing. `|| BASE_SHA=""` because rev-parse exits non-zero on an unknown ref
+# and this script deliberately runs without `set -e`.
+BASE_SHA="$(git -C "$REPO_ROOT" rev-parse --verify --quiet "$REF^{commit}" 2>/dev/null)" || BASE_SHA=""
+[ -n "$BASE_SHA" ] || die "cannot resolve $REF in $REPO_ROOT — fetch the base branch before stamping; refusing to record an unknown base"
+
+case "$BASE_SHA" in
+  *[!0-9a-f]* | "") die "resolved base sha is not a hex object id: $BASE_SHA" ;;
+esac
+
+# Write via a temp file + rename so a node failure (unparseable plan, unwritable
+# path) leaves the original plan byte-for-byte intact, and so the plan is never
+# observable half-written. The temp file is removed on EVERY exit from the write
+# block — rename consumes it on success, `finally` unlinks it on any throw — so a
+# `.stamp.<pid>` file is never left in `.quetrex/plan/` to be committed.
+node -e '
+  const fs = require("fs");
+  const [plan, sha] = process.argv.slice(1);
+  let src;
+  try { src = fs.readFileSync(plan, "utf8"); }
+  catch (e) { console.error("quetrex-plan-stamp: cannot read plan: " + e.message); process.exit(1); }
+  let obj;
+  try { obj = JSON.parse(src); }
+  catch (e) { console.error("quetrex-plan-stamp: plan does not parse as JSON (" + e.message + ") — refusing to stamp"); process.exit(1); }
+  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
+    console.error("quetrex-plan-stamp: plan is not a JSON object — refusing to stamp");
+    process.exit(1);
+  }
+  // Assignment, not a rebuild: every field the architect wrote survives, and an
+  // already-present base_sha keeps its position so a second run is byte-identical.
+  obj.base_sha = sha;
+  const out = JSON.stringify(obj, null, 2) + "\n";
+  const tmp = plan + ".stamp." + process.pid;
+  try {
+    fs.writeFileSync(tmp, out);
+    // rename(2), NOT copyFileSync and NOT a write to `plan`: the replacement must
+    // be atomic and must consume the temp file. See the header note.
+    fs.renameSync(tmp, plan);
+  } catch (e) {
+    console.error("quetrex-plan-stamp: cannot write plan: " + e.message);
+    process.exitCode = 1;
+  } finally {
+    // Unconditional: a successful rename already consumed `tmp`, so this only
+    // ever fires on a failure path — but it fires there for EVERY throw, not
+    // just the ones we predicted.
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch { /* best effort */ }
+  }
+  if (process.exitCode) process.exit(process.exitCode);
+' "$PLAN" "$BASE_SHA" || exit 1
+
+printf 'stamped %s with base_sha=%s (%s)\n' "$PLAN" "$BASE_SHA" "$REF"
