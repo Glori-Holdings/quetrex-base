@@ -374,11 +374,54 @@ node -e '
 echo "Wrote ## Verification to $PROJ_RULES"
 ```
 
-The same confirmed list is also the seed for `.quetrex/verify.json` — the machine-readable
-chain that takes precedence over this section. This block is the human-readable fallback.
+**5. Seed and merge `.quetrex/verify.json`.** The confirmed list is also the seed for
+`.quetrex/verify.json` — the machine-readable chain `verify-gate.sh` reads (it takes
+precedence over the `## Verification` fence above, which stays the human-readable
+fallback). This step ALSO derives and merges `requiredEnv`: the per-command declaration
+that lets `verify-gate.sh` skip a command pre-flight when a genuinely-required variable
+cannot exist in this checkout (see `.claude/hooks/verify-gate.sh` — "DECLARATIVE ENV
+SKIP"), instead of letting the chain go red on a variable no checkout could ever have.
+That mechanism has always been fully implemented in the hook; nothing ever wrote the
+declaration it reads. This is the write.
+
+Run the shared derivation tool — `quetrex-env-derive`, shipped on the plugin's `bin/`
+(on PATH here, exactly like `quetrex-arm` above; call it by name, never source it) —
+**every time this step runs**, not only when a fresh `## Verification` block was just
+written. It is idempotent and union-only: given `<repo-root>` and (only used the first
+time, when no `.quetrex/verify.json` exists yet) the confirmed commands to seed
+`.verify[]` with, it derives every genuinely-safe `requiredEnv` association from this
+repo's own committed `.env.example`/`.env.sample` and tracked source, and merges the
+result into `.quetrex/verify.json`. It never touches `.verify[]` itself, never deletes
+or overwrites an existing `requiredEnv` entry (hand-written or from an earlier run), and
+never writes an entry whose command is not a byte-for-byte member of `.verify[]` — the
+same constraints `verify-gate.sh` itself enforces on read, so nothing this step writes
+can ever be a mapping the hook would reject:
+
+```bash
+QUETREX_ENV_DERIVE_OUTPUT="$(quetrex-env-derive verify-json "$REPO_ROOT" "${CONFIRMED_STEPS[@]:-}")"; QUETREX_ENV_DERIVE_RC=$?
+printf '%s\n' "$QUETREX_ENV_DERIVE_OUTPUT"
+if [ "$QUETREX_ENV_DERIVE_RC" -ne 0 ]; then
+  echo "quetrex-env-derive failed — .quetrex/verify.json may be missing its requiredEnv declaration. Re-run /quetrex:init once resolved." >&2
+fi
+```
 
 Same `$REPO_ROOT` pin and "never the global file" rule as step 4. Record whether 4b
-created or appended so step 6 stages the file and step 7 reports it.
+created or appended the `## Verification` block, and whether this step wrote
+`.quetrex/verify.json` (`quetrex-env-derive` prints `wrote <path>` when it changes the
+file, and `<path> already current` when the derived state was already merged) — so step
+6 stages the file and step 7 reports it. **The declaration only has effect once
+committed:** `verify-gate.sh` reads `requiredEnv` from `git show HEAD:.quetrex/verify.json`
+(SEC-2), never the working tree, specifically so every association a human is ever
+skipped by first appeared in a reviewed diff. Step 6 already stages
+`.quetrex/verify.json` when present and opens the PR — that path is what carries this
+write into a reviewed commit; nothing further is needed here.
+
+**Already-adopted repos.** Because this step is union-only and never narrows an existing
+`.verify[]` or a pre-existing `requiredEnv` entry, simply **re-running `/quetrex:init`**
+is the complete remediation for a repo whose `.quetrex/verify.json` predates this field —
+it re-derives and merges `requiredEnv` into whatever is already committed, without
+touching a command, a name, or anything a human already wrote by hand. `/quetrex:doctor`
+Check 5 detects exactly this predates-requiredEnv state and points back here.
 
 ---
 

@@ -1,0 +1,584 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+#
+# quetrex-env-derive — the ONE place `requiredEnv` (verify-gate.sh's
+# declarative env skip) and `required_env` (the architect's Contract A plan
+# field) are discovered from a repo's own manifest. Both are projections of a
+# single scan; this file is why they never specify the same discovery logic
+# twice and drift.
+#
+# WHY THIS EXISTS. verify-gate.sh has fully implemented a per-command
+# `requiredEnv` skip (should_skip_for_env) for a while, but NOTHING ANYWHERE
+# EVER WRITES `requiredEnv` — not .claude/templates/verify.json, not
+# init.md (which only STAGES the file, never authors the key), not
+# bin/quetrex-arm. The mechanism is proven and correct; it is simply inert.
+# The real-world consequence: a fixture repo's `npm run build` needs
+# DEMO_DATABASE_URL, that var is unset (correctly — it cannot exist in every
+# checkout), the command exits non-zero, and the gate blocks the agent from
+# finishing with a message the operator read as "my healthy build is red".
+# This tool closes that gap by DERIVING the association from the repo itself
+# and handing it to two callers who each write it into a COMMITTED,
+# human-reviewed artifact — /quetrex:init (verify-json) and the task-build
+# dispatcher (plan) — so the association is always visible in a reviewed diff
+# before it can ever cause a skip.
+#
+# WHY A bin/ EXECUTABLE AND NOT PROSE. This repo has measured the same
+# failure three times: bin/quetrex-arm exists because inline node prose in
+# init.md did not reliably execute; bin/quetrex-plan-stamp exists because a
+# stamp that silently does not happen is worse than no stamp; bin/quetrex-
+# cloud-prep exists because shell snippets spread across prose lost their
+# state between tool calls while every gate stayed green. A single
+# executable, exercised by EXECUTION in test/env-derive.test.sh, is the only
+# form this engine has evidence for. package.json already globs bin/* through
+# `bash -n` (check:sh) and loops over test/*.sh (test) — this file and its
+# test enroll in the chain automatically. DO NOT EDIT package.json.
+#
+# NO EMPIRICAL PROBING, EVER. /quetrex:init runs on a developer machine whose
+# git-ignored .env/.env.local is loaded off disk by the app's own dotenv
+# loader — running each verify command with and without a value would go
+# green and derive NOTHING for exactly the repos that need this most, and it
+# would add an execution surface driven by an untrusted verify.json (a
+# hostile .verify[] entry becomes an arbitrary-command runner on the
+# operator's machine). This tool is STATIC ONLY: it reads text (a tracked
+# .env.example/.env.sample, tracked source, package.json, a Makefile) and
+# never executes, evals, or shells out to any string it reads from a
+# verify.json, a package.json script, or a Makefile recipe. It does spawn
+# `git` itself, for its own plumbing (ls-files / tracked checks) — that is
+# not a verify command and never comes from an untrusted string.
+#
+# FAIL CLOSED. A name is only ever a candidate when it is BOTH (a) a key in a
+# TRACKED (staged or committed — visible in a reviewed diff, never a scratch
+# file only on disk) .env.example, or .env.sample when .env.example is
+# entirely absent, AND (b) read with no fallback (no `??`, `||`, or a
+# `.get(x, default)`-shaped default) anywhere in TRACKED source. A candidate
+# is attributed to a verify[] command only when the command RESOLVES through
+# the repo's own manifest (package.json scripts, recursively for chained
+# `npm run X`; a Makefile target's first recipe line) to a leaf command line,
+# and the read's file falls inside that leaf's own explicit path arguments —
+# or the whole tracked tree when the leaf names none. A command that cannot
+# be resolved at all gets NOTHING, never the whole tree: a missing entry
+# means the chain runs normally (safe); a wrong entry means a command is
+# silently skipped (not safe) — see security_surface in
+# .quetrex/plan/VERIFY-GATE-QUIET.json. No variable name and no fixture name
+# is ever hardcoded here; every name comes from the repo handed to it.
+#
+# UNION-ONLY, NEVER-NARROW, NAMES ONLY. `verify-json` never rewrites
+# `.verify[]`, never deletes an existing `requiredEnv` key or overwrites one
+# that already exists (a human's own association wins, untouched), and never
+# writes a key that is not already a byte-for-byte member of the resulting
+# `.verify[]`. `plan` never removes an architect-authored `required_env[]`
+# entry, only appends names the architect did not already list. Neither
+# subcommand ever prints or writes a VALUE — names and `file:line` read sites
+# only, everywhere, always.
+#
+# usage:
+#   quetrex-env-derive scan <repo-root>
+#       Print one "NAME<TAB>file:line" line per discovered candidate. Read-
+#       only; never touches .quetrex/verify.json.
+#   quetrex-env-derive verify-json <repo-root> [<cmd>...]
+#       Merge a derived requiredEnv map into <repo-root>/.quetrex/verify.json
+#       (working tree — committing it is the caller's job, e.g. /quetrex:init
+#       step 6). If the file is absent and <cmd>... was given, seeds
+#       {"verify": [<cmd>...]} first; if absent and no <cmd>... was given,
+#       does nothing (there is no chain to attribute against yet).
+#   quetrex-env-derive missing <repo-root>
+#       Report-only: print one name per line that WOULD be added by
+#       `verify-json` right now but is not yet covered by any existing
+#       requiredEnv entry. Never writes anything. Used by /quetrex:doctor
+#       Check 5 to tell an already-adopted repo it predates this feature.
+#   quetrex-env-derive plan <plan.json> <repo-root>
+#       Stamp Contract A required_env[] entries (name, read_at,
+#       placeholderable, why — see .claude/lib/dev-pipeline.md) into
+#       <plan.json>, derived against <plan.json>'s own `.verify[]` chain.
+#       Union-only against any entries the architect already emitted.
+#       Idempotent; writes via a temp file + atomic rename so a crash never
+#       leaves a half-written plan.
+#
+# Requires node (>=18) and git.
+
+set -uo pipefail
+
+die() { printf 'quetrex-env-derive: %s\n' "$1" >&2; exit 1; }
+
+command -v node >/dev/null 2>&1 || die "node (>=18) is required"
+command -v git  >/dev/null 2>&1 || die "git is required"
+
+SUB="${1:-}"
+[ -n "$SUB" ] || die "usage: quetrex-env-derive <scan|verify-json|missing|plan> ..."
+shift
+
+# All logic lives in ONE embedded program (not one per subcommand) so the
+# scan / scope-resolution / attribution rules exist exactly once and every
+# subcommand is a thin projection of the same discovery pass — the whole
+# point of this file existing as a single shared tool.
+node -e '
+"use strict";
+var fs = require("fs");
+var path = require("path");
+var cp = require("child_process");
+
+function die(msg) {
+  process.stderr.write("quetrex-env-derive: " + msg + "\n");
+  process.exit(1);
+}
+
+function runGit(repoRoot, args) {
+  try {
+    return cp.execFileSync("git", ["-C", repoRoot].concat(args), { encoding: "utf8" });
+  } catch (e) {
+    return null;
+  }
+}
+
+function isTracked(repoRoot, relPath) {
+  try {
+    cp.execFileSync("git", ["-C", repoRoot, "ls-files", "--error-unmatch", "--", relPath], { stdio: "ignore" });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function trackedFiles(repoRoot) {
+  var out = runGit(repoRoot, ["ls-files"]);
+  if (out === null) return [];
+  return out.split("\n").filter(Boolean);
+}
+
+// ---------------------------------------------------------------------
+// Step 1 — declared names: keys of a TRACKED .env.example, falling back
+// to a TRACKED .env.sample only when .env.example is entirely absent.
+// Never both, never invented.
+// ---------------------------------------------------------------------
+function declaredNames(repoRoot) {
+  var candidates = [".env.example", ".env.sample"];
+  for (var i = 0; i < candidates.length; i++) {
+    var f = candidates[i];
+    var abs = path.join(repoRoot, f);
+    if (!fs.existsSync(abs)) continue;
+    if (!isTracked(repoRoot, f)) continue;
+    var text;
+    try { text = fs.readFileSync(abs, "utf8"); } catch (e) { continue; }
+    var seen = {};
+    var names = [];
+    var lines = text.split(/\r?\n/);
+    for (var j = 0; j < lines.length; j++) {
+      var m = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(lines[j]);
+      if (m && !Object.prototype.hasOwnProperty.call(seen, m[1])) {
+        seen[m[1]] = true;
+        names.push(m[1]);
+      }
+    }
+    return names;
+  }
+  return [];
+}
+
+// ---------------------------------------------------------------------
+// Step 2 — fallback-less reads across TRACKED source, one repo-wide pass.
+// Equivalence list: process.env.NAME (JS/TS), os.environ[...] (Python),
+// System.getenv(...) (Java), ENV[...] (Ruby). A read counts only when
+// nothing supplying a default sits immediately behind it on the same line.
+// ---------------------------------------------------------------------
+function fallbacklessReads(repoRoot) {
+  var files = trackedFiles(repoRoot);
+  var found = {};
+  var patterns = [
+    {
+      re: /process\.env\.([A-Za-z_][A-Za-z0-9_]*)/g,
+      hasFallback: function (rest) { return /^\s*(\?\?|\|\|)/.test(rest); }
+    },
+    {
+      re: /os\.environ\[\s*["\x27]([A-Za-z_][A-Za-z0-9_]*)["\x27]\s*\]/g,
+      hasFallback: function () { return false; }
+    },
+    {
+      re: /System\.getenv\(\s*["\x27]([A-Za-z_][A-Za-z0-9_]*)["\x27]\s*\)/g,
+      hasFallback: function () { return false; }
+    },
+    {
+      re: /ENV\[\s*["\x27]([A-Za-z_][A-Za-z0-9_]*)["\x27]\s*\]/g,
+      hasFallback: function () { return false; }
+    }
+  ];
+  for (var fi = 0; fi < files.length; fi++) {
+    var relPath = files[fi];
+    var abs = path.join(repoRoot, relPath);
+    var text;
+    try { text = fs.readFileSync(abs, "utf8"); } catch (e) { continue; }
+    if (text.indexOf(String.fromCharCode(0)) !== -1) continue; // skip binary
+    var lines = text.split(/\r?\n/);
+    for (var li = 0; li < lines.length; li++) {
+      var line = lines[li];
+      for (var pi = 0; pi < patterns.length; pi++) {
+        var p = patterns[pi];
+        p.re.lastIndex = 0;
+        var m;
+        while ((m = p.re.exec(line)) !== null) {
+          var name = m[1];
+          var rest = line.slice(m.index + m[0].length);
+          if (p.hasFallback(rest)) continue;
+          if (!Object.prototype.hasOwnProperty.call(found, name)) {
+            found[name] = { file: relPath, line: li + 1 };
+          }
+        }
+      }
+    }
+  }
+  return found;
+}
+
+function candidateList(repoRoot) {
+  var names = declaredNames(repoRoot);
+  var reads = fallbacklessReads(repoRoot);
+  var out = [];
+  for (var i = 0; i < names.length; i++) {
+    var name = names[i];
+    var r = reads[name];
+    if (r) out.push({ name: name, read_at: r.file + ":" + r.line });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------
+// Scope resolution — resolve a verify[] command STRING to a leaf command
+// line through the repo own manifest, STATIC ONLY. An unresolvable
+// command attributes NOTHING (fail closed): resolved:false, never a
+// whole-tree fallback.
+// ---------------------------------------------------------------------
+function readPackageJson(repoRoot) {
+  var p = path.join(repoRoot, "package.json");
+  if (!fs.existsSync(p)) return null;
+  try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch (e) { return null; }
+}
+
+function readMakefile(repoRoot) {
+  var names = ["Makefile", "makefile"];
+  for (var i = 0; i < names.length; i++) {
+    var p = path.join(repoRoot, names[i]);
+    if (fs.existsSync(p)) {
+      try { return fs.readFileSync(p, "utf8"); } catch (e) { return null; }
+    }
+  }
+  return null;
+}
+
+function leafPathArgs(leafCmd) {
+  var tokens = leafCmd.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length <= 1) return [];
+  var args = [];
+  for (var i = 1; i < tokens.length; i++) {
+    var t = tokens[i];
+    if (t.charAt(0) === "-") continue;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) continue;
+    args.push(t);
+  }
+  if (args.indexOf(".") !== -1) return [];
+  return args;
+}
+
+function escapeForRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function resolveMakeTarget(repoRoot, target) {
+  var mk = readMakefile(repoRoot);
+  if (mk === null) return { resolved: false, scope: [] };
+  var lines = mk.split(/\r?\n/);
+  var headRe = new RegExp("^" + escapeForRegex(target) + "\\s*:");
+  var idx = -1;
+  for (var i = 0; i < lines.length; i++) {
+    if (headRe.test(lines[i])) { idx = i; break; }
+  }
+  if (idx === -1) return { resolved: false, scope: [] };
+  var recipe = null;
+  for (var j = idx + 1; j < lines.length; j++) {
+    if (/^\t/.test(lines[j])) { recipe = lines[j].replace(/^\t/, ""); break; }
+    if (/^[A-Za-z0-9_.-]+\s*:/.test(lines[j])) break;
+  }
+  if (recipe === null) return { resolved: true, scope: [] };
+  return { resolved: true, scope: leafPathArgs(recipe) };
+}
+
+function resolveScope(repoRoot, cmd, depth) {
+  var d = depth || 0;
+  if (d > 5) return { resolved: false, scope: [] };
+  var trimmed = cmd.trim();
+  if (trimmed === "") return { resolved: false, scope: [] };
+  var npmMatch = /^npm run\s+([A-Za-z0-9_:.-]+)/.exec(trimmed);
+  if (npmMatch) {
+    var pkg = readPackageJson(repoRoot);
+    if (!pkg || !pkg.scripts || typeof pkg.scripts[npmMatch[1]] !== "string") {
+      return { resolved: false, scope: [] };
+    }
+    var leaf = pkg.scripts[npmMatch[1]];
+    if (/^npm run\s+/.test(leaf.trim())) {
+      return resolveScope(repoRoot, leaf, d + 1);
+    }
+    return { resolved: true, scope: leafPathArgs(leaf) };
+  }
+  var makeMatch = /^make\s+([A-Za-z0-9_.-]+)/.exec(trimmed);
+  if (makeMatch) {
+    return resolveMakeTarget(repoRoot, makeMatch[1]);
+  }
+  // Not a package-manager indirection: the command string IS the leaf.
+  return { resolved: true, scope: leafPathArgs(trimmed) };
+}
+
+// This one comparison is the entire scope filter: it is what stops a name
+// discovered anywhere in the tree from being attributed to a command whose
+// own leaf script declares a narrower explicit path than "the whole repo".
+// AC14 negative-controls exactly this function (and only this function) —
+// see test/env-derive.test.sh, which runs a mutated copy with this
+// disabled to prove the filter is load-bearing, not decorative.
+var QX_SCOPE_FILTER_ENABLED = true;
+function inScope(readAt, scope) {
+  if (!QX_SCOPE_FILTER_ENABLED) return true;
+  if (!scope || scope.length === 0) return true;
+  var file = readAt.split(":")[0];
+  for (var i = 0; i < scope.length; i++) {
+    var s = String(scope[i]).replace(/\/$/, "");
+    if (file === s || file.indexOf(s + "/") === 0) return true;
+  }
+  return false;
+}
+
+function attributeToCommands(repoRoot, candidates, commands) {
+  var out = {};
+  for (var i = 0; i < commands.length; i++) {
+    var cmd = commands[i];
+    var r = resolveScope(repoRoot, cmd, 0);
+    if (!r.resolved) continue;
+    var names = [];
+    for (var j = 0; j < candidates.length; j++) {
+      if (inScope(candidates[j].read_at, r.scope)) names.push(candidates[j].name);
+    }
+    if (names.length) out[cmd] = names;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------
+// Shared atomic writer. rename(2), never a direct/in-place write: a crash
+// mid-write must never leave a half-written, unparseable file behind (the
+// same load-bearing property bin/quetrex-plan-stamp already proves).
+// ---------------------------------------------------------------------
+function writeJsonAtomic(targetPath, obj) {
+  var dir = path.dirname(targetPath);
+  fs.mkdirSync(dir, { recursive: true });
+  var out = JSON.stringify(obj, null, 2) + "\n";
+  var prev = null;
+  try { prev = fs.readFileSync(targetPath, "utf8"); } catch (e) { prev = null; }
+  if (prev === out) return false;
+  var tmp = targetPath + ".envderive." + process.pid;
+  try {
+    fs.writeFileSync(tmp, out);
+    fs.renameSync(tmp, targetPath);
+  } catch (e) {
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (e2) { /* best effort */ }
+    die("cannot write " + targetPath + ": " + e.message);
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------
+// scan <repo-root>
+// ---------------------------------------------------------------------
+function cmdScan(args) {
+  var repoRoot = args[0];
+  if (!repoRoot) die("usage: quetrex-env-derive scan <repo-root>");
+  if (!fs.existsSync(repoRoot)) die("repo root not found: " + repoRoot);
+  var candidates = candidateList(repoRoot);
+  for (var i = 0; i < candidates.length; i++) {
+    process.stdout.write(candidates[i].name + "\t" + candidates[i].read_at + "\n");
+  }
+}
+
+// ---------------------------------------------------------------------
+// verify-json <repo-root> [<cmd>...]
+// ---------------------------------------------------------------------
+var QX_REQUIRED_ENV_WRITE_ENABLED = true;
+function cmdVerifyJson(args) {
+  var repoRoot = args[0];
+  if (!repoRoot) die("usage: quetrex-env-derive verify-json <repo-root> [<cmd>...]");
+  if (!fs.existsSync(repoRoot)) die("repo root not found: " + repoRoot);
+  var seedCmds = args.slice(1);
+  var qdir = path.join(repoRoot, ".quetrex");
+  var vfile = path.join(qdir, "verify.json");
+
+  var obj = null;
+  if (fs.existsSync(vfile)) {
+    var raw;
+    try { raw = fs.readFileSync(vfile, "utf8"); } catch (e) { die("cannot read " + vfile + ": " + e.message); }
+    try { obj = JSON.parse(raw); } catch (e) {
+      process.stderr.write("quetrex-env-derive: " + vfile + " does not parse as JSON, leaving it untouched\n");
+      return;
+    }
+    if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
+      process.stderr.write("quetrex-env-derive: " + vfile + " is not a JSON object, leaving it untouched\n");
+      return;
+    }
+  } else if (seedCmds.length) {
+    obj = { verify: seedCmds };
+  } else {
+    return; // nothing to seed and nothing to merge into
+  }
+
+  var verifyArr = Array.isArray(obj.verify) ? obj.verify : null;
+  if (verifyArr === null) {
+    process.stderr.write("quetrex-env-derive: .verify is not an array in " + vfile + ", leaving requiredEnv untouched\n");
+    return;
+  }
+
+  var candidates = candidateList(repoRoot);
+  var attribution = attributeToCommands(repoRoot, candidates, verifyArr);
+
+  var existingRequiredEnv = (obj.requiredEnv && typeof obj.requiredEnv === "object" && !Array.isArray(obj.requiredEnv)) ? obj.requiredEnv : {};
+  var merged = {};
+  var existingKeys = Object.keys(existingRequiredEnv);
+  for (var i = 0; i < existingKeys.length; i++) {
+    merged[existingKeys[i]] = existingRequiredEnv[existingKeys[i]];
+  }
+  // Never touch a command that already has a requiredEnv entry — hand-
+  // written or from an earlier run: "the pre-existing entry stays UNCHANGED"
+  // is the whole union-only/never-narrow contract, not merely non-deletion.
+  if (QX_REQUIRED_ENV_WRITE_ENABLED) {
+    var attributedKeys = Object.keys(attribution);
+    for (var k = 0; k < attributedKeys.length; k++) {
+      var cmd = attributedKeys[k];
+      if (!Object.prototype.hasOwnProperty.call(merged, cmd)) {
+        merged[cmd] = attribution[cmd];
+      }
+    }
+  }
+
+  var nextObj = Object.assign({}, obj);
+  if (Object.keys(merged).length) {
+    nextObj.requiredEnv = merged;
+  }
+
+  var wrote = writeJsonAtomic(vfile, nextObj);
+  process.stdout.write((wrote ? "wrote " : vfile + " already current") + (wrote ? vfile : "") + "\n");
+}
+
+// ---------------------------------------------------------------------
+// missing <repo-root> — report-only, never writes. Used by doctor Check 5.
+// ---------------------------------------------------------------------
+function cmdMissing(args) {
+  var repoRoot = args[0];
+  if (!repoRoot) die("usage: quetrex-env-derive missing <repo-root>");
+  if (!fs.existsSync(repoRoot)) die("repo root not found: " + repoRoot);
+  var vfile = path.join(repoRoot, ".quetrex", "verify.json");
+  if (!fs.existsSync(vfile)) return;
+  var obj;
+  try { obj = JSON.parse(fs.readFileSync(vfile, "utf8")); } catch (e) { return; }
+  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return;
+  var verifyArr = Array.isArray(obj.verify) ? obj.verify : [];
+  if (verifyArr.length === 0) return;
+  var candidates = candidateList(repoRoot);
+  if (candidates.length === 0) return;
+  var attribution = attributeToCommands(repoRoot, candidates, verifyArr);
+  var existing = (obj.requiredEnv && typeof obj.requiredEnv === "object" && !Array.isArray(obj.requiredEnv)) ? obj.requiredEnv : {};
+  var covered = {};
+  var ekeys = Object.keys(existing);
+  for (var i = 0; i < ekeys.length; i++) {
+    var arr = Array.isArray(existing[ekeys[i]]) ? existing[ekeys[i]] : [];
+    for (var j = 0; j < arr.length; j++) covered[arr[j]] = true;
+  }
+  var missing = {};
+  var akeys = Object.keys(attribution);
+  for (var a = 0; a < akeys.length; a++) {
+    var names = attribution[akeys[a]];
+    for (var n = 0; n < names.length; n++) {
+      if (!Object.prototype.hasOwnProperty.call(covered, names[n])) missing[names[n]] = true;
+    }
+  }
+  var out = Object.keys(missing);
+  for (var o = 0; o < out.length; o++) process.stdout.write(out[o] + "\n");
+}
+
+// ---------------------------------------------------------------------
+// plan <plan.json> <repo-root>
+// ---------------------------------------------------------------------
+function cmdPlan(args) {
+  var planPath = args[0];
+  var repoRoot = args[1];
+  if (!planPath || !repoRoot) die("usage: quetrex-env-derive plan <plan.json> <repo-root>");
+  if (!fs.existsSync(planPath)) die("plan file not found: " + planPath);
+  if (!fs.existsSync(repoRoot)) die("repo root not found: " + repoRoot);
+
+  var raw;
+  try { raw = fs.readFileSync(planPath, "utf8"); } catch (e) { die("cannot read plan: " + e.message); }
+  var obj;
+  try { obj = JSON.parse(raw); } catch (e) { die("plan does not parse as JSON (" + e.message + "), refusing to stamp"); }
+  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
+    die("plan is not a JSON object, refusing to stamp");
+  }
+
+  var chain = Array.isArray(obj.verify) ? obj.verify : [];
+  var candidates = candidateList(repoRoot);
+  var attribution = attributeToCommands(repoRoot, candidates, chain);
+
+  var byName = {};
+  var order = [];
+  for (var i = 0; i < chain.length; i++) {
+    var cmd = chain[i];
+    var names = attribution[cmd] || [];
+    for (var j = 0; j < names.length; j++) {
+      var name = names[j];
+      if (!Object.prototype.hasOwnProperty.call(byName, name)) {
+        var readAt = "";
+        for (var k = 0; k < candidates.length; k++) {
+          if (candidates[k].name === name) { readAt = candidates[k].read_at; break; }
+        }
+        byName[name] = { read_at: readAt, cmd: cmd };
+        order.push(name);
+      }
+    }
+  }
+
+  var existing = Array.isArray(obj.required_env) ? obj.required_env : [];
+  var existingNames = {};
+  for (var e = 0; e < existing.length; e++) {
+    if (existing[e] && typeof existing[e].name === "string") existingNames[existing[e].name] = true;
+  }
+
+  var additions = [];
+  for (var o = 0; o < order.length; o++) {
+    var nm = order[o];
+    if (Object.prototype.hasOwnProperty.call(existingNames, nm)) continue;
+    var info = byName[nm];
+    additions.push({
+      name: nm,
+      read_at: info.read_at,
+      placeholderable: true,
+      why: "read with no fallback and `" + info.cmd + "` needs it"
+    });
+  }
+
+  if (additions.length === 0) {
+    process.stdout.write("no new required_env names derived for " + planPath + "\n");
+    return;
+  }
+
+  var nextObj = Object.assign({}, obj, { required_env: existing.concat(additions) });
+  var wrote = writeJsonAtomic(planPath, nextObj);
+  if (wrote) {
+    var addedNames = [];
+    for (var a = 0; a < additions.length; a++) addedNames.push(additions[a].name);
+    process.stdout.write("stamped " + planPath + " with required_env += " + addedNames.join(",") + "\n");
+  } else {
+    process.stdout.write(planPath + " already current\n");
+  }
+}
+
+var sub = process.argv[1];
+var rest = process.argv.slice(2);
+switch (sub) {
+  case "scan": cmdScan(rest); break;
+  case "verify-json": cmdVerifyJson(rest); break;
+  case "missing": cmdMissing(rest); break;
+  case "plan": cmdPlan(rest); break;
+  default: die("unknown subcommand: " + sub + " (expected scan|verify-json|missing|plan)");
+}
+' "$SUB" "$@"
