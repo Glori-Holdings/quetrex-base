@@ -423,7 +423,7 @@ should_skip_for_env() {
       else empty end
     ' "$f" 2>/dev/null)
   [ -n "$vars" ] || return 1
-  local v declared exfile
+  local v declared exfile committed
   while IFS= read -r v; do
     [ -n "$v" ] || continue
     # Only ever treat well-formed shell identifiers as candidates; anything
@@ -433,18 +433,25 @@ should_skip_for_env() {
       *) continue ;;
     esac
     case "$v" in *[!A-Za-z0-9_]*) continue ;; esac
-    # Constraint 2: the repo itself must declare this as required config, in a
-    # file that is GIT-TRACKED — per security_surface constraint #2, "visible
-    # in a reviewed diff". An untracked .env.example on disk (never `git add`ed)
-    # is invisible to any reviewer; honoring it would let an agent running
-    # under bypassPermissions drop a file nobody ever reviews and use it to
-    # launder a real command failure into a silent skip. A plain existence/grep
-    # check is NOT enough — tracking status must be checked explicitly.
+    # Constraint 2: the repo itself must declare this as required config, and
+    # that DECLARATION must be visible in a reviewed diff — per security_surface
+    # constraint #2. Two escapes closed here:
+    #   - a plain existence/grep check on disk is not enough (an UNTRACKED
+    #     .env.example is invisible to any reviewer), so tracking is required; and
+    #   - checking that the PATH is tracked is not enough either (a tracked file
+    #     can still carry an UNCOMMITTED working-tree edit that grep would read
+    #     straight off disk — `git ls-files` only proves the PATH is tracked,
+    #     not that THIS line is). So the declaring line must be read from the
+    #     COMMITTED blob at HEAD, never the live working-tree file. Only HEAD
+    #     counts, not the staged index: a staged-but-uncommitted change still
+    #     appears in no reviewed diff (nothing has been committed for a
+    #     reviewer to see), so `git show :file` is deliberately NOT used here.
+    #     Fail CLOSED: if the committed blob cannot be read at all (no HEAD,
+    #     file absent at HEAD, git error), it does not count as declared.
     declared=0
     for exfile in .env.example .env.sample; do
-      if [ -f "$ROOT/$exfile" ] \
-         && grep -qE "^${v}=" "$ROOT/$exfile" 2>/dev/null \
-         && git -C "$ROOT" ls-files --error-unmatch -- "$exfile" >/dev/null 2>&1; then
+      committed=$(git -C "$ROOT" show "HEAD:$exfile" 2>/dev/null) || continue
+      if printf '%s\n' "$committed" | grep -qE "^${v}="; then
         declared=1
         break
       fi
