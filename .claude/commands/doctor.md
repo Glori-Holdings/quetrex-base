@@ -211,6 +211,24 @@ else
   echo "✗ Verify chain configured — no .quetrex/verify.json and no ## Verification section."
   echo "    Fix: run /quetrex:init — it detects and writes your verify chain."
 fi
+
+# requiredEnv coverage — report-only, NEVER blocks (doctor's exit code stays
+# 0 for this check regardless). verify-gate.sh's declarative env skip
+# (should_skip_for_env) only fires for a command that has a COMMITTED
+# requiredEnv entry; a repo whose .quetrex/verify.json predates that field
+# has none, so a genuinely-absent variable its own .env.example declares
+# blocks the agent instead of skipping — the exact defect this feature
+# closes. Only meaningful when the repo actually declares required config: a
+# repo with no committed .env.example/.env.sample has nothing to derive, so
+# it is never nagged. `quetrex-env-derive missing` is read-only — it never
+# writes anything, it only reports what `verify-json` WOULD add.
+if { [ -f "$REPO_ROOT/.env.example" ] || [ -f "$REPO_ROOT/.env.sample" ]; } \
+   && command -v quetrex-env-derive >/dev/null 2>&1; then
+  MISSING_REQUIRED_ENV="$(quetrex-env-derive missing "$REPO_ROOT" 2>/dev/null)"
+  if [ -n "$MISSING_REQUIRED_ENV" ]; then
+    echo "✗ requiredEnv not declared — this repo's .quetrex/verify.json predates the derived per-command requiredEnv skip; run /quetrex:init to derive and merge it into your committed verify.json (union-only, never narrows an existing chain)."
+  fi
+fi
 ```
 
 ---
