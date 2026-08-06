@@ -635,6 +635,53 @@ else
   fail "ADV-B: expected exit 0 + 1 block decision, got exit $CODEB blocks $BLOCKSB (out: [$OUTB])"
 fi
 
+# =============================================================================
+# ADV-C — QA ADVERSARIAL (round 2): requiredEnv's `git ls-files --error-unmatch`
+# fix checks that .env.example is a TRACKED PATH, but `should_skip_for_env`
+# then greps the LIVE WORKING-TREE file for the declaring line, not the
+# committed blob. A .env.example that is genuinely tracked, but whose
+# FIXTURE_DB_URL= line was only ever ADDED to the working tree (never staged
+# or committed — `git status` shows it modified), still satisfies both the
+# tracking check and the grep, and still authorizes a skip. That declaration
+# is NOT "visible in a reviewed diff" (security_surface[0] constraint #2):
+# nothing was ever committed, so it can never appear in any PR. An agent
+# running under bypassPermissions could leave this uncommitted forever and
+# get a silent, un-reviewable skip on every Stop/SubagentStop indefinitely.
+# =============================================================================
+F_C="$TMPROOT/advc"
+git_init_repo "$F_C"
+# .env.example committed WITHOUT the var line.
+printf '# example env\n' > "$F_C/.env.example"
+git -C "$F_C" add .env.example
+git -C "$F_C" commit -q -m "chore: add empty .env.example"
+mkdir -p "$F_C/.quetrex"
+jq -cn '{verify:["true","false"],requiredEnv:{"false":["FIXTURE_DB_URL"]}}' \
+  > "$F_C/.quetrex/verify.json"
+# Now append the declaring line to the WORKING TREE ONLY. Never staged, never
+# committed. The file is genuinely tracked; this one line is not.
+printf 'FIXTURE_DB_URL=\n' >> "$F_C/.env.example"
+DIRTY_C="$(git -C "$F_C" status --porcelain -- .env.example)"
+if [ -n "$DIRTY_C" ]; then
+  pass "ADV-C: fixture sanity check — .env.example is tracked but has an uncommitted modification ($DIRTY_C)"
+else
+  fail "ADV-C: fixture setup bug — .env.example unexpectedly clean"
+fi
+
+OUTC="$(run_hook "$F_C" "Stop" 2>&1)"; CODEC=$?
+BLOCKSC="$(count_block_decisions "$OUTC")"
+SKIPSC="$(count_skip_lines "$OUTC")"
+
+if [ "$SKIPSC" = "0" ]; then
+  pass "ADV-C: an UNCOMMITTED declaring line in an otherwise-tracked .env.example does not authorize a requiredEnv skip"
+else
+  fail "ADV-C: an uncommitted (never-reviewed) declaring line was honored to skip \`false\` — requiredEnv can be escaped via a dirty working tree even though the file itself is tracked (out: [$OUTC])"
+fi
+if [ "$CODEC" -eq 0 ] && [ "$BLOCKSC" = "1" ]; then
+  pass "ADV-C: the command still ran and its real failure still blocked"
+else
+  fail "ADV-C: expected exit 0 + 1 block decision, got exit $CODEC blocks $BLOCKSC (out: [$OUTC])"
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "verify-gate.test.sh: all checks passed"
