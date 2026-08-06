@@ -34,6 +34,7 @@ failure in one never aborts the rest. Never print the bearer token; let the
 ```bash
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
 SETTINGS="$REPO_ROOT/.claude/settings.json"
+HOME_SETTINGS="$HOME/.claude/settings.json"
 BIND="$REPO_ROOT/.quetrex/project.json"
 MARKET_URL="https://raw.githubusercontent.com/Glori-Holdings/quetrex-plugins/main/.claude-plugin/marketplace.json"
 ```
@@ -89,9 +90,25 @@ ENABLED="$(node -e '
   process.stdout.write(String(e["quetrex@quetrex"]===true && e["quetrex-factory@quetrex"]===true));
 ' "$SETTINGS" 2>/dev/null)"
 AUTOUP="$(node -e '
-  let o={}; try{o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))}catch{}
-  process.stdout.write(String(((o.extraKnownMarketplaces||{}).quetrex||{}).autoUpdate===true));
-' "$SETTINGS" 2>/dev/null)"
+  const fs=require("fs");
+  function load(p){ try{return JSON.parse(fs.readFileSync(p,"utf8"))}catch{return null} }
+  const repo=load(process.argv[1]);
+  const home=load(process.argv[2]);
+  // Claude Code settings precedence: repo settings.json overrides the global
+  // ~/.claude/settings.json at the top-level key. quetrex-base itself has NO
+  // extraKnownMarketplaces key at all (a valid, common setup — the operator
+  // set autoUpdate globally), so ABSENCE of the key at the repo level must
+  // fall back to global, never be read as a failure.
+  let level;
+  if (repo && Object.prototype.hasOwnProperty.call(repo, "extraKnownMarketplaces")) {
+    level = repo.extraKnownMarketplaces;
+  } else if (home && Object.prototype.hasOwnProperty.call(home, "extraKnownMarketplaces")) {
+    level = home.extraKnownMarketplaces;
+  } else {
+    level = {};
+  }
+  process.stdout.write(String(((level||{}).quetrex||{}).autoUpdate===true));
+' "$SETTINGS" "$HOME_SETTINGS" 2>/dev/null)"
 
 if [ -n "$PINS" ]; then
   echo "✗ Engine — this repo PINS a version ($PINS). While a pin is present the quetrex command layer does not load here, so no /quetrex:* command exists."
@@ -100,7 +117,7 @@ elif [ "$ENABLED" != "true" ]; then
   echo "✗ Engine — quetrex and/or quetrex-factory are not enabled in this repo's committed settings."
   echo "    Fix: run /quetrex:init"
 elif [ "$AUTOUP" != "true" ]; then
-  echo "✗ Engine — extraKnownMarketplaces.quetrex.autoUpdate is not true, so this repo will never see a published fix."
+  echo "✗ Engine — extraKnownMarketplaces.quetrex.autoUpdate is not true at the repo level ($SETTINGS) or the global level ($HOME_SETTINGS), so this repo will never see a published fix."
   echo "    Fix: run /quetrex:init"
 elif [ -n "$RUNNING" ]; then
   echo "✓ Engine — enabled, unpinned, auto-updating (running Quetrex v$RUNNING)."
@@ -129,20 +146,46 @@ does not. Stray legacy artifacts (old `quetrex-*.md` commands, the retired
 `quetrex-doctrine.md`, superseded hooks like `check-quetrex-update.sh` /
 `enforce-merge-approval.sh` / `security-check.sh`, the `~/.quetrex-manifest.json`
 record) are harmless but confusing and can double-fire guards. Detect their
-PRESENCE only — never remove anything here:
+PRESENCE only — never remove anything here. A file is NEVER flagged if it is
+the target of a LIVE `statusLine.command` in either the repo's or the global
+`settings.json` — a diagnostic must never recommend deleting working
+configuration, and the status bar is where the running Quetrex version is
+shown by design (config carries no version):
 
 ```bash
+STATUSLINE_CMDS=""
+for sf in "$SETTINGS" "$HOME_SETTINGS"; do
+  [ -f "$sf" ] || continue
+  cmd="$(node -e '
+    let o={}; try{o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))}catch{}
+    process.stdout.write(String((o.statusLine&&o.statusLine.command)||""));
+  ' "$sf" 2>/dev/null)"
+  [ -n "$cmd" ] && STATUSLINE_CMDS="$STATUSLINE_CMDS
+$cmd"
+done
+
+is_live_statusline() {  # is_live_statusline <abs-path> -> 0 if referenced by a live statusLine.command
+  [ -z "$STATUSLINE_CMDS" ] && return 1
+  printf '%s' "$STATUSLINE_CMDS" | grep -qF "$1"
+}
+
 LEGACY=()
 for f in "$HOME/.claude/quetrex-doctrine.md" \
          "$HOME/.claude/hooks/check-quetrex-update.sh" \
          "$HOME/.claude/hooks/enforce-merge-approval.sh" \
          "$HOME/.claude/hooks/security-check.sh" \
-         "$HOME/.claude/statusline-command.sh" \
          "$HOME/.claude/team-protocol.md" \
          "$HOME/.claude/.quetrex-manifest.json"; do
-  [ -e "$f" ] && LEGACY+=("${f/#$HOME/~}")
+  if [ -e "$f" ] && ! is_live_statusline "$f"; then
+    LEGACY+=("${f/#$HOME/~}")
+  fi
 done
-if compgen -G "$HOME/.claude/commands/quetrex-*.md" >/dev/null 2>&1; then
+# Portable existence test — `compgen` is a bash-only builtin (command not
+# found under zsh, which silently swallows the check) and a bare glob would
+# abort the script under zsh's default NOMATCH option when nothing matches.
+# `find` takes the pattern as a literal argument in both shells, so this is
+# the one test that behaves identically under bash and zsh.
+if find "$HOME/.claude/commands" -maxdepth 1 -name 'quetrex-*.md' 2>/dev/null | grep -q .; then
   LEGACY+=("~/.claude/commands/quetrex-*.md (npm-era commands)")
 fi
 if [ "${#LEGACY[@]}" -eq 0 ]; then
