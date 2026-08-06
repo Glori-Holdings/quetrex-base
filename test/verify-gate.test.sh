@@ -954,6 +954,68 @@ else
 fi
 
 # =============================================================================
+# ADV-I — QA ADVERSARIAL (round 4): SEC-1's ledger-proof requirement is
+# FABRICABLE. The comment at the guard's own definition claims a trusted
+# candidate's ledger line is "proof its gate has genuinely run against the
+# exact state it is in right now" — but the implementation only checks that
+# SOME line with the right shape and a matching `sha` exists in a file the
+# SAME gated agent fully controls (`$CUR_WT_PATH/.quetrex/verify-ledger.jsonl`
+# is an ordinary, writable file inside the decoy worktree the agent itself
+# just created). Nothing binds that line to an actual `verify-gate.sh`
+# invocation: `git worktree add -b claude/x decoy` (one allow-listed command)
+# followed by ONE handwritten JSON line with `sha` set to the decoy's own
+# HEAD is sufficient — no chain command is ever genuinely run, anywhere.
+# This is functionally a wider hole than the ORIGINAL pre-SEC-1 defect: it
+# reduces "manufacture the skip" from one command to two, while the fix's own
+# header comment claims the opposite (that manufacturing now requires a
+# GENUINE hook run). Bounded by the pre-existing CONTAINMENT guarantee (main's
+# OWN ledger still gains zero lines, so merge-gate GATE 3 still denies — see
+# the direct file/merge-gate inspection in QA's report), which is why this is
+# a Stop-gate integrity defect and not a proven merge-level escape, exactly
+# like the class of finding QA has raised at every prior round.
+# =============================================================================
+F_I="$TMPROOT/advi-main"
+git_init_repo "$F_I"
+mkdir -p "$F_I/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F_I/.quetrex/project.json"
+printf '{"verify":["false"]}' > "$F_I/.quetrex/verify.json"
+git -C "$F_I" add .quetrex/project.json .quetrex/verify.json
+git -C "$F_I" commit -q -m "chore: add quetrex config"
+DECOY_I="${F_I}-decoy"
+git -C "$F_I" worktree add -q -b claude/decoy-adv-i "$DECOY_I" >/dev/null 2>&1
+DECOY_I_HEAD="$(git -C "$DECOY_I" rev-parse HEAD)"
+mkdir -p "$DECOY_I/.quetrex"
+# Fabricate a single ledger line by hand -- the decoy's OWN hook is NEVER
+# invoked. `sha` is set to the decoy's own current HEAD, which is all the
+# production check verifies.
+jq -cn --arg sha "$DECOY_I_HEAD" --arg cwd "$DECOY_I" \
+  '{ts:"2026-01-01T00:00:00Z",cmd:"npm test",cwd:$cwd,sha:$sha,exit:0,tail:"fabricated: never actually ran"}' \
+  > "$DECOY_I/.quetrex/verify-ledger.jsonl"
+
+LEDGER_I="$F_I/.quetrex/verify-ledger.jsonl"
+BEFORE_I="$(line_count "$LEDGER_I")"
+OUTI="$(run_hook "$F_I" "Stop" 2>&1)"; CODEI=$?
+BLOCKSI="$(count_block_decisions "$OUTI")"
+SKIPSI="$(count_skip_lines "$OUTI")"
+AFTER_I="$(line_count "$LEDGER_I")"
+
+if [ "$SKIPSI" = "0" ]; then
+  pass "ADV-I: a hand-fabricated ledger line (never produced by a real hook run) does NOT authorize a skip"
+else
+  fail "ADV-I: main deferred to a decoy whose only 'proof' was one handwritten JSON line with a matching sha -- the ledger-proof requirement is fabricable, not genuine (out: [$OUTI])"
+fi
+if [ "$CODEI" -eq 0 ] && [ "$BLOCKSI" = "1" ]; then
+  pass "ADV-I: the main checkout ran its own chain and blocked on the real failure"
+else
+  fail "ADV-I: expected exit 0 + 1 block decision from main, got exit $CODEI blocks $BLOCKSI (out: [$OUTI])"
+fi
+if [ "$AFTER_I" = "$((BEFORE_I + 1))" ]; then
+  pass "ADV-I: exactly 1 ledger line appended in main (chain genuinely ran there)"
+else
+  fail "ADV-I: ledger did not gain a line in main ($BEFORE_I -> $AFTER_I)"
+fi
+
+# =============================================================================
 # AC9 — REVIEWER (non-blocking): a RED chain's block reason must also surface
 # any EARLIER command that was declaratively skipped. Quieting the output
 # must not withhold, from a genuinely red run, the one piece of context this
