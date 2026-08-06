@@ -266,6 +266,13 @@ git -C "$MAIN3" worktree add -q -b claude/T-1-x "$WT3" >/dev/null 2>&1
 # the SYMLINK-RESOLVED path (e.g. macOS /tmp -> /private/tmp). Compare against
 # that same resolved form so this assertion isn't a path-cosmetics false fail.
 REAL_MAIN3="$(git -C "$MAIN3" rev-parse --show-toplevel)"
+# PROVE the worktree, exactly as the production guard now requires (SEC-1):
+# a candidate is only trusted once its OWN gate has genuinely fired against
+# its OWN current HEAD, so invoke the hook inside WT3 ONCE here to seed that
+# proof before testing whether MAIN defers to it. This is fixture setup, not
+# a change to what AC3/AC4 assert — see ADV-E for the fixture that
+# DELIBERATELY omits this step (a manufactured decoy with no such proof).
+run_hook "$WT3" "Stop" >/dev/null 2>&1 || true
 
 for event in Stop SubagentStop; do
   LEDGER3="$MAIN3/.quetrex/verify-ledger.jsonl"
@@ -378,10 +385,12 @@ mk_env_fixture() {  # mk_env_fixture <path> <requiredEnvKey> <requiredEnvVar> <e
     '{verify:["true","false"],requiredEnv:{($k):[$v]}}' \
     > "$d/.quetrex/verify.json"
   printf '%s=\n' "$exvar" > "$d/.env.example"
-  # TRACKED, per security_surface constraint #2 ("visible in a reviewed
-  # diff") — see ADV-B, which asserts the untracked case separately.
-  git -C "$d" add .env.example
-  git -C "$d" commit -q -m "chore: declare $exvar in .env.example"
+  # BOTH files TRACKED AND COMMITTED, per security_surface constraint #2
+  # ("visible in a reviewed diff") and SEC-2 (the requiredEnv mapping itself
+  # must be read from the committed blob) — see ADV-B/ADV-C/ADV-G, which
+  # assert the untracked/uncommitted cases separately.
+  git -C "$d" add .env.example .quetrex/verify.json
+  git -C "$d" commit -q -m "chore: declare $exvar in .env.example and requiredEnv in verify.json"
 }
 
 F5="$TMPROOT/ac5"
@@ -680,6 +689,307 @@ if [ "$CODEC" -eq 0 ] && [ "$BLOCKSC" = "1" ]; then
   pass "ADV-C: the command still ran and its real failure still blocked"
 else
   fail "ADV-C: expected exit 0 + 1 block decision, got exit $CODEC blocks $BLOCKSC (out: [$OUTC])"
+fi
+
+# =============================================================================
+# ADV-D — REVIEWER FINDING #1 (CONFIRMED): a non-ARRAY `.verify` degrades jq's
+# `index()` to a SUBSTRING search, silently breaking the "byte-for-byte member
+# of verify[]" constraint. Reproduced by the reviewer end-to-end: `.verify` as
+# the STRING "true ; sh -c 'exit 1'" makes requiredEnv["sh -c 'exit 1'"]
+# authorize a skip of that command, because it is merely a SUBSTRING of the
+# string `.verify`, never an array element. Because a string `.verify` also
+# makes resolve_from_verify_json's own array check fail, the actual CHAIN in
+# this fixture is resolved from the committed CLAUDE.md "## Verification"
+# fence instead (exactly reproducing the reviewer's repro), while the
+# malicious `.verify`/requiredEnv pairing lives in the committed verify.json.
+# =============================================================================
+F_D="$TMPROOT/advd"
+git_init_repo "$F_D"
+mkdir -p "$F_D/.quetrex" "$F_D/.claude"
+SKIPCMD_D="sh -c 'exit 1'"
+jq -cn --arg v "true ; ${SKIPCMD_D}" --arg k "$SKIPCMD_D" --arg var "FIXTURE_DB_URL" \
+  '{verify: $v, requiredEnv: {($k): [$var]}}' \
+  > "$F_D/.quetrex/verify.json"
+git -C "$F_D" add .quetrex/verify.json
+git -C "$F_D" commit -q -m "chore: add verify.json (STRING .verify, adversarial)"
+printf 'FIXTURE_DB_URL=\n' > "$F_D/.env.example"
+git -C "$F_D" add .env.example
+git -C "$F_D" commit -q -m "chore: declare FIXTURE_DB_URL"
+cat > "$F_D/.claude/CLAUDE.md" <<MD
+# fixture
+
+## Verification
+
+\`\`\`
+true
+${SKIPCMD_D}
+\`\`\`
+MD
+git -C "$F_D" add .claude/CLAUDE.md
+git -C "$F_D" commit -q -m "chore: add CLAUDE.md verification fence"
+
+LEDGER_D="$F_D/.quetrex/verify-ledger.jsonl"
+OUTD="$(run_hook "$F_D" "Stop" 2>&1)"; CODED=$?
+BLOCKSD="$(count_block_decisions "$OUTD")"
+SKIPSD="$(count_skip_lines "$OUTD")"
+
+if [ "$SKIPSD" = "0" ]; then
+  pass "ADV-D: a STRING .verify does not let a requiredEnv substring match authorize a skip"
+else
+  fail "ADV-D: a STRING .verify's substring match incorrectly authorized a skip of \`$SKIPCMD_D\` (out: [$OUTD])"
+fi
+if [ "$CODED" -eq 0 ] && [ "$BLOCKSD" = "1" ]; then
+  pass "ADV-D: the command still ran and its real failure still blocked"
+else
+  fail "ADV-D: expected exit 0 + 1 block decision, got exit $CODED blocks $BLOCKSD (out: [$OUTD])"
+fi
+SKIPCMD_D_RAN=0
+if [ -f "$LEDGER_D" ]; then
+  while IFS= read -r l; do
+    [ -z "$l" ] && continue
+    cm="$(printf '%s' "$l" | jq -r '.cmd')"
+    [ "$cm" = "$SKIPCMD_D" ] && SKIPCMD_D_RAN=1
+  done < "$LEDGER_D"
+fi
+if [ "$SKIPCMD_D_RAN" -eq 1 ]; then
+  pass "ADV-D: the ledger shows \`$SKIPCMD_D\` genuinely ran (not silently skipped)"
+else
+  fail "ADV-D: the ledger has no line for \`$SKIPCMD_D\` — it never ran"
+fi
+
+# =============================================================================
+# ADV-E — SEC-1 (CONFIRMED, HIGH): the MAIN-checkout skip must not be
+# manufacturable by the gated agent. `git worktree add -b claude/x decoy` is
+# on the Bash allow-list and costs exactly one command; a freshly created
+# worktree has NEVER had its own Stop/SubagentStop hook fire, so it holds
+# ZERO lines in its own verify-ledger.jsonl. Unlike AC3's fixture (which
+# deliberately PROVES the worktree first — see the comment at its creation),
+# this fixture omits that step on purpose: it is the manufactured decoy.
+# =============================================================================
+F_E="$TMPROOT/adve-main"
+git_init_repo "$F_E"
+mkdir -p "$F_E/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F_E/.quetrex/project.json"
+printf '{"verify":["false"]}' > "$F_E/.quetrex/verify.json"
+git -C "$F_E" add .quetrex/project.json .quetrex/verify.json
+git -C "$F_E" commit -q -m "chore: add quetrex config"
+DECOY_E="${F_E}-decoy"
+git -C "$F_E" worktree add -q -b claude/decoy-adv-e "$DECOY_E" >/dev/null 2>&1
+# NOTE: deliberately no `run_hook "$DECOY_E" ...` here — this decoy has never
+# run its own gate, exactly as an attacker's `git worktree add` would leave it.
+
+LEDGER_E="$F_E/.quetrex/verify-ledger.jsonl"
+BEFORE_E="$(line_count "$LEDGER_E")"
+OUTE="$(run_hook "$F_E" "Stop" 2>&1)"; CODEE=$?
+BLOCKSE="$(count_block_decisions "$OUTE")"
+SKIPSE="$(count_skip_lines "$OUTE")"
+AFTER_E="$(line_count "$LEDGER_E")"
+
+if [ "$SKIPSE" = "0" ]; then
+  pass "ADV-E: a manufactured decoy worktree with no ledger proof does NOT trigger VERIFY SKIPPED"
+else
+  fail "ADV-E: a decoy worktree with zero prior verification was trusted — main deferred to it and never ran its own chain (out: [$OUTE])"
+fi
+if [ "$CODEE" -eq 0 ] && [ "$BLOCKSE" = "1" ]; then
+  pass "ADV-E: the main checkout ran its own chain and blocked on the real failure"
+else
+  fail "ADV-E: expected exit 0 + 1 block decision from main, got exit $CODEE blocks $BLOCKSE (out: [$OUTE])"
+fi
+if [ "$AFTER_E" = "$((BEFORE_E + 1))" ]; then
+  pass "ADV-E: exactly 1 ledger line appended in main (chain genuinely ran there)"
+else
+  fail "ADV-E: ledger did not gain a line in main ($BEFORE_E -> $AFTER_E)"
+fi
+
+# =============================================================================
+# ADV-F — SEC-1: branchPrefix must be read from the COMMITTED project.json,
+# not the working tree. An agent could otherwise widen or redirect the
+# prefix match, in an uncommitted edit, to sweep in a decoy worktree that the
+# COMMITTED config would never match. The decoy here is given genuine ledger
+# proof pinned to its own HEAD, so this isolates the branchPrefix-source
+# question from ADV-E's (separately covered) manufactured-decoy scenario.
+# =============================================================================
+F_F="$TMPROOT/advf-main"
+git_init_repo "$F_F"
+mkdir -p "$F_F/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F_F/.quetrex/project.json"
+printf '{"verify":["false"]}' > "$F_F/.quetrex/verify.json"
+git -C "$F_F" add .quetrex/project.json .quetrex/verify.json
+git -C "$F_F" commit -q -m "chore: add quetrex config (committed branchPrefix claude/)"
+# Rewrite the WORKING-TREE COPY ONLY (never committed) to a wider prefix.
+printf '{"branchPrefix":"evil/"}' > "$F_F/.quetrex/project.json"
+
+DECOY_F="${F_F}-decoy"
+git -C "$F_F" worktree add -q -b evil/decoy "$DECOY_F" >/dev/null 2>&1
+DECOY_F_HEAD="$(git -C "$DECOY_F" rev-parse HEAD)"
+mkdir -p "$DECOY_F/.quetrex"
+jq -cn --arg sha "$DECOY_F_HEAD" --arg cwd "$DECOY_F" \
+  '{ts:"2026-01-01T00:00:00Z",cmd:"false",cwd:$cwd,sha:$sha,exit:1,tail:"boom"}' \
+  > "$DECOY_F/.quetrex/verify-ledger.jsonl"
+
+LEDGER_F="$F_F/.quetrex/verify-ledger.jsonl"
+BEFORE_F="$(line_count "$LEDGER_F")"
+OUTF="$(run_hook "$F_F" "Stop" 2>&1)"; CODEF=$?
+BLOCKSF="$(count_block_decisions "$OUTF")"
+SKIPSF="$(count_skip_lines "$OUTF")"
+AFTER_F="$(line_count "$LEDGER_F")"
+
+if [ "$SKIPSF" = "0" ]; then
+  pass "ADV-F: branchPrefix is read from the COMMITTED project.json — an uncommitted widening does not authorize a skip"
+else
+  fail "ADV-F: an uncommitted branchPrefix widening authorized a skip to a decoy on a branch the committed config never matches (out: [$OUTF])"
+fi
+if [ "$CODEF" -eq 0 ] && [ "$BLOCKSF" = "1" ]; then
+  pass "ADV-F: the main checkout ran its own chain and blocked"
+else
+  fail "ADV-F: expected exit 0 + 1 block decision, got exit $CODEF blocks $BLOCKSF (out: [$OUTF])"
+fi
+if [ "$AFTER_F" = "$((BEFORE_F + 1))" ]; then
+  pass "ADV-F: exactly 1 ledger line appended in main"
+else
+  fail "ADV-F: ledger did not gain a line in main ($BEFORE_F -> $AFTER_F)"
+fi
+
+# =============================================================================
+# ADV-G — SEC-2 (CONFIRMED, MEDIUM): the requiredEnv MAPPING (command <->
+# variable) must be read from the COMMITTED verify.json, not the working
+# tree. Committed baseline declares verify[] and a legitimate .env.example
+# with NO requiredEnv at all; the association pairing a genuinely-failing
+# command to that var is added ONLY in an uncommitted edit — so the only
+# reviewable hunk in this history is the innocuous .env.example addition.
+#
+# The skip-target is placed LAST in the chain (matching ADV-B/ADV-C/ADV-D),
+# NOT followed by another failing command: if the escape reopened, the whole
+# run would go fully GREEN (SKIPPED, nothing else red) and hit the visible
+# allow-path "VERIFY SKIPPED" line asserted below. Putting a second failing
+# command after the skip-target would instead mask a silent skip behind that
+# LATER failure's block reason — that masking is exactly what AC9 exists to
+# fix separately, and mixing the two here would make this test pass/fail for
+# the wrong reason regardless of whether SEC-2 is actually closed.
+# =============================================================================
+F_G="$TMPROOT/advg"
+git_init_repo "$F_G"
+mkdir -p "$F_G/.quetrex"
+SKIPCMD_G="sh -c 'exit 9'"
+jq -cn --arg skipcmd "$SKIPCMD_G" '{verify: ["true", $skipcmd]}' > "$F_G/.quetrex/verify.json"
+git -C "$F_G" add .quetrex/verify.json
+git -C "$F_G" commit -q -m "chore: add verify.json (no requiredEnv yet)"
+printf 'FIXTURE_DB_URL=\n' > "$F_G/.env.example"
+git -C "$F_G" add .env.example
+git -C "$F_G" commit -q -m "chore: declare FIXTURE_DB_URL (innocuous, reviewable hunk)"
+# WITHOUT COMMITTING, add the requiredEnv association that would skip the
+# (genuinely failing, if it ran) sh -c 'exit 9' command. This association
+# never appears in any reviewed diff.
+jq -cn --arg skipcmd "$SKIPCMD_G" --arg var "FIXTURE_DB_URL" \
+  '{verify: ["true", $skipcmd], requiredEnv: {($skipcmd): [$var]}}' \
+  > "$F_G/.quetrex/verify.json"
+
+LEDGER_G="$F_G/.quetrex/verify-ledger.jsonl"
+OUTG_2="$(run_hook "$F_G" "Stop" 2>&1)"; CODEG_2=$?
+BLOCKSG="$(count_block_decisions "$OUTG_2")"
+SKIPSG="$(count_skip_lines "$OUTG_2")"
+
+if [ "$SKIPSG" = "0" ]; then
+  pass "ADV-G: an UNCOMMITTED requiredEnv association does not authorize a skip, even with a committed .env.example"
+else
+  fail "ADV-G: an uncommitted requiredEnv mapping laundered a skip past a committed, reviewable .env.example (out: [$OUTG_2])"
+fi
+if [ "$CODEG_2" -eq 0 ] && [ "$BLOCKSG" = "1" ]; then
+  pass "ADV-G: the command ran for real and its failure still blocked"
+else
+  fail "ADV-G: expected exit 0 + 1 block decision, got exit $CODEG_2 blocks $BLOCKSG (out: [$OUTG_2])"
+fi
+SKIPCMD_G_RAN=0
+if [ -f "$LEDGER_G" ]; then
+  while IFS= read -r l; do
+    [ -z "$l" ] && continue
+    cm="$(printf '%s' "$l" | jq -r '.cmd')"
+    [ "$cm" = "$SKIPCMD_G" ] && SKIPCMD_G_RAN=1
+  done < "$LEDGER_G"
+fi
+if [ "$SKIPCMD_G_RAN" -eq 1 ]; then
+  pass "ADV-G: the ledger shows \`$SKIPCMD_G\` genuinely ran (not silently skipped)"
+else
+  fail "ADV-G: the ledger has no line for \`$SKIPCMD_G\` — it never ran"
+fi
+
+# =============================================================================
+# ADV-H — SEC-3 (CONFIRMED, LOW): `: > "$LOG"` follows symlinks, so a symlink
+# planted at .quetrex/verify-gate.log lets the hook truncate, chmod 600, and
+# append captured build output to any file the user can write.
+# =============================================================================
+F_H="$TMPROOT/advh"
+git_init_repo "$F_H"
+mkdir -p "$F_H/.quetrex"
+printf '{"verify":["false"]}' > "$F_H/.quetrex/verify.json"
+VICTIM_H="$TMPROOT/advh-victim"
+printf 'PRECIOUS DATA -- DO NOT TOUCH\n' > "$VICTIM_H"
+chmod 644 "$VICTIM_H"
+ln -s "$VICTIM_H" "$F_H/.quetrex/verify-gate.log"
+
+OUTH_3="$(run_hook "$F_H" "Stop" 2>&1)"; CODEH_3=$?
+VICTIM_CONTENT_H="$(cat "$VICTIM_H" 2>/dev/null)"
+
+if [ "$VICTIM_CONTENT_H" = "PRECIOUS DATA -- DO NOT TOUCH" ]; then
+  pass "ADV-H: a symlinked verify-gate.log does not truncate/overwrite the symlink target"
+else
+  fail "ADV-H: the symlink target was modified (content: [$VICTIM_CONTENT_H])"
+fi
+if [ -f "$F_H/.quetrex/verify-gate.log" ] && [ ! -L "$F_H/.quetrex/verify-gate.log" ]; then
+  pass "ADV-H: verify-gate.log is now a regular file, not a symlink"
+else
+  fail "ADV-H: verify-gate.log is still a symlink (or missing)"
+fi
+LOG_MODE_H="$(stat -f '%Lp' "$F_H/.quetrex/verify-gate.log" 2>/dev/null || stat -c '%a' "$F_H/.quetrex/verify-gate.log" 2>/dev/null)"
+if [ "$LOG_MODE_H" = "600" ]; then
+  pass "ADV-H: verify-gate.log is mode 600"
+else
+  fail "ADV-H: expected verify-gate.log mode 600, got [$LOG_MODE_H]"
+fi
+BLOCKSH_3="$(count_block_decisions "$OUTH_3")"
+if [ "$CODEH_3" -eq 0 ] && [ "$BLOCKSH_3" = "1" ]; then
+  pass "ADV-H: the chain still ran and blocked normally despite the symlink attempt"
+else
+  fail "ADV-H: expected exit 0 + 1 block decision, got exit $CODEH_3 blocks $BLOCKSH_3 (out: [$OUTH_3])"
+fi
+
+# =============================================================================
+# AC9 — REVIEWER (non-blocking): a RED chain's block reason must also surface
+# any EARLIER command that was declaratively skipped. Quieting the output
+# must not withhold, from a genuinely red run, the one piece of context this
+# whole task exists to preserve: whether something in the chain did not run.
+# =============================================================================
+F_9="$TMPROOT/ac9"
+git_init_repo "$F_9"
+mkdir -p "$F_9/.quetrex"
+SKIPCMD_9="sh -c 'exit 9'"
+jq -cn --arg skipcmd "$SKIPCMD_9" --arg redcmd "false" --arg var "FIXTURE_DB_URL" \
+  '{verify: [$skipcmd, $redcmd], requiredEnv: {($skipcmd): [$var]}}' \
+  > "$F_9/.quetrex/verify.json"
+git -C "$F_9" add .quetrex/verify.json
+git -C "$F_9" commit -q -m "chore: add verify.json (skip-then-red chain)"
+printf 'FIXTURE_DB_URL=\n' > "$F_9/.env.example"
+git -C "$F_9" add .env.example
+git -C "$F_9" commit -q -m "chore: declare FIXTURE_DB_URL"
+
+OUT9="$(run_hook "$F_9" "Stop" 2>&1)"; CODE9=$?
+REASON9="$(printf '%s' "$OUT9" | jq -r '.reason // empty' 2>/dev/null)"
+REASON9_LINES="$(printf '%s' "$REASON9" | grep -c '' 2>/dev/null || echo 0)"
+
+if [ "$CODE9" -eq 0 ] && printf '%s' "$OUT9" | jq -e '.decision == "block"' >/dev/null 2>&1; then
+  pass "AC9: the chain still blocks on the real (second) failure"
+else
+  fail "AC9: expected a block decision, got exit $CODE9 (out: [$OUT9])"
+fi
+if printf '%s' "$REASON9" | grep -q "$SKIPCMD_9"; then
+  pass "AC9: the block reason names the earlier SKIPPED command"
+else
+  fail "AC9: the block reason does not mention the earlier skipped command [$REASON9]"
+fi
+if [ -n "$REASON9" ] && [ "$REASON9_LINES" -le 3 ]; then
+  pass "AC9: the block reason stays within the <=3-line quiet-output budget even with a skip note"
+else
+  fail "AC9: block reason exceeded the 3-line budget (got $REASON9_LINES lines): [$REASON9]"
 fi
 
 echo
