@@ -168,13 +168,23 @@ if [ "${QUETREX_VERIFY_FORCE:-0}" != "1" ]; then
       P=$(jq -r '.branchPrefix // empty' "$QDIR/project.json" 2>/dev/null)
       [ -n "$P" ] && BRANCH_PREFIX="$P"
     fi
+    # FAIL CLOSED against a STALE/PRUNABLE entry. `git worktree list` keeps
+    # reporting a linked worktree's registration even after its directory was
+    # removed by hand (`rm -rf` instead of `git worktree remove`) — it is only
+    # dropped by an explicit `git worktree prune`. Deferring to a path that no
+    # longer exists on disk would mean the chain runs NOWHERE: no gate proves
+    # main, no gate proves the (gone) worktree, and a genuinely red command in
+    # main is silently allowed through. So a candidate is only trusted when its
+    # directory is actually present; a stale entry is skipped over (not
+    # trusted), and if NO live pipeline worktree remains at all, the safe
+    # default is to run the chain here rather than skip it.
     WT_PATH=""; WT_BRANCH=""
     CUR_WT_PATH=""
     while IFS= read -r wtline; do
       case "$wtline" in
         "worktree "*) CUR_WT_PATH="${wtline#worktree }" ;;
         "branch refs/heads/"*)
-          if [ -n "$CUR_WT_PATH" ] && [ "$CUR_WT_PATH" != "$ROOT" ]; then
+          if [ -n "$CUR_WT_PATH" ] && [ "$CUR_WT_PATH" != "$ROOT" ] && [ -d "$CUR_WT_PATH" ]; then
             b="${wtline#branch refs/heads/}"
             case "$b" in
               "$BRANCH_PREFIX"*)
@@ -413,7 +423,7 @@ should_skip_for_env() {
       else empty end
     ' "$f" 2>/dev/null)
   [ -n "$vars" ] || return 1
-  local v
+  local v declared exfile
   while IFS= read -r v; do
     [ -n "$v" ] || continue
     # Only ever treat well-formed shell identifiers as candidates; anything
@@ -423,11 +433,23 @@ should_skip_for_env() {
       *) continue ;;
     esac
     case "$v" in *[!A-Za-z0-9_]*) continue ;; esac
-    # Constraint 2: the repo itself must declare this as required config.
-    if ! grep -qE "^${v}=" "$ROOT/.env.example" 2>/dev/null \
-       && ! grep -qE "^${v}=" "$ROOT/.env.sample" 2>/dev/null; then
-      continue
-    fi
+    # Constraint 2: the repo itself must declare this as required config, in a
+    # file that is GIT-TRACKED — per security_surface constraint #2, "visible
+    # in a reviewed diff". An untracked .env.example on disk (never `git add`ed)
+    # is invisible to any reviewer; honoring it would let an agent running
+    # under bypassPermissions drop a file nobody ever reviews and use it to
+    # launder a real command failure into a silent skip. A plain existence/grep
+    # check is NOT enough — tracking status must be checked explicitly.
+    declared=0
+    for exfile in .env.example .env.sample; do
+      if [ -f "$ROOT/$exfile" ] \
+         && grep -qE "^${v}=" "$ROOT/$exfile" 2>/dev/null \
+         && git -C "$ROOT" ls-files --error-unmatch -- "$exfile" >/dev/null 2>&1; then
+        declared=1
+        break
+      fi
+    done
+    [ "$declared" -eq 1 ] || continue
     # Constraint 3a: unset-or-empty in the hook's own environment.
     local val="${!v-}"
     [ -z "$val" ] || continue

@@ -378,6 +378,10 @@ mk_env_fixture() {  # mk_env_fixture <path> <requiredEnvKey> <requiredEnvVar> <e
     '{verify:["true","false"],requiredEnv:{($k):[$v]}}' \
     > "$d/.quetrex/verify.json"
   printf '%s=\n' "$exvar" > "$d/.env.example"
+  # TRACKED, per security_surface constraint #2 ("visible in a reviewed
+  # diff") — see ADV-B, which asserts the untracked case separately.
+  git -C "$d" add .env.example
+  git -C "$d" commit -q -m "chore: declare $exvar in .env.example"
 }
 
 F5="$TMPROOT/ac5"
