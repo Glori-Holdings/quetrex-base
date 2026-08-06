@@ -48,6 +48,7 @@ Write exactly one file: `./.quetrex/plan/<TASK>.json` where `<TASK>` is the task
 {
   "task": "SMA-12",
   "route": "COMPLEX",
+  "base_sha": null,
   "summary": "One sentence: what changes and why.",
   "workstreams": [
     { "id": "api", "agent": "developer",          "owns": ["src/api/**"],        "depends_on": [] },
@@ -74,6 +75,14 @@ Write exactly one file: `./.quetrex/plan/<TASK>.json` where `<TASK>` is the task
     "tenant/row scoping on GET /orders/:id (owner_id == caller)"
   ],
   "verify": ["npm run type-check", "npm run lint", "npm run build", "npm test"],
+  "required_env": [
+    {
+      "name": "<THE_NAME_YOU_FOUND>",
+      "read_at": "src/db/client.ts:14",
+      "placeholderable": true,
+      "why": "read with no fallback and loaded by the build step of the verify chain"
+    }
+  ],
   "security_review_required": true,
   "db_migration": true,
   "impact": {
@@ -88,10 +97,50 @@ Field rules:
 
 - **`task`** — matches the delegation id exactly; also the filename stem.
 - **`route`** — the tier you were given (`STANDARD` | `COMPLEX`). Do not downgrade it.
+- **`base_sha`** — **DISPATCHER-STAMPED. You always emit `null`, and you always emit the key.**
+  You *cannot* fill it: your frontmatter grants `tools: Read, Grep, Glob, Write` (line 4 of this
+  file) with **no Bash**, so you cannot run `git rev-parse` and anything you wrote here would be
+  invented or copied out of prose. The **dispatcher** stamps the real value — `/quetrex:task-build`
+  Step 6A, at the point where `origin/<base>` has just been fetched
+  (`.claude/commands/task-build.md:376`), which is the only moment the approved base is actually
+  knowable. Never guess a sha, never copy one from the spec, the task description, a PR body or a
+  branch name, and never drop the key to "let the dispatcher add it" — a missing key reads as an
+  older plan schema. A non-null `base_sha` in a plan you emitted is a hard defect: it makes the
+  run's staleness check (base behind the recorded sha ⇒ stale environment) compare against
+  fiction, which is worse than no check at all.
 - **`workstreams[]`** — each has a unique `id`, an `agent` (`developer` or `database-architect`), an `owns` glob list, and `depends_on` (ids that must complete first). A file that any workstream will touch MUST be covered by exactly one workstream's `owns`.
 - **`ownership`** — an explicit path → workstream-id map for every non-trivial file the change touches. This is the enforceable contract developers are held to; globs in `owns` are the shorthand, `ownership` is the authority.
 - **`acceptance[]`** — see Contract Rules. Each maps to a `workstream`.
 - **`verify`** — copied verbatim from `verify.json`.
+- **`required_env[]`** — the environment variable names the `verify` chain will actually demand:
+  **discovered, never enumerated.** Two filters, both required:
+  1. **Fallback-less reads only.** Grep for `process.env.<NAME>` (and the stack's equivalent —
+     `os.environ[...]`, `System.getenv(...)`, `ENV[...]`) and keep only reads with **no** `??`,
+     `||`, `.get(x, default)` or config-default behind them. A read that falls back is satisfied
+     by its own default and needs nothing from us.
+  2. **Intersect with what the chain exercises.** Keep a name only if a command in `verify`
+     actually loads the module that reads it. A var read by a runtime path no verify command
+     touches cannot turn the chain red, so listing it invents work.
+  **No environment variable name may be written into this file as a literal.** A name you find in
+  one repo — a target repo's database URL variable, say — is *data*, not doctrine: hardcoding it
+  here makes the rule wrong for every other repo, and worse, turns a stale list into an alibi that
+  hides the reads actually present. Discover the names in the repo you were handed, every time.
+  **An array of OBJECTS, never of bare strings — one object per name.** Each entry carries exactly:
+  `name`, the variable name **alone** (no `$`, no `process.env.` prefix, no value, ever) — it is the
+  only key any consumer reads, and it must match `^[A-Za-z_][A-Za-z0-9_]*$` or the run's hydrator
+  drops it; `read_at`, the `file:line` of the fallback-less read (repo-root
+  relative, like every other path you emit); `placeholderable`, `true` iff a **syntactically valid,
+  credential-less** placeholder value satisfies that read for the whole `verify` chain; and `why`,
+  one sentence naming the verify command that needs it. This object shape is fixed by **Contract A**
+  in `.claude/lib/dev-pipeline.md` ("The two env shape contracts"), which is the single source of
+  truth for it and lists the exact projection each consumer uses; emit anything else — a bare string,
+  a `{NAME: value}` map, a comma-joined line — and the consumers project `name` out of it, get
+  nothing, hydrate nothing, and the run still exits 0. That is measured, not hypothetical: an
+  object/string mismatch made the whole of R2 inert while every gate stayed green. If you cannot determine a name's
+  satisfiability **statically** — you would have to run something to know — do not assert either
+  value: record the name and the uncertainty in `notes[]` and leave it out of `required_env`.
+  Guessing `true` green-washes a run that will fail; guessing `false` blocks a build that would
+  have passed (see Contract Rule 6). `[]` is the correct value when the chain needs no env at all.
 - **`security_review_required`** — boolean; `true` if you were forced (never override to false) OR if the security surface is non-empty and touches auth/authz/secrets/payment/crypto/input boundaries.
 - **`db_migration`** — `true` iff any workstream owns migration/schema files; forces a `database-architect` workstream.
 - **`impact`** — brownfield consumer map; `{}` allowed only for pure greenfield additions.
@@ -116,6 +165,29 @@ Field rules:
 4. **Migrations force the DB path.** If the task changes schema, add a `database-architect` workstream owning the migration files and set `db_migration: true`. Do not let a `developer` own migrations.
 
 5. **No time estimates, no agent-count decisions beyond workstream design.** The orchestrator schedules; you partition the work.
+
+6. **A name no placeholder can satisfy blocks BEFORE dispatch.**
+   - If any `required_env[]` entry you would emit carries `placeholderable: false`, do NOT emit a
+     full plan and do NOT let the work dispatch: take the `needs_clarity` exit below, with **one
+     question per unsatisfiable name**, each naming the variable and the verify command that
+     demands it (e.g. "X is read with no fallback and `npm run build` needs a value a
+     credential-less placeholder can't provide — supply one, or tell us how the chain should run
+     without it").
+   - **Why before dispatch and not later.** The run hydrates credential-less placeholders for
+     every name in `required_env` and only then runs the chain. A name a placeholder *cannot*
+     satisfy — one that must reach a real service to be valid — turns the chain red no matter what
+     the developers write, so dispatching burns an entire unattended run to rediscover a fact you
+     already knew at plan time, and the failure surfaces as "the build is broken" rather than "we
+     were never given a credential". Blocking here stops it while a human is still at the scope
+     gate, which is the last cheap moment.
+   - **Reuse this exit; never invent a new terminus.** `needs_clarity` is the only early stop the
+     pipeline is listening for. A novel status, or merely recording the problem in `notes[]`, is a
+     stop nobody handles: the plan reads as a normal plan and dispatch happens anyway — the exact
+     failure this rule exists to prevent.
+   - The pass condition is `placeholderable: true` on every entry, or `required_env: []`. An entry
+     whose satisfiability you could **not** determine statically belongs in `notes[]` and out of
+     `required_env` entirely (see the `required_env[]` field rule) — never block a buildable task
+     on a guessed `false`.
 
 ---
 
