@@ -302,19 +302,38 @@ frontmatter grants `tools: Read, Grep, Glob, Write` with **no Bash**, so it cann
 discovery tool itself — the stamp is a union-only backstop that repairs a miss, never a
 replacement for the architect's own entries.
 
+**`placeholderable` is asymmetric between the two producers, on purpose.** The architect's own
+Contract Rule 6 can assert `placeholderable: false` and route it through `needs_clarity` before
+dispatch when it judges a name unsatisfiable. The dispatcher stamp never does: every entry
+`bin/quetrex-env-derive plan` adds carries a hardcoded `placeholderable: true` and it never writes
+`notes[]`, because by the time it runs the human scope gate has already passed and there is no
+`needs_clarity` branch left to route through — a stamp that could only ever emit `|| exit 1`. This
+is safe because the stamp only ever adds names that already survived the same conservative,
+committed-declaration-plus-fallback-less-read filter that backs the `requiredEnv` skip: a wrong
+`true` here means hydrate exports a placeholder that turns out not to satisfy the read, the verify
+chain goes red at runtime, and `merge-gate.sh` refuses to merge — it never silently green-washes a
+build the way the architect's guessed `false` (rejected by Contract Rule 6 for the opposite reason)
+would silently red-wash one.
+
 **Consumed by:** `bin/quetrex-cloud-prep hydrate`, which projects `.name` **only** —
-`(plan.required_env || []).map(e => e && e.name).filter(...)` — and writes one credential-less
-placeholder `export` per name into a sourceable env file. The measured defect this shape closes: an
-earlier, wrong projection (`.join("\n")` over the object array) collapsed to the literal string
-`"[object Object]"`, hydrated nothing, and the run still exited 0 — the whole feature silently
-inert while every gate stayed green.
+`(plan && Array.isArray(plan.required_env)) ? plan.required_env : []`, then
+`.map(e => e && e.name).filter(n => typeof n === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(n))`
+— and writes one credential-less placeholder `export` per name into a sourceable env file. The
+`Array.isArray` guard is load-bearing, not decoration: the bare form `(plan.required_env ||
+[]).map(...)` throws `TypeError` the moment `required_env` is a `{NAME: value}` map (no `.map`
+method), which would kill the whole hydrate step instead of degrading it to an empty, honest
+`env_placeholdered`. The measured defect the shape itself closes: an earlier, wrong projection
+(`.join("\n")` over the object array) collapsed to the literal string `"[object Object]"`,
+hydrated nothing, and the run still exited 0 — the whole feature silently inert while every gate
+stayed green.
 
 ### Contract B — `env_placeholdered` (the provenance field)
 
-Written by `bin/quetrex-cloud-prep hydrate` into `.quetrex/env-provenance.json`, alongside
-`required_env` (a verbatim mirror of the plan's array — informational only, read by no consumer)
-and `hydrated_at`. `env_placeholdered` is a **flat array of NAMES ONLY, never values** — exactly
-the names hydrate actually placeholdered, nothing more. The measured defect this shape closes: a
+Written by `bin/quetrex-cloud-prep hydrate` into `.quetrex/env-provenance.json`, exactly four keys:
+`required_env` (a verbatim mirror of the plan's array — informational only, read by no consumer),
+`env_placeholdered`, `hydrated_at`, and `note`. `env_placeholdered` is a **flat array of NAMES
+ONLY, never values** — exactly the names hydrate actually placeholdered, nothing more. The
+measured defect this shape closes: a
 producer/consumer key-name mismatch (`env_placeholdered` written, `.placeholdered` read) silently
 degraded a positive claim ("this chain ran against real placeholders") into an empty list — which
 reads as "this chain proved itself against the real environment," **inverting** the evidence rather
