@@ -8,14 +8,20 @@
 # all) directly into the {"decision":"block","reason":...} payload that Stop /
 # SubagentStop surface. A Node stack trace read by the operator as "my cloud
 # build failed" when it had not — costing two rounds of doubt and nearly
-# firing a duplicate cloud routine on a healthy run. This suite proves three
+# firing a duplicate cloud routine on a healthy run. This suite proves the
 # fixes without weakening the gate itself:
 #   (a) QUIET — a genuinely red chain still blocks, but the reason is a short,
 #       labelled summary; the raw command output never reaches stdout/stderr,
 #       only a log file on disk (AC1, AC2).
-#   (b) NO MAIN-CHECKOUT RUNS — when the MAIN checkout has a linked pipeline
-#       worktree, the chain is not executed against main; it defers with a
-#       plain "VERIFY SKIPPED" line (AC3), and narrows nothing else (AC4).
+#   (b) NO MAIN-CHECKOUT DEFERRAL, EVER — the main-checkout worktree-deferral
+#       skip (formerly AC3) was DELETED OUTRIGHT (SEC-1, high): no filesystem
+#       state a gated agent can create — a stale entry, a decoy worktree, a
+#       decoy with genuine ledger proof, a hand-fabricated ledger line, or an
+#       abandoned once-proven worktree — can ever again ungate the main
+#       checkout. The chain now runs there in every state (AC10), and AC4(i)/
+#       AC4(ii) confirm the guard's removal narrows nothing else. ADV-A,
+#       ADV-E, ADV-F, ADV-I and ADV-J are the permanent anti-reintroduction
+#       controls for this class.
 #   (c) DECLARATIVE ENV SKIP — a command whose declared `requiredEnv` var is
 #       genuinely absent from this checkout is skipped pre-flight, never
 #       executed, never laundered from its own output (AC5); the skip cannot
@@ -250,8 +256,12 @@ else
 fi
 
 # =============================================================================
-# AC3 / AC4 — NO MAIN-CHECKOUT RUNS when pipeline work lives in a worktree,
-# and the guard narrows nothing else.
+# AC4 — the removal of the main-checkout deferral (see AC10) narrows nothing
+# else: a linked pipeline worktree still runs its own chain normally when
+# invoked directly (AC4(ii)), and the main checkout runs its own chain
+# normally once that worktree is gone (AC4(i)). (AC3, which used to assert
+# that the main checkout DEFERRED to the worktree instead of running, is
+# MOOT now that the deferral is deleted outright — see AC10 for its inverse.)
 # =============================================================================
 MAIN3="$TMPROOT/ac3-main"
 git_init_repo "$MAIN3"
@@ -262,69 +272,6 @@ git -C "$MAIN3" add .quetrex/project.json .quetrex/verify.json
 git -C "$MAIN3" commit -q -m "chore: add quetrex config"
 WT3="${MAIN3}-wt"
 git -C "$MAIN3" worktree add -q -b claude/T-1-x "$WT3" >/dev/null 2>&1
-# The hook resolves ROOT via `git rev-parse --show-toplevel`, which returns
-# the SYMLINK-RESOLVED path (e.g. macOS /tmp -> /private/tmp). Compare against
-# that same resolved form so this assertion isn't a path-cosmetics false fail.
-REAL_MAIN3="$(git -C "$MAIN3" rev-parse --show-toplevel)"
-# PROVE the worktree, exactly as the production guard now requires (SEC-1):
-# a candidate is only trusted once its OWN gate has genuinely fired against
-# its OWN current HEAD, so invoke the hook inside WT3 ONCE here to seed that
-# proof before testing whether MAIN defers to it. This is fixture setup, not
-# a change to what AC3/AC4 assert — see ADV-E for the fixture that
-# DELIBERATELY omits this step (a manufactured decoy with no such proof).
-run_hook "$WT3" "Stop" >/dev/null 2>&1 || true
-
-for event in Stop SubagentStop; do
-  LEDGER3="$MAIN3/.quetrex/verify-ledger.jsonl"
-  ATT3="$MAIN3/.quetrex/verify-attempts"
-  BEFORE_LEDGER="$(line_count "$LEDGER3")"
-  BEFORE_ATT="$(cat "$ATT3" 2>/dev/null || echo '')"
-
-  OUT3="$(run_hook "$MAIN3" "$event" 2>&1)"; CODE3=$?
-
-  if [ "$CODE3" -eq 0 ]; then
-    pass "AC3($event): hook exit code == 0"
-  else
-    fail "AC3($event): expected exit 0, got $CODE3"
-  fi
-
-  BLOCKS3="$(count_block_decisions "$OUT3")"
-  if [ "$BLOCKS3" = "0" ]; then
-    pass "AC3($event): 0 stdout lines parse as a block decision"
-  else
-    fail "AC3($event): expected 0 block decisions, got $BLOCKS3"
-  fi
-
-  SKIPS3="$(count_skip_lines "$OUT3")"
-  if [ "$SKIPS3" = "1" ]; then
-    pass "AC3($event): exactly 1 'VERIFY SKIPPED' line"
-  else
-    fail "AC3($event): expected exactly 1 VERIFY SKIPPED line, got $SKIPS3 (out: [$OUT3])"
-  fi
-
-  SKIP_LINE3="$(printf '%s\n' "$OUT3" | grep '^VERIFY SKIPPED' | head -n1)"
-  if printf '%s' "$SKIP_LINE3" | grep -qF "$REAL_MAIN3" \
-     && printf '%s' "$SKIP_LINE3" | grep -q 'claude/T-1-x' \
-     && printf '%s' "$SKIP_LINE3" | grep -q 'BLOCKS nothing'; then
-    pass "AC3($event): SKIPPED line names the main checkout path, the worktree branch, and 'BLOCKS nothing'"
-  else
-    fail "AC3($event): SKIPPED line missing required content: [$SKIP_LINE3]"
-  fi
-
-  AFTER_LEDGER="$(line_count "$LEDGER3")"
-  if [ "$AFTER_LEDGER" = "$BEFORE_LEDGER" ]; then
-    pass "AC3($event): verify-ledger.jsonl line count unchanged"
-  else
-    fail "AC3($event): ledger line count changed ($BEFORE_LEDGER -> $AFTER_LEDGER)"
-  fi
-
-  AFTER_ATT="$(cat "$ATT3" 2>/dev/null || echo '')"
-  if [ "$AFTER_ATT" = "$BEFORE_ATT" ]; then
-    pass "AC3($event): .quetrex/verify-attempts unchanged"
-  else
-    fail "AC3($event): verify-attempts changed ($BEFORE_ATT -> $AFTER_ATT)"
-  fi
-done
 
 # --- AC4(ii): invoked from INSIDE the linked worktree -> chain runs & blocks -
 LEDGER_WT3="$WT3/.quetrex/verify-ledger.jsonl"
@@ -562,12 +509,14 @@ else
 fi
 
 # =============================================================================
-# ADV-A — QA ADVERSARIAL: a STALE/PRUNABLE linked-worktree entry (the worktree
-# directory was removed with `rm -rf` instead of `git worktree remove`, so
-# `git worktree list --porcelain` still reports it) must NOT trigger the
-# main-checkout skip. Nothing runs its own gate at a path that no longer
-# exists, so deferring to it is a silent fail-open: a genuinely red chain in
-# main would never be proven anywhere.
+# ADV-A — ANTI-REINTRODUCTION CONTROL (was: QA adversarial finding against the
+# now-DELETED main-checkout deferral). A STALE/PRUNABLE linked-worktree entry
+# (the worktree directory was removed with `rm -rf` instead of `git worktree
+# remove`, so `git worktree list --porcelain` still reports it) must still
+# result in the main checkout running its own chain — there is no code path
+# left that could defer to it. If this ever regresses (the deferral is
+# reintroduced), this is the state that would silently swallow a genuinely
+# red chain: a candidate path that no longer exists on disk.
 # =============================================================================
 MAIN_A="$TMPROOT/adva-main"
 git_init_repo "$MAIN_A"
@@ -758,13 +707,15 @@ else
 fi
 
 # =============================================================================
-# ADV-E — SEC-1 (CONFIRMED, HIGH): the MAIN-checkout skip must not be
-# manufacturable by the gated agent. `git worktree add -b claude/x decoy` is
-# on the Bash allow-list and costs exactly one command; a freshly created
-# worktree has NEVER had its own Stop/SubagentStop hook fire, so it holds
-# ZERO lines in its own verify-ledger.jsonl. Unlike AC3's fixture (which
-# deliberately PROVES the worktree first — see the comment at its creation),
-# this fixture omits that step on purpose: it is the manufactured decoy.
+# ADV-E — ANTI-REINTRODUCTION CONTROL (was: SEC-1, CONFIRMED, HIGH). The
+# original main-checkout deferral was manufacturable by the gated agent with
+# one allow-listed command: `git worktree add -b claude/x decoy` costs
+# exactly one command, and a freshly created worktree has NEVER had its own
+# Stop/SubagentStop hook fire, so it holds ZERO lines in its own
+# verify-ledger.jsonl. That whole deferral is now DELETED, so this decoy
+# worktree (still created, still on-branch) has no code path left to defer
+# to — the main checkout runs its own chain regardless of anything a decoy
+# worktree does or does not contain.
 # =============================================================================
 F_E="$TMPROOT/adve-main"
 git_init_repo "$F_E"
@@ -802,12 +753,14 @@ else
 fi
 
 # =============================================================================
-# ADV-F — SEC-1: branchPrefix must be read from the COMMITTED project.json,
-# not the working tree. An agent could otherwise widen or redirect the
-# prefix match, in an uncommitted edit, to sweep in a decoy worktree that the
-# COMMITTED config would never match. The decoy here is given genuine ledger
-# proof pinned to its own HEAD, so this isolates the branchPrefix-source
-# question from ADV-E's (separately covered) manufactured-decoy scenario.
+# ADV-F — ANTI-REINTRODUCTION CONTROL (was: SEC-1). The original deferral read
+# branchPrefix from the COMMITTED project.json specifically so an agent's
+# uncommitted, working-tree-only edit widening/redirecting the prefix (e.g.
+# to "evil/") could not sweep in an otherwise-unreachable decoy. That whole
+# mechanism — committed-branchPrefix read, worktree-list loop, everything —
+# is now DELETED, so an uncommitted project.json edit plus a decoy on a
+# matching branch, even one carrying genuine ledger proof pinned to its own
+# HEAD, has no code path left that could ever defer to it.
 # =============================================================================
 F_F="$TMPROOT/advf-main"
 git_init_repo "$F_F"
@@ -954,25 +907,19 @@ else
 fi
 
 # =============================================================================
-# ADV-I — QA ADVERSARIAL (round 4): SEC-1's ledger-proof requirement is
-# FABRICABLE. The comment at the guard's own definition claims a trusted
-# candidate's ledger line is "proof its gate has genuinely run against the
-# exact state it is in right now" — but the implementation only checks that
-# SOME line with the right shape and a matching `sha` exists in a file the
-# SAME gated agent fully controls (`$CUR_WT_PATH/.quetrex/verify-ledger.jsonl`
-# is an ordinary, writable file inside the decoy worktree the agent itself
-# just created). Nothing binds that line to an actual `verify-gate.sh`
-# invocation: `git worktree add -b claude/x decoy` (one allow-listed command)
-# followed by ONE handwritten JSON line with `sha` set to the decoy's own
-# HEAD is sufficient — no chain command is ever genuinely run, anywhere.
-# This is functionally a wider hole than the ORIGINAL pre-SEC-1 defect: it
-# reduces "manufacture the skip" from one command to two, while the fix's own
-# header comment claims the opposite (that manufacturing now requires a
-# GENUINE hook run). Bounded by the pre-existing CONTAINMENT guarantee (main's
-# OWN ledger still gains zero lines, so merge-gate GATE 3 still denies — see
-# the direct file/merge-gate inspection in QA's report), which is why this is
-# a Stop-gate integrity defect and not a proven merge-level escape, exactly
-# like the class of finding QA has raised at every prior round.
+# ADV-I — ANTI-REINTRODUCTION CONTROL (was: QA ADVERSARIAL round 4, SEC-1's
+# ledger-proof requirement proven FABRICABLE). The deleted guard's comment
+# claimed a trusted candidate's ledger line was "proof its gate has genuinely
+# run against the exact state it is in right now" — but the implementation
+# only ever checked that SOME line with the right shape and a matching `sha`
+# existed in a file the SAME gated agent fully controlled. Nothing bound that
+# line to an actual `verify-gate.sh` invocation: `git worktree add -b
+# claude/x decoy` (one allow-listed command) followed by ONE handwritten JSON
+# line with `sha` set to the decoy's own HEAD was sufficient — no chain
+# command ever genuinely ran, anywhere. No attestation scheme can close this
+# class (any secret the check reads is readable by the agent it polices), so
+# the mechanism itself is gone: a hand-fabricated ledger line in a decoy now
+# has no code path left that could ever authorize a skip.
 # =============================================================================
 F_I="$TMPROOT/advi-main"
 git_init_repo "$F_I"
@@ -1013,6 +960,92 @@ if [ "$AFTER_I" = "$((BEFORE_I + 1))" ]; then
   pass "ADV-I: exactly 1 ledger line appended in main (chain genuinely ran there)"
 else
   fail "ADV-I: ledger did not gain a line in main ($BEFORE_I -> $AFTER_I)"
+fi
+
+# =============================================================================
+# ADV-J — QA rung 12, scenario S5, ANTI-REINTRODUCTION CONTROL: an ABANDONED
+# worktree that WAS legitimately, genuinely proven at some point (its own
+# Stop hook really did fire, really did write a ledger line sha-pinned to
+# its OWN HEAD at the time) but was never torn down afterwards. This is the
+# reviewer's own "benign case that matters most in practice": nothing
+# malicious happened here, a developer simply forgot `git worktree remove`.
+# Under the deleted guard this genuine, once-real proof would go on
+# authorizing the main-checkout skip FOREVER (as long as the worktree's HEAD
+# never moved again), silently disabling main's own gate indefinitely with
+# no expiry and no re-verification. That whole mechanism is gone: a
+# genuinely-once-proven-but-abandoned worktree now has no code path left
+# that could defer main's chain to it, no matter how real its old proof was.
+# =============================================================================
+F_J="$TMPROOT/advj-main"
+git_init_repo "$F_J"
+mkdir -p "$F_J/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F_J/.quetrex/project.json"
+printf '{"verify":["false"]}' > "$F_J/.quetrex/verify.json"
+git -C "$F_J" add .quetrex/project.json .quetrex/verify.json
+git -C "$F_J" commit -q -m "chore: add quetrex config"
+DECOY_J="${F_J}-decoy"
+git -C "$F_J" worktree add -q -b claude/abandoned-adv-j "$DECOY_J" >/dev/null 2>&1
+# Genuinely prove the worktree ONCE, exactly like a real pipeline run would:
+# invoke the hook for real inside it, so its own ledger really does gain a
+# line sha-pinned to its own (current, at-the-time) HEAD.
+run_hook "$DECOY_J" "Stop" >/dev/null 2>&1 || true
+# Simulate abandonment: the worktree is never torn down (no `git worktree
+# remove`), and its HEAD never moves again — the exact condition under which
+# the deleted guard's proof would have stayed "valid" forever.
+
+LEDGER_J="$F_J/.quetrex/verify-ledger.jsonl"
+BEFORE_J="$(line_count "$LEDGER_J")"
+OUTJ="$(run_hook "$F_J" "Stop" 2>&1)"; CODEJ=$?
+BLOCKSJ="$(count_block_decisions "$OUTJ")"
+SKIPSJ="$(count_skip_lines "$OUTJ")"
+AFTER_J="$(line_count "$LEDGER_J")"
+
+if [ "$SKIPSJ" = "0" ]; then
+  pass "ADV-J: an abandoned, once-genuinely-proven worktree does NOT trigger VERIFY SKIPPED"
+else
+  fail "ADV-J: main deferred forever to a genuinely-proven-but-abandoned worktree (out: [$OUTJ])"
+fi
+if [ "$CODEJ" -eq 0 ] && [ "$BLOCKSJ" = "1" ]; then
+  pass "ADV-J: the main checkout ran its own chain and blocked on the real failure"
+else
+  fail "ADV-J: expected exit 0 + 1 block decision from main, got exit $CODEJ blocks $BLOCKSJ (out: [$OUTJ])"
+fi
+if [ "$AFTER_J" = "$((BEFORE_J + 1))" ]; then
+  pass "ADV-J: exactly 1 ledger line appended in main (chain genuinely ran there)"
+else
+  fail "ADV-J: ledger did not gain a line in main ($BEFORE_J -> $AFTER_J)"
+fi
+
+# =============================================================================
+# AC10 — SOURCE-LEVEL PROOF the main-checkout deferral is GONE, not merely
+# unreachable. The runtime proof that no filesystem state can ungate the main
+# checkout lives in ADV-A (stale entry), ADV-E (fresh decoy), ADV-F (evil/
+# prefix decoy with genuine proof) ADV-I (hand-fabricated ledger line) and
+# ADV-J (abandoned-but-once-proven worktree) above — all five already assert
+# exit 0, exactly 1 block decision, 0 VERIFY SKIPPED lines, and the ledger
+# gaining exactly 1 line against the MAIN checkout. This section proves the
+# removal at the source level: the guard's own vocabulary must not appear in
+# the hook AT ALL, and the file must be measurably smaller.
+# =============================================================================
+HOOK_SRC="$REPO_ROOT/.claude/hooks/verify-gate.sh"
+for needle in 'git worktree list' '--git-common-dir' 'QUETREX_VERIFY_FORCE' 'MAIN checkout'; do
+  n="$(grep -c -- "$needle" "$HOOK_SRC" 2>/dev/null)"
+  n="${n:-0}"
+  if [ "$n" = "0" ]; then
+    pass "AC10: '$needle' does not appear anywhere in verify-gate.sh (0 occurrences)"
+  else
+    fail "AC10: '$needle' still appears in verify-gate.sh ($n occurrence(s)) — the deferral is not fully removed"
+  fi
+done
+
+HOOK_LINES="$(wc -l < "$HOOK_SRC" | tr -d ' ')"
+OLD_HOOK_LINES="$(git -C "$REPO_ROOT" show 63bb114:.claude/hooks/verify-gate.sh 2>/dev/null | wc -l | tr -d ' ')"
+case "$OLD_HOOK_LINES" in ''|0|*[!0-9]*) OLD_HOOK_LINES=724 ;; esac
+DELTA=$((OLD_HOOK_LINES - HOOK_LINES))
+if [ "$DELTA" -ge 80 ]; then
+  pass "AC10: verify-gate.sh is at least 80 lines shorter than at 63bb114 (delta $DELTA)"
+else
+  fail "AC10: verify-gate.sh is only $DELTA lines shorter than at 63bb114 (need >= 80)"
 fi
 
 # =============================================================================

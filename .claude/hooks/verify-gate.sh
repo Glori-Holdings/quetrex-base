@@ -62,8 +62,6 @@
 #
 # The ONLY conditions that allow finish without a block:
 #   - not a git repo / no verify chain resolvable anywhere (nothing to gate), or
-#   - the ROOT is the MAIN checkout and pipeline work lives in a linked
-#     worktree (see "NO MAIN-CHECKOUT RUNS" below) -> nothing runs, or
 #   - the chain resolved AND every command either exited 0 or was declaratively
 #     SKIPPED for a genuinely-absent required env var (PROVEN green by exit
 #     codes; a skip is never itself a pass — see "DECLARATIVE ENV SKIP").
@@ -81,26 +79,22 @@
 # at 3 lines, so an agent's closing message can report the summary and the log
 # path without ever pasting a stack trace back at the operator.
 #
-# NO MAIN-CHECKOUT RUNS. If ROOT is the repo's MAIN checkout (not a linked
-# worktree) and it has >= 1 linked worktree on a branch matching the project's
-# `branchPrefix` (from `git show HEAD:.quetrex/project.json` — a COMMITTED
-# read, default "claude/") the chain is NOT executed here — the pipeline's
-# real work lives in that worktree, which runs its own gate. A candidate
-# worktree is trusted ONLY when it is PROVEN, not merely present: its own
-# `.quetrex/verify-ledger.jsonl` must hold at least one line sha-pinned to its
-# OWN current HEAD, i.e. its own Stop/SubagentStop gate has genuinely fired
-# against the exact state it is in right now. This closes the gated agent's
-# own ability to manufacture the skip with a single allow-listed
-# `git worktree add -b claude/x decoy` (a fresh worktree has zero ledger
-# lines) while still letting a real, already-self-verified pipeline worktree
-# be deferred to — the same sha-pinning discipline this file and
-# merge-gate.sh already use everywhere else. If NO live worktree satisfies
-# every condition, the chain runs HERE instead (fail closed — never guess).
-# The hook allows the finish and prints one plain "VERIFY SKIPPED" line naming
-# the checkout, the branch, the worktree it deferred to, and that it blocks
-# nothing. Set QUETREX_VERIFY_FORCE=1 to force the chain to run in the main
-# checkout anyway (e.g. CI; `.github/workflows/verify.yml` runs the chain
-# directly and is unaffected since it never has a linked pipeline worktree).
+# THERE IS NO PRIMARY-CHECKOUT DEFERRAL. This hook used to skip the chain in
+# the repo's primary checkout whenever a linked worktree on the project's
+# branchPrefix looked like it was "proven" by its own ledger. That skip was
+# removed outright (SEC-1, high): `git worktree add -b claude/x decoy` is on
+# the Bash allow-list and cost the gated agent exactly one command to
+# permanently ungate the primary checkout, and every attempted proof
+# requirement (a ledger line sha-pinned to the candidate's own HEAD) was
+# fabricable by the same agent writing a JSON line into a file it fully
+# controls, or by leaving a once-genuinely-proven worktree abandoned on disk
+# forever. No attestation scheme can fix this class: any secret the check
+# reads is readable by the agent it polices. There is now NO code path in
+# this file that skips the chain based on any worktree, branch,
+# project.json field, or environment override — every checkout, including
+# the one with no linked worktree, always runs the chain here. The only skip
+# that survives is the declarative, per-command, committed-only requiredEnv
+# skip below.
 #
 # DECLARATIVE ENV SKIP. A command whose verify.json `requiredEnv` entry names a
 # variable that is genuinely unavailable in THIS checkout is never executed —
@@ -173,94 +167,6 @@ ESCALATION="$QDIR/ESCALATION"
 # only if HEAD is unresolvable (e.g. a repo with no commits yet).
 HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
 CUR_BRANCH=$(git -C "$ROOT" branch --show-current 2>/dev/null)
-
-# --- NO MAIN-CHECKOUT RUNS --------------------------------------------------
-# If ROOT is the repo's MAIN checkout and a LINKED worktree is checked out on
-# a branch matching the project's branchPrefix, the pipeline's real work lives
-# there, not here. Running (and possibly blocking) the chain against main is
-# both wasted work and the exact scenario that convinced the operator a
-# healthy cloud build had failed. Defer entirely: run nothing, touch no
-# ledger/attempts state, allow the finish, and say so in one plain line.
-# QUETREX_VERIFY_FORCE=1 forces the chain to run here regardless (CI never
-# has a linked pipeline worktree, so it is unaffected either way).
-if [ "${QUETREX_VERIFY_FORCE:-0}" != "1" ]; then
-  MAIN_GITDIR=$(git -C "$ROOT" rev-parse --path-format=absolute --git-dir 2>/dev/null)
-  MAIN_COMMONDIR=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
-  if [ -n "$MAIN_GITDIR" ] && [ "$MAIN_GITDIR" = "$MAIN_COMMONDIR" ]; then
-    # branchPrefix is read from the COMMITTED blob (SEC-1), never the
-    # working-tree file: the working-tree copy is editable by the very agent
-    # this skip gates, so an agent could otherwise widen or redirect the
-    # prefix match to whatever decoy branch it just created. Fail closed to
-    # the built-in default "claude/" if project.json is unreadable at HEAD —
-    # the SAME default this hook has always used, not a widening.
-    BRANCH_PREFIX="claude/"
-    if command -v jq >/dev/null 2>&1; then
-      PROJECT_JSON_COMMITTED=$(git -C "$ROOT" show "HEAD:.quetrex/project.json" 2>/dev/null)
-      if [ -n "$PROJECT_JSON_COMMITTED" ]; then
-        P=$(printf '%s' "$PROJECT_JSON_COMMITTED" | jq -r '.branchPrefix // empty' 2>/dev/null)
-        [ -n "$P" ] && BRANCH_PREFIX="$P"
-      fi
-    fi
-    # A candidate must satisfy ALL of the following before it is trusted:
-    #
-    #   1. LIVE — its directory actually exists on disk (SEC/ADV-A). `git
-    #      worktree list` keeps reporting a linked worktree's registration
-    #      even after its directory was removed by hand (`rm -rf` instead of
-    #      `git worktree remove`) — it is only dropped by an explicit
-    #      `git worktree prune`. Deferring to a path that no longer exists
-    #      would mean the chain runs NOWHERE.
-    #   2. BRANCH-MATCHING — its branch matches the COMMITTED branchPrefix.
-    #   3. PROVEN, not merely present (SEC-1). Liveness + a branch-prefix
-    #      match alone are attacker-manufacturable: `git worktree add
-    #      -b claude/x decoy` is on the Bash allow-list and costs the gated
-    #      agent exactly one command. A freshly created worktree has NEVER
-    #      had its own Stop/SubagentStop hook fire, so it has ZERO lines in
-    #      its own verify-ledger.jsonl. A candidate is therefore trusted only
-    #      when its OWN ledger holds at least one line sha-pinned to its OWN
-    #      current HEAD — proof its gate has genuinely run against the exact
-    #      state it is in right now. The line need not be green: a worktree
-    #      whose own gate is actively blocking it is still genuinely running
-    #      its own gate, which is exactly what "defer to it" requires. This
-    #      is the same sha-pinning discipline this file and merge-gate.sh
-    #      already use everywhere else, so a worktree that is torn down or
-    #      whose HEAD has moved past its last proof no longer qualifies — it
-    #      cannot supply a rubber-stamp for NEW, unproven state, only for
-    #      exactly the state it already proved.
-    #
-    # If NO live worktree satisfies every condition, the loop leaves WT_PATH
-    # empty and the chain runs HERE (fail closed — never guess).
-    WT_PATH=""; WT_BRANCH=""
-    CUR_WT_PATH=""
-    while IFS= read -r wtline; do
-      case "$wtline" in
-        "worktree "*) CUR_WT_PATH="${wtline#worktree }" ;;
-        "branch refs/heads/"*)
-          if [ -n "$CUR_WT_PATH" ] && [ "$CUR_WT_PATH" != "$ROOT" ] && [ -d "$CUR_WT_PATH" ]; then
-            b="${wtline#branch refs/heads/}"
-            case "$b" in
-              "$BRANCH_PREFIX"*)
-                CAND_HEAD=$(git -C "$CUR_WT_PATH" rev-parse HEAD 2>/dev/null)
-                CAND_LEDGER="$CUR_WT_PATH/.quetrex/verify-ledger.jsonl"
-                if [ -n "$CAND_HEAD" ] && [ -f "$CAND_LEDGER" ] && command -v jq >/dev/null 2>&1 \
-                   && jq -e -s --arg sha "$CAND_HEAD" 'any(.[]?; .sha == $sha)' "$CAND_LEDGER" >/dev/null 2>&1; then
-                  WT_PATH="$CUR_WT_PATH"
-                  WT_BRANCH="$b"
-                fi
-                ;;
-            esac
-          fi
-          ;;
-      esac
-      [ -n "$WT_PATH" ] && break
-    done < <(git -C "$ROOT" worktree list --porcelain 2>/dev/null)
-
-    if [ -n "$WT_PATH" ]; then
-      printf 'VERIFY SKIPPED: verification chain not run in the MAIN checkout %s (branch %s) — pipeline work is in worktree %s (branch %s), which runs its own gate. BLOCKS nothing.\n' \
-        "$ROOT" "${CUR_BRANCH:-<detached>}" "$WT_PATH" "$WT_BRANCH"
-      exit 0
-    fi
-  fi
-fi
 
 # On SubagentStop we may run a QUICK subset chain if the project defines one.
 # QUICK_NOTE is set when a declared verifyQuick was REJECTED for not being a
