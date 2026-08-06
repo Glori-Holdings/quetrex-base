@@ -548,6 +548,89 @@ else
   fail "AC7: expected exit 0, got $CODE7"
 fi
 
+# =============================================================================
+# ADV-A — QA ADVERSARIAL: a STALE/PRUNABLE linked-worktree entry (the worktree
+# directory was removed with `rm -rf` instead of `git worktree remove`, so
+# `git worktree list --porcelain` still reports it) must NOT trigger the
+# main-checkout skip. Nothing runs its own gate at a path that no longer
+# exists, so deferring to it is a silent fail-open: a genuinely red chain in
+# main would never be proven anywhere.
+# =============================================================================
+MAIN_A="$TMPROOT/adva-main"
+git_init_repo "$MAIN_A"
+mkdir -p "$MAIN_A/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$MAIN_A/.quetrex/project.json"
+printf '{"verify":["false"]}' > "$MAIN_A/.quetrex/verify.json"
+git -C "$MAIN_A" add .quetrex/project.json .quetrex/verify.json
+git -C "$MAIN_A" commit -q -m "chore: add quetrex config"
+WT_A="${MAIN_A}-wt"
+git -C "$MAIN_A" worktree add -q -b claude/T-stale-adv "$WT_A" >/dev/null 2>&1
+# Simulate a botched teardown: the worktree dir is gone but git still lists
+# the (now prunable) entry until an explicit `git worktree prune` runs.
+rm -rf "$WT_A"
+
+LEDGER_A="$MAIN_A/.quetrex/verify-ledger.jsonl"
+BEFORE_A="$(line_count "$LEDGER_A")"
+OUTA="$(run_hook "$MAIN_A" "Stop" 2>&1)"; CODEA=$?
+BLOCKSA="$(count_block_decisions "$OUTA")"
+SKIPSA="$(count_skip_lines "$OUTA")"
+AFTER_A="$(line_count "$LEDGER_A")"
+
+if [ "$SKIPSA" = "0" ]; then
+  pass "ADV-A: a stale/prunable worktree entry (dir gone, git still lists it) does NOT trigger VERIFY SKIPPED"
+else
+  fail "ADV-A: a stale/prunable worktree entry incorrectly deferred to a non-existent path — verification ran NOWHERE (out: [$OUTA])"
+fi
+if [ "$CODEA" -eq 0 ] && [ "$BLOCKSA" = "1" ]; then
+  pass "ADV-A: the main checkout ran the chain itself and blocked on the real failure"
+else
+  fail "ADV-A: expected exit 0 + 1 block decision from main (no live worktree to defer to), got exit $CODEA blocks $BLOCKSA (out: [$OUTA])"
+fi
+if [ "$AFTER_A" = "$((BEFORE_A + 1))" ]; then
+  pass "ADV-A: exactly 1 ledger line appended (chain genuinely ran somewhere)"
+else
+  fail "ADV-A: ledger did not gain a line — the chain ran NOWHERE ($BEFORE_A -> $AFTER_A)"
+fi
+
+# =============================================================================
+# ADV-B — QA ADVERSARIAL: requiredEnv's `.env.example` declaration must be a
+# TRACKED file (per .quetrex/plan/VERIFY-GATE-QUIET.json security_surface
+# constraint #2: "visible in a reviewed diff"). An UNTRACKED .env.example
+# sitting on disk (never `git add`ed) must NOT be honored as the repo's
+# declaration of required config — otherwise an agent (running under
+# bypassPermissions) could drop an invisible file that never appears in any
+# reviewed diff and use it to skip a command whose real failure should block.
+# =============================================================================
+F_B="$TMPROOT/advb"
+git_init_repo "$F_B"
+mkdir -p "$F_B/.quetrex"
+jq -cn '{verify:["true","false"],requiredEnv:{"false":["FIXTURE_DB_URL"]}}' \
+  > "$F_B/.quetrex/verify.json"
+# .env.example exists on disk but is deliberately left UNTRACKED (no git add).
+printf 'FIXTURE_DB_URL=\n' > "$F_B/.env.example"
+UNTRACKED_B="$(git -C "$F_B" status --porcelain -- .env.example)"
+if [ -n "$UNTRACKED_B" ]; then
+  pass "ADV-B: fixture sanity check — .env.example is genuinely untracked ($UNTRACKED_B)"
+else
+  fail "ADV-B: fixture setup bug — .env.example unexpectedly tracked"
+fi
+
+LEDGER_B="$F_B/.quetrex/verify-ledger.jsonl"
+OUTB="$(run_hook "$F_B" "Stop" 2>&1)"; CODEB=$?
+BLOCKSB="$(count_block_decisions "$OUTB")"
+SKIPSB="$(count_skip_lines "$OUTB")"
+
+if [ "$SKIPSB" = "0" ]; then
+  pass "ADV-B: an UNTRACKED .env.example does not authorize a requiredEnv skip"
+else
+  fail "ADV-B: an untracked (never-reviewed) .env.example was honored to skip \`false\` — requiredEnv can be escaped invisibly (out: [$OUTB])"
+fi
+if [ "$CODEB" -eq 0 ] && [ "$BLOCKSB" = "1" ]; then
+  pass "ADV-B: the command still ran and its real failure still blocked"
+else
+  fail "ADV-B: expected exit 0 + 1 block decision, got exit $CODEB blocks $BLOCKSB (out: [$OUTB])"
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "verify-gate.test.sh: all checks passed"
