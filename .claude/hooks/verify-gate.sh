@@ -50,6 +50,9 @@
 #      arbitrary REPLACEMENT for the chain (`verifyQuick:["true"]` passes every
 #      SubagentStop). On any mismatch the quick chain is discarded, the FULL
 #      verify[] chain runs, and the block reason says why.
+#      An OPTIONAL sibling field, `requiredEnv`, declares per-command env
+#      dependencies: {"requiredEnv": {"<exact command string from verify[]>":
+#      ["VAR_NAME", ...]}}. See "DECLARATIVE ENV SKIP" below.
 #   2. $ROOT/.claude/CLAUDE.md      "## Verification" fenced command block
 #   3. autodetect (package.json scripts / Makefile / pyproject / go.mod / Cargo)
 # If none resolves, there is nothing to gate -> allow finish (exit 0).
@@ -59,12 +62,55 @@
 #
 # The ONLY conditions that allow finish without a block:
 #   - not a git repo / no verify chain resolvable anywhere (nothing to gate), or
-#   - the chain resolved AND every command exited 0 (PROVEN green by exit codes).
+#   - the ROOT is the MAIN checkout and pipeline work lives in a linked
+#     worktree (see "NO MAIN-CHECKOUT RUNS" below) -> nothing runs, or
+#   - the chain resolved AND every command either exited 0 or was declaratively
+#     SKIPPED for a genuinely-absent required env var (PROVEN green by exit
+#     codes; a skip is never itself a pass — see "DECLARATIVE ENV SKIP").
 #
 # Contract: Stop/SubagentStop hooks BLOCK via {"decision":"block","reason":...}
 # printed on EXIT 0. Printing block JSON then exiting non-zero DISCARDS the JSON.
 # This script therefore always `exit 0` after emitting, and emits nothing to
 # stdout when it allows the finish.
+#
+# QUIET OUTPUT (no raw interpreter stack traces to the operator). A failing
+# command's full captured stdout+stderr is written to $ROOT/.quetrex/verify-gate.log
+# (mode 600, one run's worth per invocation) and NEVER interpolated into the
+# block reason. The reason is a short, labelled summary (what ran, which
+# checkout/branch, whether it BLOCKS) that references the log by path, capped
+# at 3 lines, so an agent's closing message can report the summary and the log
+# path without ever pasting a stack trace back at the operator.
+#
+# NO MAIN-CHECKOUT RUNS. If ROOT is the repo's MAIN checkout (not a linked
+# worktree) and it has >= 1 linked worktree on a branch matching the project's
+# `branchPrefix` (from $ROOT/.quetrex/project.json, default "claude/"), the
+# chain is NOT executed here — the pipeline's real work lives in that
+# worktree, which runs its own gate. The hook allows the finish and prints one
+# plain "VERIFY SKIPPED" line naming the checkout, the branch, the worktree it
+# deferred to, and that it blocks nothing. Set QUETREX_VERIFY_FORCE=1 to force
+# the chain to run in the main checkout anyway (e.g. CI, `.github/workflows/verify.yml`
+# runs the chain directly and is unaffected since it never has a linked
+# pipeline worktree).
+#
+# DECLARATIVE ENV SKIP. A command whose verify.json `requiredEnv` entry names a
+# variable that is genuinely unavailable in THIS checkout is never executed —
+# it is skipped pre-flight and reported with one plain "VERIFY SKIPPED" line
+# naming the variable (never its value). This is PRE-FLIGHT and DECLARATIVE
+# ONLY: it is never inferred by pattern-matching a command's output (that would
+# be exactly the env-error laundering banned above). A skip fires ONLY when
+# ALL of the following hold, so `requiredEnv` cannot be used to weaken the gate:
+#   1. the command is byte-for-byte the one currently being run from the chain
+#      (which is itself drawn from verify[], or an enforced subset of it);
+#   2. the variable name also appears as a NAME= key in a tracked
+#      $ROOT/.env.example or $ROOT/.env.sample (the repo itself must declare it
+#      as required config, visible in a reviewed diff);
+#   3. the variable is unset-or-empty in the hook's own environment AND is not
+#      a key in any of $ROOT/.env, .env.local, .env.development, .env.test that
+#      exist in this checkout (those are dotenv-loaded at runtime, so their
+#      presence means the command would have had the value).
+# A skip writes NO ledger line for that command (it is not a pass), and a run
+# that skipped anything must NOT clear a prior .quetrex/ESCALATION — only a run
+# where every chain command genuinely executed and exited 0 may clear one.
 
 set -uo pipefail
 
@@ -102,6 +148,53 @@ ESCALATION="$QDIR/ESCALATION"
 # never authorize a merge of a NEWER HEAD (closes the stale-green hole). Empty
 # only if HEAD is unresolvable (e.g. a repo with no commits yet).
 HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
+CUR_BRANCH=$(git -C "$ROOT" branch --show-current 2>/dev/null)
+
+# --- NO MAIN-CHECKOUT RUNS --------------------------------------------------
+# If ROOT is the repo's MAIN checkout and a LINKED worktree is checked out on
+# a branch matching the project's branchPrefix, the pipeline's real work lives
+# there, not here. Running (and possibly blocking) the chain against main is
+# both wasted work and the exact scenario that convinced the operator a
+# healthy cloud build had failed. Defer entirely: run nothing, touch no
+# ledger/attempts state, allow the finish, and say so in one plain line.
+# QUETREX_VERIFY_FORCE=1 forces the chain to run here regardless (CI never
+# has a linked pipeline worktree, so it is unaffected either way).
+if [ "${QUETREX_VERIFY_FORCE:-0}" != "1" ]; then
+  MAIN_GITDIR=$(git -C "$ROOT" rev-parse --path-format=absolute --git-dir 2>/dev/null)
+  MAIN_COMMONDIR=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+  if [ -n "$MAIN_GITDIR" ] && [ "$MAIN_GITDIR" = "$MAIN_COMMONDIR" ]; then
+    BRANCH_PREFIX="claude/"
+    if [ -f "$QDIR/project.json" ] && command -v jq >/dev/null 2>&1; then
+      P=$(jq -r '.branchPrefix // empty' "$QDIR/project.json" 2>/dev/null)
+      [ -n "$P" ] && BRANCH_PREFIX="$P"
+    fi
+    WT_PATH=""; WT_BRANCH=""
+    CUR_WT_PATH=""
+    while IFS= read -r wtline; do
+      case "$wtline" in
+        "worktree "*) CUR_WT_PATH="${wtline#worktree }" ;;
+        "branch refs/heads/"*)
+          if [ -n "$CUR_WT_PATH" ] && [ "$CUR_WT_PATH" != "$ROOT" ]; then
+            b="${wtline#branch refs/heads/}"
+            case "$b" in
+              "$BRANCH_PREFIX"*)
+                WT_PATH="$CUR_WT_PATH"
+                WT_BRANCH="$b"
+                ;;
+            esac
+          fi
+          ;;
+      esac
+      [ -n "$WT_PATH" ] && break
+    done < <(git -C "$ROOT" worktree list --porcelain 2>/dev/null)
+
+    if [ -n "$WT_PATH" ]; then
+      printf 'VERIFY SKIPPED: verification chain not run in the MAIN checkout %s (branch %s) — pipeline work is in worktree %s (branch %s), which runs its own gate. BLOCKS nothing.\n' \
+        "$ROOT" "${CUR_BRANCH:-<detached>}" "$WT_PATH" "$WT_BRANCH"
+      exit 0
+    fi
+  fi
+fi
 
 # On SubagentStop we may run a QUICK subset chain if the project defines one.
 # QUICK_NOTE is set when a declared verifyQuick was REJECTED for not being a
@@ -194,7 +287,9 @@ resolve_from_verify_json() {
           (.verifyQuick - ((.verify // []) | if type == "array" then . else [] end))
           | map("`" + (. | tostring) + "`") | join(", ")
         ' "$f" 2>/dev/null)
-      QUICK_NOTE=$(printf '\n\nNOTE: .quetrex/verify.json declares a `verifyQuick` chain that is NOT a subset of `verify` (offending entr(y/ies): %s). A quick chain may only NARROW the full chain, never introduce commands it does not contain, so verifyQuick was IGNORED and the FULL `verify` chain was run. Fix verify.json so every verifyQuick entry appears verbatim in verify.' \
+      # Kept to a single line (no embedded newlines) so it can be appended to
+      # a block reason without breaking the <=3-line quiet-output budget.
+      QUICK_NOTE=$(printf ' NOTE: verifyQuick in verify.json is not a subset of verify (offending: %s); ran the FULL verify chain instead.' \
         "${foreign:-<unparseable>}")
     fi
   fi
@@ -283,6 +378,77 @@ resolve_from_verify_json || resolve_from_claude_md || resolve_autodetect || {
 
 mkdir -p "$QDIR"
 
+# --- full-output log (QUIET fix part a) -------------------------------------
+# Every command's FULL captured stdout+stderr is written here, never into the
+# block reason. Recreated fresh each run so it always reflects THIS attempt.
+# Mode 600 from creation: a failing build's output can contain values it
+# echoed (the observed case was a database URL), so this file must never be
+# group/world readable and must never be referenced by anything that stages
+# files (it stays untracked under $ROOT/.quetrex/, which is gitignored).
+LOG="$QDIR/verify-gate.log"
+( umask 077; : > "$LOG" ) 2>/dev/null
+chmod 600 "$LOG" 2>/dev/null
+
+# --- DECLARATIVE ENV SKIP (fix part c) --------------------------------------
+# Pre-flight only — NEVER inferred from a command's output. Returns 0 (skip)
+# and sets MISSING_ENV_VAR when `cmd` has a requiredEnv entry in verify.json
+# and every constraint in the header comment is satisfied; returns 1 (run it)
+# otherwise, which is the fail-closed default for anything ambiguous.
+MISSING_ENV_VAR=""
+should_skip_for_env() {
+  local cmd="$1" f="$QDIR/verify.json"
+  MISSING_ENV_VAR=""
+  [ -f "$f" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  # Constraint 1: `cmd` must be a byte-for-byte member of the RAW .verify[]
+  # array (checked independently here, mirroring the existing verifyQuick
+  # subset enforcement above) AND requiredEnv must declare vars for that exact
+  # key. A foreign/typo'd requiredEnv key that happens not to equal any
+  # verify[] entry simply cannot skip anything.
+  jq -e --arg c "$cmd" '((.verify // []) | index($c)) != null' "$f" >/dev/null 2>&1 || return 1
+  local vars
+  vars=$(jq -r --arg c "$cmd" '
+      if (.requiredEnv // {}) | type == "object"
+      then (.requiredEnv[$c] // []) | if type == "array" then .[] else empty end
+      else empty end
+    ' "$f" 2>/dev/null)
+  [ -n "$vars" ] || return 1
+  local v
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    # Only ever treat well-formed shell identifiers as candidates; anything
+    # else cannot be safely looked up and must never authorize a skip.
+    case "$v" in
+      [A-Za-z_]*) : ;;
+      *) continue ;;
+    esac
+    case "$v" in *[!A-Za-z0-9_]*) continue ;; esac
+    # Constraint 2: the repo itself must declare this as required config.
+    if ! grep -qE "^${v}=" "$ROOT/.env.example" 2>/dev/null \
+       && ! grep -qE "^${v}=" "$ROOT/.env.sample" 2>/dev/null; then
+      continue
+    fi
+    # Constraint 3a: unset-or-empty in the hook's own environment.
+    local val="${!v-}"
+    [ -z "$val" ] || continue
+    # Constraint 3b: not a key in any local dotenv file that would be loaded
+    # at runtime (their presence means the command would have had the value).
+    local envfile skip_this=0
+    for envfile in "$ROOT/.env" "$ROOT/.env.local" "$ROOT/.env.development" "$ROOT/.env.test"; do
+      if [ -f "$envfile" ] && grep -qE "^${v}=" "$envfile" 2>/dev/null; then
+        skip_this=1
+        break
+      fi
+    done
+    [ "$skip_this" -eq 0 ] || continue
+    MISSING_ENV_VAR="$v"
+    return 0
+  done <<EOF
+$vars
+EOF
+  return 1
+}
+
 # --- run the chain ---------------------------------------------------------
 # Always run — no fast-skip, no stale-green. Every non-zero exit is RED. There
 # is no env-error laundering: a command that exits non-zero fails the gate even
@@ -290,6 +456,8 @@ mkdir -p "$QDIR"
 # found". Missing tooling/deps are handed to the agent to fix (bounded), not
 # excused into a green finish.
 RED=0
+SKIPPED=0
+SKIP_LINES=""
 FAILED_CMD=""
 FAILED_TAIL=""
 FAILED_CODE=0
@@ -326,6 +494,17 @@ run_with_cap() {
 BUDGET_START=$(date +%s)
 
 for cmd in "${CHAIN[@]}"; do
+  if should_skip_for_env "$cmd"; then
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    {
+      printf '=== %s | SKIPPED (requiredEnv %s unavailable) | cmd: %s | cwd: %s ===\n' \
+        "$ts" "$MISSING_ENV_VAR" "$cmd" "$ROOT"
+    } >> "$LOG" 2>/dev/null
+    SKIPPED=1
+    SKIP_LINES="${SKIP_LINES}VERIFY SKIPPED: \`${cmd}\` not run in ${ROOT} — required env var ${MISSING_ENV_VAR} is unavailable in this checkout (declared in .env.example, unset here). BLOCKS nothing; the command is never proven and never counted as a pass.
+"
+    continue
+  fi
   now=$(date +%s)
   remaining=$((BUDGET_TOTAL - (now - BUDGET_START)))
   if [ "$remaining" -le 0 ]; then
@@ -346,6 +525,13 @@ TIMEOUT: this command exceeded its ${remaining}s share of the ${BUDGET_TOTAL}s v
   fi
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   t20=$(tail20 "$out")
+
+  # Full, UNTRUNCATED output goes to the log file only — never into the block
+  # reason (that is the whole point of the quiet fix; see header comment).
+  {
+    printf '=== %s | cmd: %s | exit: %s | cwd: %s ===\n' "$ts" "$cmd" "$code" "$ROOT"
+    printf '%s\n' "$out"
+  } >> "$LOG" 2>/dev/null
 
   # Append to the append-only ledger (best-effort; failure to log never blocks).
   # `sha` pins this result to the exact commit it was proven against — the merge
@@ -371,9 +557,21 @@ done
 
 # --- decision --------------------------------------------------------------
 if [ "$RED" -eq 0 ]; then
-  echo 0 > "$ATTEMPTS_FILE" 2>/dev/null   # reset self-heal counter on green
-  rm -f "$ESCALATION" 2>/dev/null         # green clears any prior escalation
-  exit 0                                   # PROVEN green by exit codes -> finish
+  # A skip's plain "VERIFY SKIPPED" line(s) are printed ONLY on this allow
+  # path — never ahead of a block() call, whose stdout must stay pure JSON
+  # (the contract's ONLY honored block form; extra leading text risks being
+  # unparseable and read as fail-open). They are deliberately plain text,
+  # never JSON, so they can never be misread as a decision object.
+  [ -n "$SKIP_LINES" ] && printf '%s' "$SKIP_LINES"
+  # A skip is NOT a green: it proves nothing about the skipped command, so a
+  # run that skipped anything must not reset the self-heal counter or clear a
+  # prior escalation. Only a run where every chain command genuinely executed
+  # and exited 0 may do either (CONTAINMENT — see header comment / AC7).
+  if [ "$SKIPPED" -eq 0 ]; then
+    echo 0 > "$ATTEMPTS_FILE" 2>/dev/null   # reset self-heal counter on green
+    rm -f "$ESCALATION" 2>/dev/null         # green clears any prior escalation
+  fi
+  exit 0                                    # allow finish (no block JSON)
 fi
 
 # RED path — bounded self-heal.
@@ -391,13 +589,17 @@ if [ "$TIMED_OUT" -eq 1 ]; then
   TIMEOUT_NOTE=" This is a TIME-BUDGET kill: verification exceeded the ${BUDGET_TOTAL}s time budget (QUETREX_VERIFY_BUDGET) — treat as red; split or speed up the chain."
 fi
 
+# QUIET BLOCK REASONS (fix part a). One labelled summary line — what ran,
+# which checkout/branch, whether it blocks — plus a line pointing at the log
+# file. The raw command output (FAILED_TAIL) is deliberately NEVER interpolated
+# here; it lives only in $LOG, written above for every command that ran.
 if [ "$n" -lt "$MAX_ATTEMPTS" ]; then
-  block "$(printf 'VERIFY FAILED (attempt %d/%d): `%s` exited %d.%s\nYou cannot finish while the verification chain is red. Fix the cause and it will re-run on your next stop.\n\n--- last 20 lines ---\n%s%s' \
-    "$n" "$MAX_ATTEMPTS" "$FAILED_CMD" "$FAILED_CODE" "$TIMEOUT_NOTE" "$FAILED_TAIL" "$QUICK_NOTE")"
+  block "$(printf 'VERIFY FAILED (attempt %d/%d): `%s` exited %d in %s (branch %s).%s%s BLOCKS finish — fix the cause; it re-runs on your next stop.\nFull output: %s' \
+    "$n" "$MAX_ATTEMPTS" "$FAILED_CMD" "$FAILED_CODE" "$ROOT" "${CUR_BRANCH:-<detached>}" "$TIMEOUT_NOTE" "$QUICK_NOTE" "$LOG")"
 fi
 
 # Cap reached -> escalate. Persist a marker the merge gate reads so red code
 # physically cannot merge even once the agent is finally allowed to stop.
 touch "$ESCALATION" 2>/dev/null
-block "$(printf 'ESCALATE: `%s` is STILL red (exit %d) after %d self-heal attempts.%s\nSTOP self-healing now. Do NOT report this task as done. Surface this failure to the user verbatim, including the output below, and wait for direction.\n\n--- last 20 lines ---\n%s%s' \
-  "$FAILED_CMD" "$FAILED_CODE" "$MAX_ATTEMPTS" "$TIMEOUT_NOTE" "$FAILED_TAIL" "$QUICK_NOTE")"
+block "$(printf 'ESCALATE: `%s` is STILL red (exit %d) after %d self-heal attempts in %s (branch %s).%s%s BLOCKS finish — STOP self-healing.\nFull output: %s\nReport this one-line summary and the log path to the user; do NOT paste command output into your closing message. Wait for direction.' \
+  "$FAILED_CMD" "$FAILED_CODE" "$MAX_ATTEMPTS" "$ROOT" "${CUR_BRANCH:-<detached>}" "$TIMEOUT_NOTE" "$QUICK_NOTE" "$LOG")"
