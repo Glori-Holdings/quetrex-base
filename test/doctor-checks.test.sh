@@ -28,21 +28,23 @@
 # the operator's ACTIVE status line (referenced by statusLine.command in a
 # live settings.json) — and the status bar is the ONLY place the running
 # engine version is shown by design (config carries no version). Quarantining
-# it breaks the status bar. The fix removes statusline-command.sh from the
-# static candidate list entirely AND adds a generic guard: no file referenced
-# by any live settings.json statusLine.command is ever flagged, for ANY
-# candidate, not just that one name.
+# it breaks the status bar. statusline-command.sh STAYS in the candidate
+# list (an earlier fix removed it entirely — see AC29 below for why that
+# was wrong) and a generic EXACT-PATH guard suppresses only the file a live
+# settings.json statusLine.command actually targets, for ANY candidate, not
+# just that one name — a superstring or substring match must not suppress.
 #   AC-B1 (the exact reported case): statusline-command.sh exists AND is
 #          referenced by a live global statusLine.command -> never flagged.
-#   AC-B2 (unconditional removal): statusline-command.sh exists with NO
-#          settings referencing it at all -> still never flagged (it is no
-#          longer a candidate, full stop).
 #   AC-B3 (guard is generic, not name-specific): a DIFFERENT still-listed
 #          legacy candidate (team-protocol.md) that IS referenced by a live
 #          statusLine.command -> not flagged.
 #   AC-B4 (still fires correctly): that SAME candidate, existing but NOT
 #          referenced by any live statusLine.command -> IS flagged (proves
 #          the guard suppresses only genuinely-live files, not everything).
+#
+# See AC29 below for the SEC-6 correction: statusline-command.sh must stay
+# a candidate (a genuinely orphaned copy must still be reported) and the
+# guard must be exact-path, never substring.
 #
 # DEFECT C (Check 3 — npm-era command glob). `compgen -G` is a bash-only
 # builtin: under zsh it is "command not found" (exit 127), which the `if`
@@ -230,23 +232,15 @@ else
   pass "AC-B1: statusline-command.sh referenced by a live statusLine.command is never flagged"
 fi
 
-# --- AC-B2: statusline-command.sh exists with NO settings referencing it —
-# still never flagged (removed from the static list entirely).
-B2_HOME="$WORK/b2-home"
-mkdir -p "$B2_HOME/.claude"
-echo '#!/usr/bin/env bash' > "$B2_HOME/.claude/statusline-command.sh"
-
-OUT_B2="$(run_check3 "$B2_HOME" bash 2>&1)"
-if printf '%s' "$OUT_B2" | grep -q 'statusline-command.sh'; then
-  fail "AC-B2: statusline-command.sh is flagged even with no statusLine reference at all (out: [$OUT_B2])"
-else
-  pass "AC-B2: statusline-command.sh is never a candidate, even unreferenced"
-fi
-if printf '%s' "$OUT_B2" | grep -q '✓ No leftover legacy artifacts'; then
-  pass "AC-B2: Check 3 reports fully healthy for a home with only an unreferenced statusline-command.sh"
-else
-  fail "AC-B2: expected the green legacy-artifacts line (out: [$OUT_B2])"
-fi
+# AC-B2 removed: it asserted that an unreferenced statusline-command.sh is
+# NEVER flagged, which was the codified form of an earlier wrong instruction
+# ("remove it from the candidate list entirely"). The architect's re-plan
+# (AC29) corrected this: statusline-command.sh must stay a candidate so a
+# genuinely orphaned copy is still reported (the SEC-6 lost-detection case).
+# AC29 STATE 4 below is the identical fixture (statusline-command.sh present,
+# no statusLine reference anywhere) asserting the now-authoritative outcome
+# (IS flagged) — AC-B2 was a literal contradiction of it, not a
+# complementary case, so it is deleted rather than kept alongside AC29.
 
 # --- AC-B3: a DIFFERENT still-listed candidate (team-protocol.md), referenced
 # by a live statusLine.command -> the guard is generic, not name-specific.
@@ -279,16 +273,19 @@ fi
 
 # =============================================================================
 # AC29 (plan VERIFY-GATE-QUIET, workstream doctorfix) — QA-AUTHORED,
-# independent of AC-B1..AC-B4 above. The plan requires statusline-command.sh
-# RESTORED to the LEGACY candidate list (not permanently removed) with an
-# EXACT-path guard (tokenize, expand a leading ~ to $HOME, resolve, compare
-# for equality) so a genuinely stale/orphaned statusline-command.sh is still
-# detected (the SEC-6 lost-detection case) while a live statusLine.command
-# target is still suppressed. AC-B1/AC-B2 above assert the OPPOSITE of this
-# plan requirement (unconditional removal from the list) — they encode the
-# doctorfix workstream's own chosen deviation, not the plan's acceptance
-# criterion. These assertions test the plan's actual measure directly against
-# the shipped doctor.md source and a live fixture, independent of AC-B1/AC-B2.
+# independent of AC-B1/AC-B3/AC-B4 above. The plan requires
+# statusline-command.sh RESTORED to the LEGACY candidate list (not
+# permanently removed) with an EXACT-path guard (tokenize, expand a leading
+# ~ to $HOME, resolve, compare for equality) so a genuinely stale/orphaned
+# statusline-command.sh is still detected (the SEC-6 lost-detection case)
+# while a live statusLine.command target is still suppressed. AC-B1/AC-B3/
+# AC-B4 above are compatible with this and stay green under it. The former
+# AC-B2 asserted the OPPOSITE of this plan requirement (unconditional
+# removal from the list) — it encoded an earlier, wrong instruction rather
+# than the plan's acceptance criterion, contradicted AC29 STATE 4 on the
+# identical fixture, and has been deleted (see the note above DEFECT B's
+# AC-B3 section). These assertions test the plan's actual measure directly
+# against the shipped doctor.md source and a live fixture.
 # =============================================================================
 
 # --- AC29 RESTORED-TO-LIST: the plan's own source-level measure.

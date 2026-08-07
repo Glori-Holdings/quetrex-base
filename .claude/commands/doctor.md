@@ -164,13 +164,31 @@ for sf in "$SETTINGS" "$HOME_SETTINGS"; do
 $cmd"
 done
 
-is_live_statusline() {  # is_live_statusline <abs-path> -> 0 if referenced by a live statusLine.command
+is_live_statusline() {  # is_live_statusline <abs-path> -> 0 if EXACTLY targeted by
+  # a live statusLine.command (never a substring match — a command that
+  # merely CONTAINS a candidate's path, e.g. a `.bak` superstring, must not
+  # suppress the candidate).
+  local target="$1" cmd tok resolved
   [ -z "$STATUSLINE_CMDS" ] && return 1
-  printf '%s' "$STATUSLINE_CMDS" | grep -qF "$1"
+  while IFS= read -r cmd; do
+    [ -z "$cmd" ] && continue
+    for tok in $cmd; do
+      case "$tok" in
+        "~") resolved="$HOME" ;;
+        "~/"*) resolved="$HOME/${tok#\~/}" ;;
+        *) resolved="$tok" ;;
+      esac
+      [ "$resolved" = "$target" ] && return 0
+    done
+  done <<STATUSLINE_EOF
+$STATUSLINE_CMDS
+STATUSLINE_EOF
+  return 1
 }
 
 LEGACY=()
-for f in "$HOME/.claude/quetrex-doctrine.md" \
+for f in "$HOME/.claude/statusline-command.sh" \
+         "$HOME/.claude/quetrex-doctrine.md" \
          "$HOME/.claude/hooks/check-quetrex-update.sh" \
          "$HOME/.claude/hooks/enforce-merge-approval.sh" \
          "$HOME/.claude/hooks/security-check.sh" \
