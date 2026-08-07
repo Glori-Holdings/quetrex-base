@@ -315,10 +315,16 @@ if [ "$TOOLS_LINE" = "tools: Read, Grep, Glob, Write" ]; then
 else
   fail "frontmatter tools line changed (got: '${TOOLS_LINE}') — the base_sha no-Bash rationale is now stale"
 fi
-if printf '%s' "$TOOLS_LINE" | grep -qw 'Bash'; then
-  fail "frontmatter grants Bash — the base_sha rule's 'no Bash' reason no longer holds"
-else
+# GATED ON A REAL tools: LINE, not just an absence of the word "Bash" — an
+# absent-or-empty $TOOLS_LINE (no `tools:` line in the frontmatter at all)
+# would otherwise satisfy `grep -qw 'Bash'` failing to match and PASS this
+# check, when in fact nothing was verified at all. The check above already
+# fails on that shape, but this one must not independently claim proof it
+# doesn't have.
+if [ -n "$TOOLS_LINE" ] && ! printf '%s' "$TOOLS_LINE" | grep -qw 'Bash'; then
   pass "frontmatter grants no Bash (the base_sha rationale still holds)"
+else
+  fail "frontmatter grants Bash, or no 'tools:' line was found at all — the base_sha rule's 'no Bash' reason cannot be confirmed"
 fi
 
 # --- (f) Contract A actually exists — AC19. architect.md and
@@ -667,8 +673,26 @@ EOF
     verify: ["npm run build"],
     security_review_required: false, db_migration: false, impact: {}, notes: []
   }' > "$PLAN17uncommitted"
-  "$DERIVE_TOOL" plan "$PLAN17uncommitted" "$F17uncommitted" >/dev/null
+  # `plan`'s exit code and stdout are CAPTURED, not discarded: a plan that
+  # adds nothing writes {"required_env":0-length} either because it correctly
+  # saw no committed declaration, OR because the tool crashed/was never
+  # invoked/pointed at the wrong path — jq reading `.required_env // []` off
+  # an untouched plan file cannot tell those apart on its own (the plan JSON
+  # never carried a required_env key to begin with). Positively proving the
+  # REAL "0 additions" code path ran — exit 0 plus its own documented
+  # stdout message — is what closes that gap.
+  PLAN_UNCOMMITTED_OUT="$("$DERIVE_TOOL" plan "$PLAN17uncommitted" "$F17uncommitted")"; PLAN_UNCOMMITTED_CODE=$?
   UNCOMMITTED_LEN17="$(jq '.required_env // [] | length' "$PLAN17uncommitted")"
+  if [ "$PLAN_UNCOMMITTED_CODE" -eq 0 ]; then
+    pass "AC17: UNCOMMITTED — plan exits 0 (proves it ran, not merely that the file was left untouched)"
+  else
+    fail "AC17: UNCOMMITTED — expected plan to exit 0, got $PLAN_UNCOMMITTED_CODE (out: [$PLAN_UNCOMMITTED_OUT])"
+  fi
+  if printf '%s' "$PLAN_UNCOMMITTED_OUT" | grep -q 'no new required_env names to stamp'; then
+    pass "AC17: UNCOMMITTED — plan reports 'no new required_env names to stamp', proving it took the real empty-projection path"
+  else
+    fail "AC17: UNCOMMITTED — expected the 'no new required_env names to stamp' message, got [$PLAN_UNCOMMITTED_OUT]"
+  fi
   if [ "$UNCOMMITTED_LEN17" = "0" ]; then
     pass "AC17: UNCOMMITTED — an uncommitted requiredEnv edit does not reach the plan (required_env length 0)"
   else
@@ -698,8 +722,21 @@ EOF
     verify: ["npm run build"],
     security_review_required: false, db_migration: false, impact: {}, notes: []
   }' > "$PLAN17none"
-  "$DERIVE_TOOL" plan "$PLAN17none" "$F17none" >/dev/null
+  # Same capture-not-discard reasoning as the UNCOMMITTED block above: a
+  # length-0 read off an untouched plan file cannot distinguish "plan ran
+  # and correctly added nothing" from "plan never ran at all."
+  PLAN_NONE_OUT="$("$DERIVE_TOOL" plan "$PLAN17none" "$F17none")"; PLAN_NONE_CODE=$?
   NONE_LEN17="$(jq '.required_env // [] | length' "$PLAN17none")"
+  if [ "$PLAN_NONE_CODE" -eq 0 ]; then
+    pass "AC17: NO DECLARATION — plan exits 0 (proves it ran, not merely that the file was left untouched)"
+  else
+    fail "AC17: NO DECLARATION — expected plan to exit 0, got $PLAN_NONE_CODE (out: [$PLAN_NONE_OUT])"
+  fi
+  if printf '%s' "$PLAN_NONE_OUT" | grep -q 'no new required_env names to stamp'; then
+    pass "AC17: NO DECLARATION — plan reports 'no new required_env names to stamp', proving it took the real empty-projection path"
+  else
+    fail "AC17: NO DECLARATION — expected the 'no new required_env names to stamp' message, got [$PLAN_NONE_OUT]"
+  fi
   if [ "$NONE_LEN17" = "0" ]; then
     pass "AC17: NO DECLARATION — a repo with no committed requiredEnv gets required_env length 0, not an invented A_URL"
   else
