@@ -479,16 +479,18 @@ elif [ ! -f "$CLOUD_PREP" ]; then
 elif ! command -v jq >/dev/null 2>&1; then
   echo "SKIP AC17: jq is not installed — this section is jq-assisted, nothing to test"
 else
-  mk_ac17_fixture() {  # mk_ac17_fixture <dir> [with-required-env=1]
-    # with-required-env=1 (default): the committed .quetrex/verify.json
-    # carries requiredEnv {"npm run build":["A_URL"]} — the human-confirmed
-    # declaration `plan` must project from.
-    # with-required-env=0: the committed verify.json has a verify[] chain
-    # but NO requiredEnv key at all — used to prove `plan` invents nothing
-    # even though A_URL remains a genuine committed candidate (declared in
-    # .env.example, read fallback-lessly at src/db.js:3).
+  mk_ac17_fixture() {  # mk_ac17_fixture <dir> [with-declare=1]
+    # with-declare=1 (default): runs the REAL `quetrex-env-derive declare`
+    # against this fixture (--cmd "npm run build" --env A_URL) and commits
+    # the result, so `plan` has a genuine human-confirmed, committed
+    # requiredEnv declaration to project from — the actual interface, never
+    # a hand-authored JSON stand-in for what declare would have written.
+    # with-declare=0: commits verify.json with a verify[] chain but never
+    # calls declare — no requiredEnv key reaches HEAD at all, even though
+    # A_URL remains a genuine committed candidate (declared in .env.example,
+    # read fallback-lessly at src/db.js:3).
     local d="$1"
-    local with_req="${2:-1}"
+    local with_declare="${2:-1}"
     mkdir -p "$d/src"
     git -C "$d" init -q -b main
     git -C "$d" config user.email "test@example.com"
@@ -512,15 +514,15 @@ if [ -z "${A_URL:-}" ]; then exit 1; else exit 0; fi
 EOF
     chmod +x "$d/build.sh"
     mkdir -p "$d/.quetrex"
-    if [ "$with_req" = "1" ]; then
-      jq -n '{verify: ["npm run build"], requiredEnv: {"npm run build": ["A_URL"]}}' \
-        > "$d/.quetrex/verify.json"
-    else
-      jq -n '{verify: ["npm run build"]}' > "$d/.quetrex/verify.json"
-    fi
+    jq -n '{verify: ["npm run build"]}' > "$d/.quetrex/verify.json"
     git -C "$d" add -A
-    git -C "$d" commit -q -m "chore: AC17 fixture"
+    git -C "$d" commit -q -m "chore: AC17 fixture — A_URL is a committed candidate, not yet declared"
     mkdir -p "$d/.quetrex/plan"
+    if [ "$with_declare" = "1" ]; then
+      "$DERIVE_TOOL" declare "$d" --cmd "npm run build" --env A_URL >/dev/null
+      git -C "$d" add .quetrex/verify.json
+      git -C "$d" commit -q -m "declare requiredEnv for npm run build"
+    fi
   }
 
   F17="$TMPD/ac17"
@@ -651,13 +653,13 @@ EOF
   # guarantee should_skip_for_env enforces on the gate side (constraint 2):
   # a requiredEnv mapping is only ever authoritative from the COMMITTED
   # blob. Start from a fixture whose committed verify.json has NO
-  # requiredEnv key, then make an UNCOMMITTED working-tree edit that adds
-  # one — `plan` reads only `git show HEAD:.quetrex/verify.json`, never the
+  # requiredEnv key, run the REAL `declare` (which writes into the
+  # working-tree verify.json) but deliberately do NOT commit the result —
+  # `plan` reads only `git show HEAD:.quetrex/verify.json`, never the
   # working tree, so the addition must be invisible to it.
   F17uncommitted="$TMPD/ac17-uncommitted"
   mk_ac17_fixture "$F17uncommitted" 0
-  jq -n '{verify: ["npm run build"], requiredEnv: {"npm run build": ["A_URL"]}}' \
-    > "$F17uncommitted/.quetrex/verify.json"   # uncommitted edit — deliberately not `git add`ed
+  "$DERIVE_TOOL" declare "$F17uncommitted" --cmd "npm run build" --env A_URL >/dev/null  # writes the working tree; deliberately not committed
   PLAN17uncommitted="$F17uncommitted/.quetrex/plan/T-4.json"
   jq -n '{
     task: "T-4", route: "STANDARD", base_sha: "deadbeef", summary: "uncommitted fixture",
