@@ -723,6 +723,278 @@ else
   fail "AC31 NEGATIVE CONTROL: expected the mutated tool to (wrongly) accept and write outside .quetrex/plan, got exit=$CODE31NEG"
 fi
 
+# =============================================================================
+# init.md extraction helper — pulls the fenced ```bash block out from under a
+# given "### heading" line, verbatim, never retyped. Stops at the next line
+# beginning with '#' (any heading), exactly like test/doctor-checks.test.sh's
+# own extract_section convention for command-file fences.
+# =============================================================================
+extract_init_section() {  # extract_init_section <heading-prefix>
+  local heading="$1"
+  awk -v heading="$heading" '
+    index($0, heading) == 1 { insec = 1; next }
+    insec && !infence && /^#/ { exit }
+    insec && /^```bash/ { infence = 1; next }
+    insec && /^```/ { infence = 0; next }
+    insec && infence { print }
+  ' "$INIT_MD"
+}
+
+SEED_BLOCK="$(extract_init_section "### 5a. Seed")"
+GUARD_BLOCK="$(extract_init_section "### 5c. Confirm with the human")"
+
+if [ -n "$SEED_BLOCK" ]; then
+  pass "setup: extracted init.md's 5a seed block"
+else
+  fail "setup: could not extract init.md's 5a seed block"
+fi
+if [ -n "$GUARD_BLOCK" ]; then
+  pass "setup: extracted init.md's 5c non-interactive-guard block"
+else
+  fail "setup: could not extract init.md's 5c non-interactive-guard block"
+fi
+
+# =============================================================================
+# AC23 — init.md never invokes the seeder with an empty word (the permanent
+# merge-deadlock defect), closed at TWO independent layers: the caller never
+# passes an unguarded "${CONFIRMED_STEPS[@]:-}", and seed-chain itself
+# refuses an empty/blank command.
+# =============================================================================
+
+# --- SHAPE: the extracted block never uses the bare "[@]:-" idiom, and DOES
+# use an unset-safe guard form. ------------------------------------------
+BAREIDIOM23="$(printf '%s\n' "$SEED_BLOCK" | grep -c '\[@\]:-')"
+[ "$BAREIDIOM23" = "0" ] && pass "AC23 SHAPE: the extracted 5a block contains 0 occurrences of the literal '[@]:-'" \
+  || fail "AC23 SHAPE: expected 0 occurrences of '[@]:-' in the extracted block, got $BAREIDIOM23"
+GUARDFORM23="$(printf '%s\n' "$SEED_BLOCK" | grep -c '\${CONFIRMED_STEPS+set}')"
+[ "$GUARDFORM23" -ge 1 ] && pass "AC23 SHAPE: the extracted 5a block uses the unset-safe \${CONFIRMED_STEPS+set} guard" \
+  || fail "AC23 SHAPE: expected >= 1 occurrence of the unset-safe guard, got $GUARDFORM23"
+
+# --- CALLER LAYER: run the extracted block verbatim, under set -u, in three
+# states, with a counting PATH shim in front of the seeder. -----------------
+SHIMDIR="$TMPROOT/ac23-shim"
+mkdir -p "$SHIMDIR"
+cat > "$SHIMDIR/quetrex-env-derive" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "seed-chain" ]; then
+  printf '%s\n' "\$*" >> "\$QX_SEED_SHIM_LOG"
+fi
+exec "$TOOL" "\$@"
+EOF
+chmod +x "$SHIMDIR/quetrex-env-derive"
+
+run_seed_block() {  # run_seed_block <repo-root> <mode: unset|empty|four>
+  local repo="$1" mode="$2" script="$TMPROOT/ac23-run.sh"
+  {
+    printf '#!/usr/bin/env bash\nset -u\nREPO_ROOT=%q\n' "$repo"
+    case "$mode" in
+      empty) printf 'CONFIRMED_STEPS=()\n' ;;
+      four)  printf 'CONFIRMED_STEPS=("npm run a" "npm run b" "npm run c" "npm run d")\n' ;;
+      unset) : ;;
+    esac
+    printf '%s\n' "$SEED_BLOCK"
+  } > "$script"
+  PATH="$SHIMDIR:$PATH" bash "$script"
+}
+
+# state (i): CONFIRMED_STEPS unset
+F23i="$TMPROOT/ac23-i"; mkdir -p "$F23i"
+export QX_SEED_SHIM_LOG="$TMPROOT/ac23-i.log"; : > "$QX_SEED_SHIM_LOG"
+run_seed_block "$F23i" "unset" >/dev/null 2>&1
+INVOKES23I="$(grep -c . "$QX_SEED_SHIM_LOG")"
+[ "$INVOKES23I" = "0" ] && pass "AC23 CALLER (i unset): the shim records exactly 0 invocations" \
+  || fail "AC23 CALLER (i unset): expected 0 invocations, got $INVOKES23I"
+[ ! -f "$F23i/.quetrex/verify.json" ] && pass "AC23 CALLER (i unset): .quetrex/verify.json does not exist afterwards" \
+  || fail "AC23 CALLER (i unset): .quetrex/verify.json was created"
+
+# state (ii): CONFIRMED_STEPS declared empty
+F23ii="$TMPROOT/ac23-ii"; mkdir -p "$F23ii"
+export QX_SEED_SHIM_LOG="$TMPROOT/ac23-ii.log"; : > "$QX_SEED_SHIM_LOG"
+run_seed_block "$F23ii" "empty" >/dev/null 2>&1
+INVOKES23II="$(grep -c . "$QX_SEED_SHIM_LOG")"
+[ "$INVOKES23II" = "0" ] && pass "AC23 CALLER (ii empty): the shim records exactly 0 invocations" \
+  || fail "AC23 CALLER (ii empty): expected 0 invocations, got $INVOKES23II"
+[ ! -f "$F23ii/.quetrex/verify.json" ] && pass "AC23 CALLER (ii empty): .quetrex/verify.json does not exist afterwards" \
+  || fail "AC23 CALLER (ii empty): .quetrex/verify.json was created"
+
+# state (iii): CONFIRMED_STEPS holding 4 real commands
+F23iii="$TMPROOT/ac23-iii"; mkdir -p "$F23iii"
+export QX_SEED_SHIM_LOG="$TMPROOT/ac23-iii.log"; : > "$QX_SEED_SHIM_LOG"
+run_seed_block "$F23iii" "four" >/dev/null 2>&1
+INVOKES23III="$(grep -c . "$QX_SEED_SHIM_LOG")"
+[ "$INVOKES23III" = "1" ] && pass "AC23 CALLER (iii four): exactly 1 invocation" \
+  || fail "AC23 CALLER (iii four): expected exactly 1 invocation, got $INVOKES23III"
+[ -f "$F23iii/.quetrex/verify.json" ] && pass "AC23 CALLER (iii four): .quetrex/verify.json exists" \
+  || fail "AC23 CALLER (iii four): .quetrex/verify.json was not created"
+LEN23III="$(jq '.verify | length' "$F23iii/.quetrex/verify.json" 2>/dev/null)"
+[ "$LEN23III" = "4" ] && pass "AC23 CALLER (iii four): .verify|length == 4" \
+  || fail "AC23 CALLER (iii four): expected 4, got '$LEN23III'"
+EMPTY23III="$(jq '[.verify[] | select(.=="")] | length' "$F23iii/.quetrex/verify.json" 2>/dev/null)"
+[ "$EMPTY23III" = "0" ] && pass "AC23 CALLER (iii four): 0 empty entries in .verify[]" \
+  || fail "AC23 CALLER (iii four): expected 0 empty entries, got $EMPTY23III"
+unset QX_SEED_SHIM_LOG
+
+# --- TOOL LAYER: seed-chain independently refuses an empty/blank command,
+# even called directly (the second, structural backstop). -------------------
+F23tool="$TMPROOT/ac23-tool"
+git_init_repo "$F23tool"
+OUT23TOOL1="$("$TOOL" seed-chain "$F23tool" "" 2>&1)"; CODE23TOOL1=$?
+[ "$CODE23TOOL1" -ne 0 ] && pass "AC23 TOOL LAYER: seed-chain <root> \"\" exits non-zero" \
+  || fail "AC23 TOOL LAYER: expected non-zero exit for a blank command, got 0"
+[ ! -f "$F23tool/.quetrex/verify.json" ] && pass "AC23 TOOL LAYER: seed-chain <root> \"\" creates 0 files" \
+  || fail "AC23 TOOL LAYER: a file was created for a blank command"
+printf '%s\n' "$OUT23TOOL1" | grep -qi 'empty' && pass "AC23 TOOL LAYER: stderr names 'empty'" \
+  || fail "AC23 TOOL LAYER: stderr does not mention 'empty': [$OUT23TOOL1]"
+
+OUT23TOOL2="$("$TOOL" seed-chain "$F23tool" 2>&1)"; CODE23TOOL2=$?
+[ "$CODE23TOOL2" -ne 0 ] && pass "AC23 TOOL LAYER: seed-chain <root> with 0 commands exits non-zero" \
+  || fail "AC23 TOOL LAYER: expected non-zero exit for 0 commands, got 0"
+[ ! -f "$F23tool/.quetrex/verify.json" ] && pass "AC23 TOOL LAYER: 0 commands creates 0 files" \
+  || fail "AC23 TOOL LAYER: a file was created for 0 commands"
+
+F23existing="$TMPROOT/ac23-existing"
+git_init_repo "$F23existing"
+mkdir -p "$F23existing/.quetrex"
+jq -cn '{verify:["npm run build"]}' > "$F23existing/.quetrex/verify.json"
+PRE23EX="$(cat "$F23existing/.quetrex/verify.json")"
+"$TOOL" seed-chain "$F23existing" "npm run other" >/dev/null 2>&1
+POST23EX="$(cat "$F23existing/.quetrex/verify.json")"
+[ "$PRE23EX" = "$POST23EX" ] && pass "AC23 TOOL LAYER: seed-chain against an already-existing chain leaves it byte-identical" \
+  || fail "AC23 TOOL LAYER: seed-chain modified an already-existing chain"
+
+# --- DOWNSTREAM PROOF: merge-gate.sh GATE 3's own jq, evaluated against
+# every verify.json this test produced, yields 0 RED entries with .cmd=="".
+# -----------------------------------------------------------------------
+gate3_empty_cmd_count() {  # gate3_empty_cmd_count <verify.json>
+  jq '[.verify[]? | select(.=="")] | length' "$1" 2>/dev/null
+}
+DOWNSTREAM23_TOTAL=0
+for f in "$F23iii/.quetrex/verify.json" "$F23existing/.quetrex/verify.json"; do
+  [ -f "$f" ] || continue
+  n="$(gate3_empty_cmd_count "$f")"
+  DOWNSTREAM23_TOTAL=$((DOWNSTREAM23_TOTAL + n))
+done
+[ "$DOWNSTREAM23_TOTAL" = "0" ] && pass "AC23 DOWNSTREAM PROOF: 0 entries with .cmd == \"\" across every verify.json this test produced" \
+  || fail "AC23 DOWNSTREAM PROOF: found $DOWNSTREAM23_TOTAL empty-cmd entr(ies)"
+
+# --- NEGATIVE CONTROL: restoring the bare "${CONFIRMED_STEPS[@]:-}" form
+# makes state (i) record exactly 1 invocation carrying 1 empty argument. ----
+MUT_SEED_BLOCK="$(printf '%s\n' "$SEED_BLOCK" | sed -E 's/\[ "\$\{CONFIRMED_STEPS\+set\}" = "set" \] && \[ "\$\{#CONFIRMED_STEPS\[@\]\}" -gt 0 \]/true/; s/"\$\{CONFIRMED_STEPS\[@\]\}"/"\$\{CONFIRMED_STEPS[@]:-\}"/')"
+F23neg="$TMPROOT/ac23-neg"; mkdir -p "$F23neg"
+NEG_SCRIPT="$TMPROOT/ac23-neg-run.sh"
+{
+  printf '#!/usr/bin/env bash\nset -u\nREPO_ROOT=%q\n' "$F23neg"
+  printf '%s\n' "$MUT_SEED_BLOCK"
+} > "$NEG_SCRIPT"
+export QX_SEED_SHIM_LOG="$TMPROOT/ac23-neg.log"; : > "$QX_SEED_SHIM_LOG"
+PATH="$SHIMDIR:$PATH" bash "$NEG_SCRIPT" >/dev/null 2>&1
+INVOKES23NEG="$(grep -c . "$QX_SEED_SHIM_LOG")"
+EMPTYARG23NEG="$(grep -c "seed-chain $F23neg $" "$QX_SEED_SHIM_LOG")"
+if [ "$INVOKES23NEG" = "1" ] && [ "$EMPTYARG23NEG" = "1" ]; then
+  pass "AC23 NEGATIVE CONTROL: restoring the bare [@]:- form makes state (i) invoke the seeder once, with 1 empty argument"
+else
+  fail "AC23 NEGATIVE CONTROL: expected 1 invocation with 1 trailing empty arg, got $INVOKES23NEG invocation(s) (log: [$(cat "$QX_SEED_SHIM_LOG")])"
+fi
+unset QX_SEED_SHIM_LOG
+
+# =============================================================================
+# AC24 — init.md's step 5c is PROPOSE -> HUMAN CONFIRM -> WRITE. An init with
+# nobody to ask proposes nothing and writes nothing; the structural backstop
+# (declare with zero pairs writes nothing) holds even if the prose is skipped.
+# =============================================================================
+F24="$TMPROOT/ac24"
+git_init_repo "$F24"
+mkdir -p "$F24/src" "$F24/.quetrex"
+printf 'AC24_URL=x\n' > "$F24/.env.example"
+cat > "$F24/src/db.js" <<'EOF'
+const a = process.env.AC24_URL;
+EOF
+jq -cn '{verify:["npm run build"]}' > "$F24/.quetrex/verify.json"
+git -C "$F24" add .env.example src/db.js .quetrex/verify.json
+git -C "$F24" commit -q -m "chore: AC24 fixture — exactly 1 candidate"
+
+DECLARE_SHIM="$TMPROOT/ac24-shim"
+mkdir -p "$DECLARE_SHIM"
+cat > "$DECLARE_SHIM/quetrex-env-derive" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "declare" ]; then
+  printf '%s\n' "\$*" >> "\$QX_DECLARE_SHIM_LOG"
+fi
+exec "$TOOL" "\$@"
+EOF
+chmod +x "$DECLARE_SHIM/quetrex-env-derive"
+
+run_guard_block() {  # run_guard_block <repo-root> <noninteractive: 0|1>
+  local repo="$1" noninteractive="$2" script="$TMPROOT/ac24-run.sh"
+  {
+    printf '#!/usr/bin/env bash\nset -u\nREPO_ROOT=%q\n' "$repo"
+    if [ "$noninteractive" = "1" ]; then
+      printf 'QUETREX_INIT_NONINTERACTIVE=1\n'
+    else
+      printf 'unset QUETREX_INIT_NONINTERACTIVE || true\n'
+    fi
+    # Simulate a human having already confirmed one pair via 5c's
+    # AskUserQuestion — the guard must still prevent the call when
+    # non-interactive, and the array stays empty (nothing to confirm) when
+    # 5c's question step is simply omitted, proving the backstop holds
+    # either way.
+    if [ "$noninteractive" = "1" ]; then
+      printf 'CONFIRM_CMD_ENV=("npm run build\\tAC24_URL")\n'
+      printf 'CONFIRM_DECLINE=()\n'
+    fi
+    printf '%s\n' "$GUARD_BLOCK"
+  } > "$script"
+  PATH="$DECLARE_SHIM:$PATH" bash "$script" </dev/null
+}
+
+# --- NON-INTERACTIVE: propose nothing, write nothing, even with a
+# pre-populated confirmation, and even under a real </dev/null (no TTY). ----
+PRE24="$(cat "$F24/.quetrex/verify.json")"
+export QX_DECLARE_SHIM_LOG="$TMPROOT/ac24-noninteractive.log"; : > "$QX_DECLARE_SHIM_LOG"
+OUT24NI="$(run_guard_block "$F24" "1" 2>&1)"
+POST24="$(cat "$F24/.quetrex/verify.json")"
+[ "$PRE24" = "$POST24" ] && pass "AC24 NON-INTERACTIVE: .quetrex/verify.json is byte-identical" \
+  || fail "AC24 NON-INTERACTIVE: .quetrex/verify.json changed"
+INVOKES24NI="$(grep -c . "$QX_DECLARE_SHIM_LOG")"
+[ "$INVOKES24NI" = "0" ] && pass "AC24 NON-INTERACTIVE: declare is invoked exactly 0 times" \
+  || fail "AC24 NON-INTERACTIVE: expected 0 declare invocations, got $INVOKES24NI"
+LINES24NI="$(printf '%s\n' "$OUT24NI" | grep -c 'non-interactive')"
+[ "$LINES24NI" = "1" ] && pass "AC24 NON-INTERACTIVE: prints exactly 1 line containing 'non-interactive'" \
+  || fail "AC24 NON-INTERACTIVE: expected exactly 1 line, got $LINES24NI (out: [$OUT24NI])"
+unset QX_DECLARE_SHIM_LOG
+
+# --- STRUCTURAL BACKSTOP: the same fixture, with 5c's AskUserQuestion step
+# simply omitted (CONFIRM_CMD_ENV never populated) — declare still writes
+# nothing, because declare with 0 pairs writes nothing (AC21). -------------
+export QX_DECLARE_SHIM_LOG="$TMPROOT/ac24-backstop.log"; : > "$QX_DECLARE_SHIM_LOG"
+PRE24B="$(cat "$F24/.quetrex/verify.json")"
+run_guard_block "$F24" "0" >/dev/null 2>&1
+POST24B="$(cat "$F24/.quetrex/verify.json")"
+[ "$PRE24B" = "$POST24B" ] && pass "AC24 STRUCTURAL BACKSTOP: omitting the AskUserQuestion step still leaves .quetrex/verify.json byte-identical" \
+  || fail "AC24 STRUCTURAL BACKSTOP: .quetrex/verify.json changed even with nothing confirmed"
+unset QX_DECLARE_SHIM_LOG
+
+# --- NEGATIVE CONTROL: reverting only the non-interactive guard makes the
+# branch invoke declare >= 1 time. ------------------------------------------
+MUT_GUARD_BLOCK="$(printf '%s\n' "$GUARD_BLOCK" | sed -E 's/if \[ -n "\$\{QUETREX_INIT_NONINTERACTIVE:-\}" \] \|\| \[ ! -t 0 \] \|\| \[ ! -t 1 \]; then/if false; then/')"
+NEG24_SCRIPT="$TMPROOT/ac24-neg-run.sh"
+{
+  printf '#!/usr/bin/env bash\nset -u\nREPO_ROOT=%q\n' "$F24"
+  printf 'QUETREX_INIT_NONINTERACTIVE=1\n'
+  printf 'CONFIRM_CMD_ENV=("npm run build\\tAC24_URL")\n'
+  printf 'CONFIRM_DECLINE=()\n'
+  printf '%s\n' "$MUT_GUARD_BLOCK"
+} > "$NEG24_SCRIPT"
+export QX_DECLARE_SHIM_LOG="$TMPROOT/ac24-neg.log"; : > "$QX_DECLARE_SHIM_LOG"
+PATH="$DECLARE_SHIM:$PATH" bash "$NEG24_SCRIPT" >/dev/null 2>&1 </dev/null
+INVOKES24NEG="$(grep -c . "$QX_DECLARE_SHIM_LOG")"
+if [ "$INVOKES24NEG" -ge 1 ]; then
+  pass "AC24 NEGATIVE CONTROL: reverting the non-interactive guard makes the branch invoke declare >= 1 time — proving the guard is load-bearing"
+else
+  fail "AC24 NEGATIVE CONTROL: expected the mutated guard to invoke declare >= 1 time, got $INVOKES24NEG"
+fi
+unset QX_DECLARE_SHIM_LOG
+
 if [ "$FAIL" -eq 0 ]; then
   echo
   echo "env-derive.test.sh: all checks passed"

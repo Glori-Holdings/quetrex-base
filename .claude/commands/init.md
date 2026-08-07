@@ -377,51 +377,122 @@ echo "Wrote ## Verification to $PROJ_RULES"
 **5. Seed and merge `.quetrex/verify.json`.** The confirmed list is also the seed for
 `.quetrex/verify.json` — the machine-readable chain `verify-gate.sh` reads (it takes
 precedence over the `## Verification` fence above, which stays the human-readable
-fallback). This step ALSO derives and merges `requiredEnv`: the per-command declaration
-that lets `verify-gate.sh` skip a command pre-flight when a genuinely-required variable
-cannot exist in this checkout (see `.claude/hooks/verify-gate.sh` — "DECLARATIVE ENV
-SKIP"), instead of letting the chain go red on a variable no checkout could ever have.
-That mechanism has always been fully implemented in the hook; nothing ever wrote the
-declaration it reads. This is the write.
+fallback). This step also DECLARES `requiredEnv`: the per-command declaration that lets
+`verify-gate.sh` skip a command pre-flight when a genuinely-required variable cannot
+exist in this checkout (see `.claude/hooks/verify-gate.sh` — "DECLARATIVE ENV SKIP"),
+instead of letting the chain go red on a variable no checkout could ever have. That
+mechanism has always been fully implemented in the hook; nothing writes the declaration
+it reads except an explicit human confirmation, right here.
+
+**STOP INFERRING.** A prior version of this step ran an unattended tool that guessed
+which command needed which variable from the command string itself — that guess was
+provably wrong in both directions (see `.quetrex/plan/VERIFY-GATE-QUIET.json`). There is
+no code path left, anywhere, that can write a `requiredEnv` key except
+`quetrex-env-derive declare`, called only with the exact `--cmd`/`--env` pairs a human
+confirms below. No name is ever written from a guess.
+
+### 5a. Seed `.verify[]`
+
+Only when `.quetrex/verify.json` does not exist yet — an already-existing chain is
+authoritative and is never touched here. Guard against BOTH an unset and an empty
+`CONFIRMED_STEPS` explicitly: a bare `"${CONFIRMED_STEPS[@]:-}"` expansion yields ONE
+EMPTY-STRING argument, not zero words, and seeding `.verify` with `[""]` permanently
+deadlocks GATE 3 of `merge-gate.sh` — no checkout can ever produce a green ledger line
+for an empty command. Never pass an unguarded `"${CONFIRMED_STEPS[@]:-}"` to the seeder;
+`quetrex-env-derive seed-chain` independently refuses an empty or all-blank command list
+too, as a second, structural backstop:
+
+```bash
+# CONFIRMED_STEPS = the user-confirmed commands from step 4b.4, one per line, in order.
+if [ -f "$REPO_ROOT/.quetrex/verify.json" ]; then
+  : # an existing chain is authoritative — never touched here
+elif [ "${CONFIRMED_STEPS+set}" = "set" ] && [ "${#CONFIRMED_STEPS[@]}" -gt 0 ]; then
+  quetrex-env-derive seed-chain "$REPO_ROOT" "${CONFIRMED_STEPS[@]}"
+fi
+```
+
+### 5b. Propose candidates from this repo's own committed evidence
 
 Run the shared derivation tool — `quetrex-env-derive`, shipped on the plugin's `bin/`
 (on PATH here, exactly like `quetrex-arm` above; call it by name, never source it) —
 **every time this step runs**, not only when a fresh `## Verification` block was just
-written. It is idempotent and union-only: given `<repo-root>` and (only used the first
-time, when no `.quetrex/verify.json` exists yet) the confirmed commands to seed
-`.verify[]` with, it derives every genuinely-safe `requiredEnv` association from this
-repo's own committed `.env.example`/`.env.sample` and tracked source, and merges the
-result into `.quetrex/verify.json`. It never touches `.verify[]` itself, never deletes
-or overwrites an existing `requiredEnv` entry (hand-written or from an earlier run), and
-never writes an entry whose command is not a byte-for-byte member of `.verify[]` — the
-same constraints `verify-gate.sh` itself enforces on read, so nothing this step writes
-can ever be a mapping the hook would reject:
+written:
 
 ```bash
-QUETREX_ENV_DERIVE_OUTPUT="$(quetrex-env-derive verify-json "$REPO_ROOT" "${CONFIRMED_STEPS[@]:-}")"; QUETREX_ENV_DERIVE_RC=$?
-printf '%s\n' "$QUETREX_ENV_DERIVE_OUTPUT"
-if [ "$QUETREX_ENV_DERIVE_RC" -ne 0 ]; then
-  echo "quetrex-env-derive failed — .quetrex/verify.json may be missing its requiredEnv declaration. Re-run /quetrex:init once resolved." >&2
+QUETREX_ENV_DERIVE_PROPOSAL="$(quetrex-env-derive propose "$REPO_ROOT" 2>/dev/null)"; QUETREX_ENV_DERIVE_PROPOSE_RC=$?
+```
+
+`propose` is READ-ONLY — it never writes `.quetrex/verify.json`, ever, under any
+condition. Its `.candidates[]` are names this repo's own COMMITTED `.env.example` (or
+`.env.sample`) declares AND a tracked source file reads with no fallback — the exact same
+evidence `verify-gate.sh` itself re-checks on read (SEC-4), so nothing shown to the human
+below can ever be a pairing the gate would then silently refuse to honor.
+
+### 5c. Confirm with the human, then write only the confirmed pairs
+
+When `${QUETREX_ENV_DERIVE_PROPOSAL}` has zero `.candidates`, there is nothing to
+confirm — skip straight to step 6. Otherwise, for every candidate, render a compact
+table BEFORE asking — never ask cold:
+
+| name | read_at | chain command |
+|------|---------|----------------|
+| `.candidates[].name` | `.candidates[].read_at` | the `.verify[]` entry it could gate |
+
+Then ask with `AskUserQuestion`, one question per candidate/command pairing. Cap the
+interaction at no more than 1 AskUserQuestion round trip per 4 candidates (batch beyond
+that). The first option of every question is always the decline option, labeled **"No —
+leave undeclared"**; the second is **"Yes — declare it"**. Example question:
+*"`<NAME>` looks required by `<command>` — should `verify-gate` skip `<command>` when
+`<NAME>` is unset in this checkout?"*
+
+**Non-interactive guard — propose nothing, write nothing.** When there is nobody to
+ask — the literal env var `QUETREX_INIT_NONINTERACTIVE` is set, or a no-TTY test
+(`[ ! -t 0 ] || [ ! -t 1 ]`) is true — skip 5c's question entirely: propose nothing,
+write nothing. This is a structural backstop, not only a prose one: even if the guard
+were somehow skipped, `declare` called with zero `--cmd`/`--env`/`--decline` pairs
+writes nothing at all (see `bin/quetrex-env-derive`'s own "ONLY WRITER" contract) — so a
+model that skips the confirmation step can never manufacture a declaration either way.
+
+```bash
+# CONFIRM_CMD_ENV = ("cmd" "NAME") tuples the human answered "Yes" to in 5c.
+# CONFIRM_DECLINE  = NAMEs the human answered "No" to in 5c.
+# Both stay empty when 5c never ran (nothing to confirm, or the non-interactive guard
+# below fired) — an empty DECLARE_ARGS means the declare call below never fires.
+DECLARE_ARGS=()
+if [ -n "${QUETREX_INIT_NONINTERACTIVE:-}" ] || [ ! -t 0 ] || [ ! -t 1 ]; then
+  echo "non-interactive session detected — propose nothing, write nothing for requiredEnv"
+else
+  for pair in "${CONFIRM_CMD_ENV[@]:-}"; do
+    [ -n "$pair" ] || continue
+    DECLARE_ARGS+=(--cmd "${pair%%$'\t'*}" --env "${pair##*$'\t'}")
+  done
+  for name in "${CONFIRM_DECLINE[@]:-}"; do
+    [ -n "$name" ] || continue
+    DECLARE_ARGS+=(--decline "$name")
+  done
+  if [ "${#DECLARE_ARGS[@]}" -gt 0 ]; then
+    quetrex-env-derive declare "$REPO_ROOT" "${DECLARE_ARGS[@]}"
+  fi
 fi
 ```
 
 Same `$REPO_ROOT` pin and "never the global file" rule as step 4. Record whether 4b
 created or appended the `## Verification` block, and whether this step wrote
-`.quetrex/verify.json` (`quetrex-env-derive` prints `wrote <path>` when it changes the
-file, and `<path> already current` when the derived state was already merged) — so step
-6 stages the file and step 7 reports it. **The declaration only has effect once
-committed:** `verify-gate.sh` reads `requiredEnv` from `git show HEAD:.quetrex/verify.json`
-(SEC-2), never the working tree, specifically so every association a human is ever
-skipped by first appeared in a reviewed diff. Step 6 already stages
-`.quetrex/verify.json` when present and opens the PR — that path is what carries this
-write into a reviewed commit; nothing further is needed here.
+`.quetrex/verify.json` — so step 6 stages the file and step 7 reports it. **The
+declaration only has effect once committed:** `verify-gate.sh` reads `requiredEnv` from
+`git show HEAD:.quetrex/verify.json` (SEC-2), never the working tree, specifically so
+every association a human is ever skipped by first appeared in a reviewed diff. Step 6
+already stages `.quetrex/verify.json` when present and opens the PR — that path is what
+carries this write into a reviewed commit; nothing further is needed here.
 
-**Already-adopted repos.** Because this step is union-only and never narrows an existing
-`.verify[]` or a pre-existing `requiredEnv` entry, simply **re-running `/quetrex:init`**
-is the complete remediation for a repo whose `.quetrex/verify.json` predates this field —
-it re-derives and merges `requiredEnv` into whatever is already committed, without
-touching a command, a name, or anything a human already wrote by hand. `/quetrex:doctor`
-Check 5 detects exactly this predates-requiredEnv state and points back here.
+**Already-adopted repos.** Because 5c is union-only and never narrows an existing
+`.verify[]` or a pre-existing `requiredEnv`/`requiredEnvDeclined` entry, simply
+**re-running `/quetrex:init`** is the complete remediation for a repo whose
+`.quetrex/verify.json` predates this field — it re-proposes and, once the human
+confirms, merges into whatever is already committed, without touching a command, a
+name, or anything a human already wrote by hand. `/quetrex:doctor` Check 5 detects
+exactly this state (a committed candidate covered by neither `requiredEnv` nor
+`requiredEnvDeclined`) and points back here.
 
 ---
 
