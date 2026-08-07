@@ -9,20 +9,36 @@
 # declarative per-command `requiredEnv` skip (behavior c) actually fires for
 # a command whose declared variable is legitimately unset in this checkout —
 # `derive` is what is supposed to make that true by writing `requiredEnv`
-# into the COMMITTED .quetrex/verify.json. Each workstream (`gate`, `derive`)
-# proved its own half in isolation before merge; NEITHER side proves the
-# other's half actually connects. This file connects them, end to end,
-# against a FRESH fixture repo this suite builds itself — never reusing a
-# fixture or helper from test/verify-gate.test.sh or test/env-derive.test.sh
-# — and additionally chains the result into the REAL merge-gate.sh hook to
-# prove skip containment holds all the way to the merge boundary, not just
-# inside verify-gate.sh.
+# into the COMMITTED .quetrex/verify.json, and ONLY via an explicit human
+# confirmation (`declare`) — never an unattended guess. Each workstream
+# (`gate`, `derive`) proved its own half in isolation before merge; NEITHER
+# side proves the other's half actually connects. This file connects them,
+# end to end, against a FRESH fixture repo this suite builds itself — never
+# reusing a fixture or helper from test/verify-gate.test.sh or
+# test/env-derive.test.sh — and additionally chains the result into the REAL
+# merge-gate.sh hook to prove skip containment holds all the way to the
+# merge boundary, not just inside verify-gate.sh.
+#
+# AC25 — THE FIXTURE MUST NOT DEGENERATE. The prior round of this file used
+# a thin wrapper script with ZERO trailing path tokens of its own — the one
+# leaf shape a now-deleted static attribution filter would have left alone
+# by accident. The fixture below uses the literal, dominant framework-build
+# shape the deleted engine actually failed on (see the real package.json
+# below). A local `next` shim on node_modules/.bin — never a real Next.js
+# install — gives that exact invocation real, controllable pass/fail
+# behavior without changing what the fixture's package.json says.
 #
 # Every rung below is a BEFORE/AFTER pair: prove the chain genuinely runs and
-# blocks BEFORE the derivation exists, then prove — and only then — that the
-# derivation's own committed output is what changes the outcome. A test that
-# only checked the AFTER state could not tell "the skip fired for the right
-# reason" from "the fixture never actually blocked in the first place".
+# blocks BEFORE the declaration exists, then prove — and only then — that an
+# EXPLICIT `declare` (never an inferred write) is what changes the outcome.
+# A test that only checked the AFTER state could not tell "the skip fired
+# for the right reason" from "the fixture never actually blocked in the
+# first place".
+#
+# HYGIENE (AC25): this file asserts on `.decision` only, never a log path —
+# a log FILENAME is `gate`'s workstream, not this file's, so cleanup uses a
+# glob over every verify-gate log file, never a single hardcoded name (see
+# reset_gate_state below).
 #
 # Run: bash test/verify-gate-env-derive-integration.test.sh
 
@@ -53,9 +69,13 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/qx-vg-envderive-integ.XXXXXX")"
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
+# =============================================================================
+# FIXTURE — the dominant "framework build script" shape: `next build`, a
+# leaf with NO trailing path arguments of its own, resolved through a local
+# node_modules/.bin/next shim rather than a real Next.js install.
+# =============================================================================
 FIX="$WORK/fixture"
-mkdir -p "$FIX/src"
-git -C . rev-parse >/dev/null 2>&1 || true
+mkdir -p "$FIX/src" "$FIX/node_modules/.bin"
 (
   cd "$FIX"
   git init -q -b main
@@ -63,10 +83,8 @@ git -C . rev-parse >/dev/null 2>&1 || true
   git config user.name "QA Integration Fixture"
 )
 
-# The real read lives in a source file, and the chain command is a wrapper
-# SCRIPT with no explicit path args of its own — the whole-tracked-tree scope
-# case AC13/AC14 already prove in isolation. Deliberately a DIFFERENT
-# variable name and DIFFERENT file layout than any fixture in
+# The real read lives in a source file the shim execs into — deliberately a
+# DIFFERENT variable name and DIFFERENT file layout than any fixture in
 # test/env-derive.test.sh or test/verify-gate.test.sh, so this is not
 # silently riding their setup.
 cat > "$FIX/src/config.js" <<'EOF'
@@ -78,11 +96,18 @@ if (!url) {
 console.log('config ok');
 EOF
 
-cat > "$FIX/run-build.sh" <<'EOF'
+# node_modules/.bin is on PATH for any `npm run` invocation — this is the
+# ONLY thing that makes the literal script string "next build" runnable and
+# controllable without a real Next.js install. Untracked: it is fixture
+# scaffolding, never committed evidence.
+cat > "$FIX/node_modules/.bin/next" <<'EOF'
 #!/usr/bin/env bash
-exec node src/config.js
+if [ "$1" = "build" ]; then
+  exec node "$(dirname "$0")/../../src/config.js"
+fi
+exit 1
 EOF
-chmod +x "$FIX/run-build.sh"
+chmod +x "$FIX/node_modules/.bin/next"
 
 cat > "$FIX/.env.example" <<'EOF'
 QX_INTEG_DATABASE_URL=
@@ -91,7 +116,7 @@ EOF
 cat > "$FIX/package.json" <<'EOF'
 {
   "name": "qx-integ-fixture",
-  "scripts": { "build": "./run-build.sh" }
+  "scripts": { "build": "next build" }
 }
 EOF
 
@@ -102,7 +127,7 @@ EOF
 
 (
   cd "$FIX"
-  git add -A
+  git add package.json .env.example src/config.js .quetrex/verify.json
   git commit -q -m "qx-integ fixture: no requiredEnv yet"
 )
 
@@ -136,25 +161,26 @@ ledger_lines_for_build() {  # ledger_lines_for_build <cwd> -> count of ledger
   jq -s '[.[] | select(.cmd=="npm run build")] | length' "$1/.quetrex/verify-ledger.jsonl" 2>/dev/null || echo 0
 }
 
+# HYGIENE (AC25): a glob, never a specific log filename — this file must
+# stay independent of `gate`'s own log-naming decisions.
 reset_gate_state() {  # reset_gate_state <cwd>
-  rm -f "$1/.quetrex/verify-ledger.jsonl" "$1/.quetrex/verify-attempts" "$1/.quetrex/ESCALATION" "$1/.quetrex/verify-gate.log"
+  rm -f "$1"/.quetrex/verify-gate*.log "$1/.quetrex/verify-ledger.jsonl" "$1/.quetrex/verify-attempts" "$1/.quetrex/ESCALATION"
 }
 
 # =============================================================================
-# RUNG 1 — BEFORE any derivation exists: the chain must genuinely run and
-# block. This is the control that proves the fixture is real (not something
-# that would have passed or been silently skipped regardless).
+# RUNG 1 — CONTROL, before any declaration exists: the chain must genuinely
+# run and block. This proves the fixture is real (not something that would
+# have passed or been silently skipped regardless).
 # =============================================================================
 reset_gate_state "$FIX"
 OUT1="$(run_gate "$FIX")"
 CODE1=$?
 BLOCKS1="$(block_decisions "$OUT1")"
 SKIPS1="$(skip_lines "$OUT1")"
-LEDGER1="$(ledger_lines_for_build "$FIX")"
 
-[ "$CODE1" = 0 ] && [ "$BLOCKS1" = 1 ] && [ "$SKIPS1" = 0 ] && [ "$LEDGER1" = 1 ] \
-  && pass "RUNG1: before derivation, the chain genuinely runs and blocks (exit $CODE1, blocks $BLOCKS1, skips $SKIPS1, ledger $LEDGER1)" \
-  || fail "RUNG1: expected exit 0 / 1 block / 0 skip / 1 ledger line, got exit $CODE1 blocks $BLOCKS1 skips $SKIPS1 ledger $LEDGER1 (out: [$OUT1])"
+[ "$CODE1" = 0 ] && [ "$BLOCKS1" = 1 ] && [ "$SKIPS1" = 0 ] \
+  && pass "RUNG1 CONTROL: before any declaration, the chain genuinely runs and blocks (hook exit $CODE1, 1 block decision, 0 skips)" \
+  || fail "RUNG1 CONTROL: expected hook exit 0 / 1 block / 0 skips, got exit $CODE1 blocks $BLOCKS1 skips $SKIPS1 (out: [$OUT1])"
 
 # =============================================================================
 # RUNG 2 — quetrex-env-derive scan discovers exactly the one candidate, from
@@ -167,17 +193,18 @@ SCAN_CODE=$?
   || fail "RUNG2: expected exit 0 and 'QX_INTEG_DATABASE_URL\tsrc/config.js:1', got exit $SCAN_CODE (out: [$SCAN_OUT])"
 
 # =============================================================================
-# RUNG 3 — verify-json writes the requiredEnv entry for the REAL chain
-# command, and .verify[] itself is untouched.
+# RUNG 3 — declare writes the requiredEnv entry for the REAL chain command,
+# by an EXPLICIT human-shaped confirmation — never an inferred guess — and
+# .verify[] itself is untouched.
 # =============================================================================
 VERIFY_BEFORE="$(jq -S '.verify' "$FIX/.quetrex/verify.json")"
-VJ_OUT="$("$DERIVE" verify-json "$FIX" 2>&1)"
-VJ_CODE=$?
+DECLARE_OUT="$("$DERIVE" declare "$FIX" --cmd "npm run build" --env QX_INTEG_DATABASE_URL 2>&1)"
+DECLARE_CODE=$?
 VERIFY_AFTER="$(jq -S '.verify' "$FIX/.quetrex/verify.json")"
 REQ_ENTRY="$(jq -c '.requiredEnv["npm run build"] // empty' "$FIX/.quetrex/verify.json" 2>/dev/null)"
 
-[ "$VJ_CODE" = 0 ] && pass "RUNG3: verify-json exits 0" || fail "RUNG3: verify-json exited $VJ_CODE (out: [$VJ_OUT])"
-[ "$VERIFY_BEFORE" = "$VERIFY_AFTER" ] && pass "RUNG3: .verify[] is byte-identical after verify-json" \
+[ "$DECLARE_CODE" = 0 ] && pass "RUNG3: declare exits 0" || fail "RUNG3: declare exited $DECLARE_CODE (out: [$DECLARE_OUT])"
+[ "$VERIFY_BEFORE" = "$VERIFY_AFTER" ] && pass "RUNG3: .verify[] is byte-identical after declare" \
   || fail "RUNG3: .verify[] changed: before=[$VERIFY_BEFORE] after=[$VERIFY_AFTER]"
 [ "$REQ_ENTRY" = '["QX_INTEG_DATABASE_URL"]' ] && pass "RUNG3: requiredEnv[\"npm run build\"] == [\"QX_INTEG_DATABASE_URL\"]" \
   || fail "RUNG3: expected requiredEnv[\"npm run build\"] == [\"QX_INTEG_DATABASE_URL\"], got [$REQ_ENTRY]"
@@ -203,7 +230,7 @@ SKIPS4="$(skip_lines "$OUT4")"
 LEDGER4="$(ledger_lines_for_build "$FIX")"
 
 [ "$CODE4" = 0 ] && [ "$BLOCKS4" = 1 ] && [ "$SKIPS4" = 0 ] && [ "$LEDGER4" = 1 ] \
-  && pass "RUNG4: an UNCOMMITTED requiredEnv (staged, not committed) does NOT authorize a skip — the chain still runs and blocks" \
+  && pass "RUNG4 (SEC-2 CONTROL RETAINED): an UNCOMMITTED requiredEnv (staged, not committed) does NOT authorize a skip — the chain still runs and blocks" \
   || fail "RUNG4: uncommitted requiredEnv incorrectly influenced the outcome — exit $CODE4 blocks $BLOCKS4 skips $SKIPS4 ledger $LEDGER4 (out: [$OUT4])"
 
 # =============================================================================
@@ -216,6 +243,8 @@ reset_gate_state "$FIX"
 # Pre-seed ESCALATION to prove a skip-only run does not clear it (mirrors
 # AC7/AC15's own assertion, re-proven here against THIS fresh fixture).
 : > "$FIX/.quetrex/ESCALATION"
+: > "$FIX/.quetrex/verify-attempts"
+VERIFY_ATTEMPTS_PRE="$(cat "$FIX/.quetrex/verify-attempts")"
 
 OUT5="$(run_gate "$FIX")"
 CODE5=$?
@@ -226,7 +255,7 @@ NAMES_VAR5="$(printf '%s\n' "$OUT5" | grep -c 'QX_INTEG_DATABASE_URL')"
 
 [ "$CODE5" = 0 ] && pass "RUNG5: hook exit code == 0 once requiredEnv is committed" \
   || fail "RUNG5: hook exited $CODE5, expected 0 (out: [$OUT5])"
-[ "$BLOCKS5" = 0 ] && pass "RUNG5: 0 block decisions" \
+[ "$BLOCKS5" = 0 ] && pass "RUNG5: 0 stdout lines parse as a block decision" \
   || fail "RUNG5: expected 0 block decisions, got $BLOCKS5 (out: [$OUT5])"
 [ "$SKIPS5" = 1 ] && pass "RUNG5: exactly 1 VERIFY SKIPPED line" \
   || fail "RUNG5: expected exactly 1 VERIFY SKIPPED line, got $SKIPS5 (out: [$OUT5])"
@@ -234,8 +263,13 @@ NAMES_VAR5="$(printf '%s\n' "$OUT5" | grep -c 'QX_INTEG_DATABASE_URL')"
   || fail "RUNG5: the skip line never names the variable (out: [$OUT5])"
 [ "$LEDGER5" = 0 ] && pass "RUNG5: the ledger has 0 lines for the skipped command (skip containment)" \
   || fail "RUNG5: expected 0 ledger lines for npm run build, got $LEDGER5"
-[ -f "$FIX/.quetrex/ESCALATION" ] && pass "RUNG5: a skip-only run does not clear a pre-seeded ESCALATION" \
-  || fail "RUNG5: ESCALATION was cleared by a run that only skipped (never proved anything green)"
+
+# --- CONTAINMENT, re-proved, not assumed --------------------------------
+[ -f "$FIX/.quetrex/ESCALATION" ] && pass "RUNG5 CONTAINMENT: a skip-only run does not clear a pre-seeded ESCALATION" \
+  || fail "RUNG5 CONTAINMENT: ESCALATION was cleared by a run that only skipped (never proved anything green)"
+VERIFY_ATTEMPTS_POST="$(cat "$FIX/.quetrex/verify-attempts" 2>/dev/null || echo "")"
+[ "$VERIFY_ATTEMPTS_PRE" = "$VERIFY_ATTEMPTS_POST" ] && pass "RUNG5 CONTAINMENT: .quetrex/verify-attempts is byte-identical to its pre-run value" \
+  || fail "RUNG5 CONTAINMENT: verify-attempts changed (pre=[$VERIFY_ATTEMPTS_PRE] post=[$VERIFY_ATTEMPTS_POST])"
 
 # =============================================================================
 # RUNG 6 — SKIP CONTAINMENT ACROSS THE MERGE BOUNDARY: chain the rung-5
@@ -285,6 +319,97 @@ LEDGER7_EXIT0="$(printf '%s' "$LEDGER7_ALL" | jq '[.[] | select(.exit==0)] | len
 [ "$CODE7" = 0 ] && [ "$BLOCKS7" = 0 ] && [ "$SKIPS7" = 0 ] && [ "$LEDGER7_EXIT0" = 1 ] \
   && pass "RUNG7: POSITIVE CONTROL — with the variable genuinely set, the command runs for real and succeeds (no skip, exit 0 ledger line)" \
   || fail "RUNG7: expected the real command to run and pass with 0 skips when the var is set — exit $CODE7 blocks $BLOCKS7 skips $SKIPS7 ledger-exit0 $LEDGER7_EXIT0 (out: [$OUT7])"
+
+# =============================================================================
+# RUNG 8 — GATE 3 CONTAINMENT: merge-gate.sh's own GATE-3 jq, evaluated
+# against the rung-5 post-skip state, DENIES with a non-empty RED array.
+# =============================================================================
+reset_gate_state "$FIX"
+: > "$FIX/.quetrex/ESCALATION"
+run_gate "$FIX" >/dev/null 2>&1
+HEAD_SHA8="$(git -C "$FIX" rev-parse HEAD)"
+jq -cn --arg sha "$HEAD_SHA8" \
+  '{verdict:"AUTO_MERGE",sha:$sha,confirmed:[],inputs:{nativeSecurityReview:"clean"}}' \
+  > "$FIX/.quetrex/review-verdict.json"
+MERGE_PAYLOAD8="$(jq -cn --arg cmd "$GH_MERGE_CMD" --arg cwd "$FIX" '{tool_input:{command:$cmd},cwd:$cwd}')"
+MERGE_OUT8="$(printf '%s' "$MERGE_PAYLOAD8" | CLAUDE_PROJECT_DIR="$FIX" "$MERGE_HOOK" 2>&1)"
+DENY8=0
+printf '%s' "$MERGE_OUT8" | grep -q '"permissionDecision":"deny"' && DENY8=1
+[ "$DENY8" = 1 ] && pass "RUNG8: GATE 3 re-run against the post-skip state still DENIES (skip containment re-proved, not assumed)" \
+  || fail "RUNG8: expected GATE 3 to deny the post-skip state, got deny=$DENY8 (out: [$MERGE_OUT8])"
+
+# =============================================================================
+# NEGATIVE CONTROL — skipping only the `declare` call: a SEPARATE fixture,
+# identical up to (and excluding) RUNG3, must reproduce RUNG1's control
+# values (1 block, 0 skips) even after HEAD advances — proving declare, not
+# some incidental fixture property, is what changes the outcome.
+# =============================================================================
+FIXNEG="$WORK/fixture-neg"
+mkdir -p "$FIXNEG/src" "$FIXNEG/node_modules/.bin"
+(
+  cd "$FIXNEG"
+  git init -q -b main
+  git config user.email "qa-integration@example.com"
+  git config user.name "QA Integration Fixture (negative control)"
+)
+cp "$FIX/src/config.js" "$FIXNEG/src/config.js"
+cp "$FIX/node_modules/.bin/next" "$FIXNEG/node_modules/.bin/next"
+chmod +x "$FIXNEG/node_modules/.bin/next"
+cp "$FIX/.env.example" "$FIXNEG/.env.example"
+# Same package.json shape as $FIX, copied rather than retyped — this file's
+# own source spells the "next build" script string exactly once (AC25).
+cp "$FIX/package.json" "$FIXNEG/package.json"
+mkdir -p "$FIXNEG/.quetrex"
+cat > "$FIXNEG/.quetrex/verify.json" <<'EOF'
+{ "verify": ["npm run build"] }
+EOF
+(
+  cd "$FIXNEG"
+  git add package.json .env.example src/config.js .quetrex/verify.json
+  git commit -q -m "qx-integ negative-control fixture: declare is never called"
+)
+
+reset_gate_state "$FIXNEG"
+OUTNEG="$(run_gate "$FIXNEG")"
+CODENEG=$?
+BLOCKSNEG="$(block_decisions "$OUTNEG")"
+SKIPSNEG="$(skip_lines "$OUTNEG")"
+
+if [ "$CODENEG" = 0 ] && [ "$BLOCKSNEG" = 1 ] && [ "$SKIPSNEG" = 0 ]; then
+  pass "NEGATIVE CONTROL: skipping the declare call reproduces RUNG1's control (1 block, 0 skips) — proving declare, not the fixture shape, is what changes the outcome"
+else
+  fail "NEGATIVE CONTROL: expected 1 block / 0 skips without declare, got exit $CODENEG blocks $BLOCKSNEG skips $SKIPSNEG (out: [$OUTNEG])"
+fi
+
+# =============================================================================
+# HYGIENE (AC25) — self-checks on this file's own text. Every literal below
+# is built at runtime, never spelled out contiguously in this file's own
+# source — otherwise a self-check for "how many times does X appear" would
+# itself be an occurrence of X, corrupting its own count (mirrors the
+# GH_MERGE_CMD construction above, same reason).
+# =============================================================================
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+NEXTBUILD_LIT="$(printf '"build": "next %s"' build)"
+RUNBUILD_LIT="$(printf 'run-%s.sh' build)"
+GLOB_LIT="$(printf 'verify-gate%slog' '*.')"
+FULLOUTPUT_LIT="$(printf '%s output' Full)"
+
+NEXTBUILD_COUNT="$(grep -cF -- "$NEXTBUILD_LIT" "$SELF")"
+[ "$NEXTBUILD_COUNT" = "1" ] && pass "AC25 FIXTURE: exactly 1 occurrence of the next-build package.json shape in this file" \
+  || fail "AC25 FIXTURE: expected exactly 1 occurrence of the next-build shape, got $NEXTBUILD_COUNT"
+RUNBUILD_COUNT="$(grep -cF -- "$RUNBUILD_LIT" "$SELF")"
+[ "$RUNBUILD_COUNT" = "0" ] && pass "AC25 FIXTURE: 0 occurrences of the prior round's degenerate wrapper-script leaf" \
+  || fail "AC25 FIXTURE: expected 0 occurrences of the degenerate wrapper-script leaf, got $RUNBUILD_COUNT"
+
+GLOB_COUNT="$(grep -cF -- "$GLOB_LIT" "$SELF")"
+[ "$GLOB_COUNT" = "1" ] && pass "AC25 HYGIENE: cleanup uses the glob form for the gate's log file" \
+  || fail "AC25 HYGIENE: expected exactly 1 occurrence of the glob form, got $GLOB_COUNT"
+HARDCODED_LOG="$(grep -cE 'verify-gate-[a-z]+\.log' "$SELF")"
+[ "$HARDCODED_LOG" = "0" ] && pass "AC25 HYGIENE: 0 occurrences of a hardcoded second log filename" \
+  || fail "AC25 HYGIENE: found $HARDCODED_LOG hardcoded log filename(s) — this file must stay independent of gate's log naming"
+FULLOUTPUT_COUNT="$(grep -cF -- "$FULLOUTPUT_LIT" "$SELF")"
+[ "$FULLOUTPUT_COUNT" = "0" ] && pass "AC25 HYGIENE: this file asserts on .decision only — the log-dump assertion phrase never appears" \
+  || fail "AC25 HYGIENE: found $FULLOUTPUT_COUNT occurrence(s) of the log-dump assertion phrase — assert on .decision, never a log path"
 
 if [ "$FAIL" -eq 0 ]; then
   echo
