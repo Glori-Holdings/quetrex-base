@@ -29,6 +29,13 @@
 #          and `seed-chain` independently refuses an empty command itself.
 #   AC24 — init.md's step 5 is PROPOSE -> HUMAN CONFIRM -> WRITE, and its
 #          non-interactive branch proposes nothing and writes nothing.
+#   AC31 END-TO-END — `plan` PROJECTS required_env from the human's
+#          COMMITTED requiredEnv declaration (never re-derives it), in the
+#          exact Contract A shape `quetrex-cloud-prep hydrate` consumes, so
+#          an unattended cloud build still gets a real placeholder for a
+#          declared name — closing the QDM-1 regression (hydrate exporting
+#          nothing because nothing ever wrote required_env) without
+#          reintroducing the deleted inference.
 #
 # SECURITY POSTURE THIS SUITE HOLDS THE LINE ON. Over-attribution (a wrong
 # command silently skipped) is the dangerous direction; under-attribution
@@ -47,6 +54,7 @@ TOOL="$TOOLROOT/bin/quetrex-env-derive"
 HOOK="${QX_VERIFY_GATE_HOOK:-$TOOLROOT/.claude/hooks/verify-gate.sh}"
 MERGE_HOOK="${QX_MERGE_GATE_HOOK:-$TOOLROOT/.claude/hooks/merge-gate.sh}"
 INIT_MD="$TOOLROOT/.claude/commands/init.md"
+CLOUD_PREP="$TOOLROOT/bin/quetrex-cloud-prep"
 
 if [ ! -f "$TOOL" ]; then
   echo "FAIL: tool not found at $TOOL"
@@ -721,6 +729,75 @@ if [ "$CODE31NEG" -eq 0 ] && ! cmp -s "$TMPROOT/ac31-evil2-precopy.json" "$EVIL_
   pass "AC31 NEGATIVE CONTROL: removing the parent-directory check makes probe (a) exit 0 and write — proving the check is load-bearing"
 else
   fail "AC31 NEGATIVE CONTROL: expected the mutated tool to (wrongly) accept and write outside .quetrex/plan, got exit=$CODE31NEG"
+fi
+
+# =============================================================================
+# AC31 END-TO-END — the human's COMMITTED declare reaches hydrate, in the
+# exact Contract A shape `quetrex-cloud-prep hydrate` consumes. This is the
+# concrete answer to the QDM-1 regression: dropping the deleted attribution
+# engine must not silently drop the field an unattended cloud build's
+# `hydrate` step depends on to export a real placeholder for a genuinely
+# required, unset variable. Undeclared must still mean EMPTY, never
+# invented — the NEGATIVE CONTROL proves that half.
+# =============================================================================
+if [ ! -f "$CLOUD_PREP" ]; then
+  fail "AC31 END-TO-END: quetrex-cloud-prep not found at $CLOUD_PREP"
+else
+  F31E="$TMPROOT/ac31e2e"
+  git_init_repo "$F31E"
+  mkdir -p "$F31E/src" "$F31E/.quetrex/plan"
+  cat > "$F31E/src/db.js" <<'EOF'
+// db client
+// A_URL: no fallback — line 3 is the provable read
+const a = process.env.A_URL;
+EOF
+  printf 'A_URL=ac31e2e-value-should-never-leak\n' > "$F31E/.env.example"
+  jq -cn '{verify:["npm run build"]}' > "$F31E/.quetrex/verify.json"  # nothing declared yet
+  git -C "$F31E" add src/db.js .env.example .quetrex/verify.json
+  git -C "$F31E" commit -q -m "chore: AC31 end-to-end fixture — A_URL is a committed candidate, not yet declared"
+
+  # --- NEGATIVE CONTROL FIRST (fail-first): before declare, the stamp adds
+  # nothing and hydrate exports nothing — the undeclared-candidate case must
+  # never invent a name. ------------------------------------------------
+  PLAN31E="$F31E/.quetrex/plan/AC31E2E.json"
+  mk_plan "$PLAN31E" '{}'
+  "$TOOL" plan "$PLAN31E" "$F31E" >/dev/null
+  PRELEN31E="$(jq '.required_env // [] | length' "$PLAN31E")"
+  [ "$PRELEN31E" = "0" ] && pass "AC31 END-TO-END NEGATIVE CONTROL: before declare, the stamp adds 0 entries" \
+    || fail "AC31 END-TO-END NEGATIVE CONTROL: expected 0 entries before declare, got $PRELEN31E"
+
+  ENV_FILE31EPRE="$TMPROOT/ac31e2e-env-pre.sh"
+  HYDRATE_OUT_PRE="$(env -u A_URL "$CLOUD_PREP" hydrate "$PLAN31E" --env-file "$ENV_FILE31EPRE" --repo "$F31E" 2>/dev/null)"
+  PLACEHOLDERED_PRE="$(printf '%s\n' "$HYDRATE_OUT_PRE" | grep '^QX_ENV_PLACEHOLDERED=' | sed "s/^QX_ENV_PLACEHOLDERED='//; s/'\$//")"
+  [ -z "$PLACEHOLDERED_PRE" ] && pass "AC31 END-TO-END NEGATIVE CONTROL: before declare, hydrate placeholders nothing (QX_ENV_PLACEHOLDERED is empty)" \
+    || fail "AC31 END-TO-END NEGATIVE CONTROL: expected hydrate to placeholder nothing before declare, got '$PLACEHOLDERED_PRE'"
+
+  # --- Now declare + commit, re-stamp, and hydrate for real. -------------
+  "$TOOL" declare "$F31E" --cmd "npm run build" --env A_URL >/dev/null
+  git -C "$F31E" add .quetrex/verify.json
+  git -C "$F31E" commit -q -m "declare requiredEnv for npm run build"
+
+  "$TOOL" plan "$PLAN31E" "$F31E" >/dev/null; CODE31E=$?
+  [ "$CODE31E" -eq 0 ] && pass "AC31 END-TO-END: plan exits 0 after declare + commit" \
+    || fail "AC31 END-TO-END: expected exit 0, got $CODE31E"
+  REQLEN31E="$(jq '.required_env | length' "$PLAN31E")"
+  [ "$REQLEN31E" = "1" ] && pass "AC31 END-TO-END: .required_env|length == 1 after declare + commit" \
+    || fail "AC31 END-TO-END: expected 1, got $REQLEN31E"
+  REQNAME31E="$(jq -r '.required_env[0].name' "$PLAN31E")"
+  [ "$REQNAME31E" = "A_URL" ] && pass "AC31 END-TO-END: [0].name == A_URL" \
+    || fail "AC31 END-TO-END: expected A_URL, got '$REQNAME31E'"
+
+  ENV_FILE31E="$TMPROOT/ac31e2e-env.sh"
+  HYDRATE_OUT="$(env -u A_URL "$CLOUD_PREP" hydrate "$PLAN31E" --env-file "$ENV_FILE31E" --repo "$F31E" 2>/dev/null)"
+  PLACEHOLDERED31E="$(printf '%s\n' "$HYDRATE_OUT" | grep '^QX_ENV_PLACEHOLDERED=' | sed "s/^QX_ENV_PLACEHOLDERED='//; s/'\$//")"
+  [ "$PLACEHOLDERED31E" = "A_URL" ] && pass "AC31 END-TO-END: hydrate exports a placeholder for A_URL (QX_ENV_PLACEHOLDERED='A_URL') — the committed declaration reaches the cloud build" \
+    || fail "AC31 END-TO-END: expected QX_ENV_PLACEHOLDERED='A_URL', got '$PLACEHOLDERED31E' (hydrate out: [$HYDRATE_OUT])"
+  EXPORTLEN31E="$(grep -cE '^export A_URL=' "$ENV_FILE31E")"
+  [ "$EXPORTLEN31E" = "1" ] && pass "AC31 END-TO-END: the env file carries exactly 1 export line for A_URL" \
+    || fail "AC31 END-TO-END: expected exactly 1 export line for A_URL, got $EXPORTLEN31E"
+  LEAK31E="$(grep -c 'ac31e2e-value-should-never-leak' "$ENV_FILE31E")"
+  [ "$LEAK31E" = "0" ] && pass "AC31 END-TO-END: the exported value is a placeholder — 0 occurrences of the real .env.example value" \
+    || fail "AC31 END-TO-END: the real value leaked into the hydrated env file"
 fi
 
 # =============================================================================
