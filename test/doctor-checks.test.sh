@@ -288,8 +288,17 @@ fi
 # against the shipped doctor.md source and a live fixture.
 # =============================================================================
 
-# --- AC29 RESTORED-TO-LIST: the plan's own source-level measure.
-STATUSLINE_IN_LIST="$(awk '/^for f in/,/^done$/' "$DOCTOR_MD" | grep -c 'statusline-command.sh' || true)"
+# --- AC29 RESTORED-TO-LIST: the plan's own source-level measure. Scoped to
+# CHECK3_SCRIPT (already extracted above and proven non-empty by the setup
+# assertion), NOT the whole $DOCTOR_MD — Check 6 also has a "for f in ...;
+# do ... done" loop (its deploy-config candidate list), so scanning the
+# entire file for that generic pattern picks up BOTH loops. A previous
+# version of this assertion scanned the whole file and could be fooled: a
+# decoy value landing in Check 6's loop made it report the entry present
+# even when it had been removed from Check 3's real list — the exact
+# "silently inspects something other than what it claims to" failure this
+# suite is being audited for.
+STATUSLINE_IN_LIST="$(printf '%s\n' "$CHECK3_SCRIPT" | awk '/^for f in/,/^done$/' | grep -c 'statusline-command.sh' || true)"
 [ -n "$STATUSLINE_IN_LIST" ] || STATUSLINE_IN_LIST=0
 if [ "$STATUSLINE_IN_LIST" -eq 1 ]; then
   pass "AC29 RESTORED-TO-LIST: 'statusline-command.sh' appears exactly once in the Check 3 LEGACY for-loop list"
