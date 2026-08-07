@@ -463,6 +463,15 @@ fi
 # quetrex-cloud-prep hydrate — which reads only `.name` — exports exactly the
 # derived name with a credential-less placeholder, with no human hand-
 # patching the spec branch.
+#
+# THE CONTRACT `plan` MUST PROVE (post static-inference deletion, AC20):
+# it PROJECTS required_env from the human's COMMITTED declaration — the
+# `requiredEnv` mapping in .quetrex/verify.json, read from `git show
+# HEAD:.quetrex/verify.json` — the SAME artifact verify-gate.sh's
+# should_skip_for_env reads, and the ONLY thing `quetrex-env-derive declare`
+# can ever write (AC21). It never re-derives, never falls back to
+# candidateList/fallback-less-read evidence on its own, even when that
+# evidence would agree with the answer a human would have given.
 if [ ! -f "$DERIVE_TOOL" ]; then
   fail "AC17: bin/quetrex-env-derive not found at $DERIVE_TOOL"
 elif [ ! -f "$CLOUD_PREP" ]; then
@@ -470,8 +479,16 @@ elif [ ! -f "$CLOUD_PREP" ]; then
 elif ! command -v jq >/dev/null 2>&1; then
   echo "SKIP AC17: jq is not installed — this section is jq-assisted, nothing to test"
 else
-  mk_ac17_fixture() {  # mk_ac17_fixture <dir>
+  mk_ac17_fixture() {  # mk_ac17_fixture <dir> [with-required-env=1]
+    # with-required-env=1 (default): the committed .quetrex/verify.json
+    # carries requiredEnv {"npm run build":["A_URL"]} — the human-confirmed
+    # declaration `plan` must project from.
+    # with-required-env=0: the committed verify.json has a verify[] chain
+    # but NO requiredEnv key at all — used to prove `plan` invents nothing
+    # even though A_URL remains a genuine committed candidate (declared in
+    # .env.example, read fallback-lessly at src/db.js:3).
     local d="$1"
+    local with_req="${2:-1}"
     mkdir -p "$d/src"
     git -C "$d" init -q -b main
     git -C "$d" config user.email "test@example.com"
@@ -494,6 +511,13 @@ EOF
 if [ -z "${A_URL:-}" ]; then exit 1; else exit 0; fi
 EOF
     chmod +x "$d/build.sh"
+    mkdir -p "$d/.quetrex"
+    if [ "$with_req" = "1" ]; then
+      jq -n '{verify: ["npm run build"], requiredEnv: {"npm run build": ["A_URL"]}}' \
+        > "$d/.quetrex/verify.json"
+    else
+      jq -n '{verify: ["npm run build"]}' > "$d/.quetrex/verify.json"
+    fi
     git -C "$d" add -A
     git -C "$d" commit -q -m "chore: AC17 fixture"
     mkdir -p "$d/.quetrex/plan"
@@ -621,6 +645,63 @@ EOF
     pass "AC17: END TO END — the exported value has 0 '@' credential segments"
   else
     fail "AC17: expected 0 '@' segments, got $CRED_SEGMENTS17"
+  fi
+
+  # UNCOMMITTED DECLARATION MUST NOT REACH THE PLAN — same reviewed-diff
+  # guarantee should_skip_for_env enforces on the gate side (constraint 2):
+  # a requiredEnv mapping is only ever authoritative from the COMMITTED
+  # blob. Start from a fixture whose committed verify.json has NO
+  # requiredEnv key, then make an UNCOMMITTED working-tree edit that adds
+  # one — `plan` reads only `git show HEAD:.quetrex/verify.json`, never the
+  # working tree, so the addition must be invisible to it.
+  F17uncommitted="$TMPD/ac17-uncommitted"
+  mk_ac17_fixture "$F17uncommitted" 0
+  jq -n '{verify: ["npm run build"], requiredEnv: {"npm run build": ["A_URL"]}}' \
+    > "$F17uncommitted/.quetrex/verify.json"   # uncommitted edit — deliberately not `git add`ed
+  PLAN17uncommitted="$F17uncommitted/.quetrex/plan/T-4.json"
+  jq -n '{
+    task: "T-4", route: "STANDARD", base_sha: "deadbeef", summary: "uncommitted fixture",
+    workstreams: [], ownership: {}, acceptance: [], security_surface: [],
+    verify: ["npm run build"],
+    security_review_required: false, db_migration: false, impact: {}, notes: []
+  }' > "$PLAN17uncommitted"
+  "$DERIVE_TOOL" plan "$PLAN17uncommitted" "$F17uncommitted" >/dev/null
+  UNCOMMITTED_LEN17="$(jq '.required_env // [] | length' "$PLAN17uncommitted")"
+  if [ "$UNCOMMITTED_LEN17" = "0" ]; then
+    pass "AC17: UNCOMMITTED — an uncommitted requiredEnv edit does not reach the plan (required_env length 0)"
+  else
+    fail "AC17: UNCOMMITTED — expected required_env length 0 (uncommitted declaration must not authorize a stamp), got '$UNCOMMITTED_LEN17'"
+  fi
+  UNCOMMITTED_STATUS17="$(git -C "$F17uncommitted" status --porcelain -- .quetrex/verify.json)"
+  if [ -n "$UNCOMMITTED_STATUS17" ]; then
+    pass "AC17: UNCOMMITTED — fixture sanity check: .quetrex/verify.json genuinely has an uncommitted change ($UNCOMMITTED_STATUS17)"
+  else
+    fail "AC17: UNCOMMITTED — fixture sanity check failed: .quetrex/verify.json shows no uncommitted change, so the check above proves nothing"
+  fi
+
+  # NO DECLARATION AT ALL -> EMPTY required_env, NEVER AN INVENTED ONE — a
+  # repo with a committed verify.json but no requiredEnv key gets
+  # required_env length 0, even though A_URL is a genuine committed
+  # candidate (declared in .env.example, read fallback-lessly at
+  # src/db.js:3). `plan` must project ONLY the human's confirmed
+  # declaration; falling back to candidateList/fallback-less-read evidence
+  # on its own would resurrect the deleted static-inference engine (AC20)
+  # by another name.
+  F17none="$TMPD/ac17-none"
+  mk_ac17_fixture "$F17none" 0
+  PLAN17none="$F17none/.quetrex/plan/T-5.json"
+  jq -n '{
+    task: "T-5", route: "STANDARD", base_sha: "deadbeef", summary: "no declaration fixture",
+    workstreams: [], ownership: {}, acceptance: [], security_surface: [],
+    verify: ["npm run build"],
+    security_review_required: false, db_migration: false, impact: {}, notes: []
+  }' > "$PLAN17none"
+  "$DERIVE_TOOL" plan "$PLAN17none" "$F17none" >/dev/null
+  NONE_LEN17="$(jq '.required_env // [] | length' "$PLAN17none")"
+  if [ "$NONE_LEN17" = "0" ]; then
+    pass "AC17: NO DECLARATION — a repo with no committed requiredEnv gets required_env length 0, not an invented A_URL"
+  else
+    fail "AC17: NO DECLARATION — expected required_env length 0 (no inference), got '$NONE_LEN17'"
   fi
 
   # NEGATIVE CONTROL — reverting only the stamp (skipping the `plan`
