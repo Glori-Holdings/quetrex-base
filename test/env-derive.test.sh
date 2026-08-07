@@ -300,3 +300,159 @@ EOF
     fail "AC20 NEGATIVE CONTROL: expected 3 skips / 0 blocks from the simulated over-attribution write, got skips=$SKIPS20neg blocks=$BLOCKS20neg (out: [$OUT20neg])"
   fi
 fi
+
+# =============================================================================
+# AC21 — `declare` is the ONLY writer of requiredEnv: fails closed on
+# everything it cannot independently prove, is union-only, and a zero-pair
+# call (the non-interactive default) writes nothing at all.
+# =============================================================================
+F21="$TMPROOT/ac21"
+git_init_repo "$F21"
+mkdir -p "$F21/src" "$F21/.quetrex"
+cat > "$F21/.env.example" <<'EOF'
+A_URL=postgres://ac21-a-value-should-never-leak
+B_URL=ac21-b-value-should-never-leak
+C_URL=ac21-c-value-should-never-leak
+E_URL=ac21-e-value-should-never-leak
+EOF
+cat > "$F21/src/db.js" <<'EOF'
+// db client
+// A_URL: no fallback — line 3 is the provable read
+const a = process.env.A_URL;
+// B_URL: HAS a fallback — never provable
+const b = process.env.B_URL ?? "default-b";
+// E_URL: no fallback — provable, used for the union test
+const e = process.env.E_URL;
+EOF
+jq -cn '{verify:["npm run lint -- src","npm run build"],requiredEnv:{"npm run lint -- src":["HANDWRITTEN_VAR"]}}' \
+  > "$F21/.quetrex/verify.json"
+git -C "$F21" add .env.example src/db.js .quetrex/verify.json
+git -C "$F21" commit -q -m "chore: AC21 fixture (A_URL/E_URL provable, B_URL has a fallback, C_URL never read, D_URL undeclared)"
+
+# --- ZERO-PAIR (the non-interactive default) --------------------------------
+PRE21_ZERO="$(cat "$F21/.quetrex/verify.json")"
+OUT21ZERO="$("$TOOL" declare "$F21" 2>&1)"; CODE21ZERO=$?
+POST21_ZERO="$(cat "$F21/.quetrex/verify.json")"
+[ "$CODE21ZERO" -eq 0 ] && pass "AC21 ZERO-PAIR: declare with no flags exits 0" \
+  || fail "AC21 ZERO-PAIR: expected exit 0, got $CODE21ZERO"
+LINES21ZERO="$(printf '%s\n' "$OUT21ZERO" | grep -c 'nothing declared')"
+[ "$LINES21ZERO" = "1" ] && [ "$(printf '%s\n' "$OUT21ZERO" | grep -c .)" = "1" ] \
+  && pass "AC21 ZERO-PAIR: prints exactly 1 line containing 'nothing declared'" \
+  || fail "AC21 ZERO-PAIR: expected exactly 1 line containing 'nothing declared', got [$OUT21ZERO]"
+[ "$PRE21_ZERO" = "$POST21_ZERO" ] && pass "AC21 ZERO-PAIR: .quetrex/verify.json is byte-identical" \
+  || fail "AC21 ZERO-PAIR: .quetrex/verify.json changed"
+
+# --- HAPPY PATH --------------------------------------------------------------
+PRE21_VERIFY="$(jq -S '.verify' "$F21/.quetrex/verify.json")"
+OUT21HP="$("$TOOL" declare "$F21" --cmd "npm run build" --env A_URL 2>&1)"; CODE21HP=$?
+[ "$CODE21HP" -eq 0 ] && pass "AC21 HAPPY PATH: exits 0" || fail "AC21 HAPPY PATH: expected exit 0, got $CODE21HP (out: [$OUT21HP])"
+
+BUILD_REQ21="$(jq -c '.requiredEnv["npm run build"] // empty' "$F21/.quetrex/verify.json")"
+[ "$BUILD_REQ21" = '["A_URL"]' ] && pass 'AC21 HAPPY PATH: requiredEnv["npm run build"] == ["A_URL"] (length 1)' \
+  || fail "AC21 HAPPY PATH: expected [\"A_URL\"], got '$BUILD_REQ21'"
+
+POST21_VERIFY="$(jq -S '.verify' "$F21/.quetrex/verify.json")"
+[ "$PRE21_VERIFY" = "$POST21_VERIFY" ] && pass "AC21 HAPPY PATH: .verify is byte-identical (jq -S) before/after" \
+  || fail "AC21 HAPPY PATH: .verify changed"
+
+LINT_REQ21="$(jq -c '.requiredEnv["npm run lint -- src"] // empty' "$F21/.quetrex/verify.json")"
+[ "$LINT_REQ21" = '["HANDWRITTEN_VAR"]' ] && pass "AC21 HAPPY PATH: the pre-existing hand-written entry is unchanged" \
+  || fail "AC21 HAPPY PATH: hand-written entry changed, got '$LINT_REQ21'"
+
+cp "$F21/.quetrex/verify.json" "$TMPROOT/ac21-after-run1.json"
+"$TOOL" declare "$F21" --cmd "npm run build" --env A_URL >/dev/null
+cmp -s "$TMPROOT/ac21-after-run1.json" "$F21/.quetrex/verify.json" \
+  && pass "AC21 HAPPY PATH: a second identical run leaves the file byte-identical" \
+  || fail "AC21 HAPPY PATH: a second identical run changed the file"
+
+STATUS21HP="$(git -C "$F21" status --porcelain -- .quetrex/verify.json | grep -c .)"
+[ "$STATUS21HP" = "1" ] && pass "AC21 HAPPY PATH: git status --porcelain reports exactly 1 modified path" \
+  || fail "AC21 HAPPY PATH: expected exactly 1 modified path, got $STATUS21HP"
+
+# --- FOUR REFUSALS ------------------------------------------------------
+refusal_test() {  # refusal_test <label> <args...>
+  local label="$1"; shift
+  local pre_content post_content code out
+  pre_content="$(cat "$F21/.quetrex/verify.json")"
+  out="$("$TOOL" declare "$F21" "$@" 2>&1)"; code=$?
+  post_content="$(cat "$F21/.quetrex/verify.json")"
+  if [ "$code" -ne 0 ]; then pass "AC21 REFUSAL ($label): exits non-zero"; else fail "AC21 REFUSAL ($label): expected non-zero exit, got $code (out: [$out])"; fi
+  if [ "$pre_content" = "$post_content" ]; then pass "AC21 REFUSAL ($label): .quetrex/verify.json byte-identical afterwards"; else fail "AC21 REFUSAL ($label): file changed"; fi
+  if [ -n "$out" ]; then pass "AC21 REFUSAL ($label): stderr names a reason"; else fail "AC21 REFUSAL ($label): no stderr output"; fi
+}
+refusal_test "1: cmd not in .verify[]" --cmd "npm run nope" --env A_URL
+refusal_test "2: env not declared" --cmd "npm run build" --env D_URL
+refusal_test "3: env has a fallback" --cmd "npm run build" --env B_URL
+refusal_test "4: env never read" --cmd "npm run build" --env C_URL
+
+# --- UNION -------------------------------------------------------------
+"$TOOL" declare "$F21" --cmd "npm run build" --env E_URL >/dev/null
+BUILD_REQ21U="$(jq -S -c '.requiredEnv["npm run build"]' "$F21/.quetrex/verify.json")"
+if printf '%s' "$BUILD_REQ21U" | jq -e '. == ["A_URL","E_URL"] or . == ["E_URL","A_URL"]' >/dev/null 2>&1 \
+   && [ "$(printf '%s' "$BUILD_REQ21U" | jq 'length')" = "2" ]; then
+  pass "AC21 UNION: a second valid name yields length 2 with the first name still present"
+else
+  fail "AC21 UNION: expected length 2 containing A_URL and E_URL, got '$BUILD_REQ21U'"
+fi
+
+# --- INVARIANTS ----------------------------------------------------------
+FOREIGN21="$(jq '(.requiredEnv | keys) - .verify | length' "$F21/.quetrex/verify.json")"
+[ "$FOREIGN21" = "0" ] && pass "AC21 INVARIANTS: every requiredEnv key is a byte-for-byte member of .verify[]" \
+  || fail "AC21 INVARIANTS: $FOREIGN21 requiredEnv key(s) are not members of .verify[]"
+
+LEAK21="$(grep -cE 'ac21-(a|e)-value-should-never-leak' "$F21/.quetrex/verify.json")"
+[ "$LEAK21" = "0" ] && pass "AC21 INVARIANTS: 0 occurrences of any VALUE string from .env.example in the written file" \
+  || fail "AC21 INVARIANTS: a value leaked into verify.json ($LEAK21 occurrence(s))"
+
+for fixname in A_URL B_URL C_URL D_URL; do
+  n="$(grep -c "$fixname" "$TOOL")"
+  [ "$n" = "0" ] && pass "AC21 INVARIANTS: fixture name $fixname is not hardcoded in bin/quetrex-env-derive" \
+    || fail "AC21 INVARIANTS: fixture name $fixname appears $n time(s) in the tool"
+done
+
+# --- DECLINE ---------------------------------------------------------------
+PRE21DEC_REQLEN="$(jq '.requiredEnv // {} | length' "$F21/.quetrex/verify.json")"
+"$TOOL" declare "$F21" --decline C_URL >/dev/null
+POST21DEC_REQLEN="$(jq '.requiredEnv // {} | length' "$F21/.quetrex/verify.json")"
+[ "$PRE21DEC_REQLEN" = "$POST21DEC_REQLEN" ] && pass "AC21 DECLINE: requiredEnv length unchanged by a decline" \
+  || fail "AC21 DECLINE: requiredEnv length changed ($PRE21DEC_REQLEN -> $POST21DEC_REQLEN)"
+DECL21="$(jq '.requiredEnvDeclined | index("C_URL") != null' "$F21/.quetrex/verify.json")"
+[ "$DECL21" = "true" ] && pass "AC21 DECLINE: requiredEnvDeclined contains C_URL" \
+  || fail "AC21 DECLINE: requiredEnvDeclined does not contain C_URL"
+
+"$TOOL" declare "$F21" --decline D_URL >/dev/null
+DECL21LEN="$(jq '.requiredEnvDeclined | length' "$F21/.quetrex/verify.json")"
+[ "$DECL21LEN" = "2" ] && pass "AC21 DECLINE: union-only — a second decline yields length 2" \
+  || fail "AC21 DECLINE: expected requiredEnvDeclined length 2, got $DECL21LEN"
+
+MISSING21="$("$TOOL" missing "$F21")"
+MISS21_A="$(printf '%s\n' "$MISSING21" | grep -c '^A_URL$')"
+MISS21_C="$(printf '%s\n' "$MISSING21" | grep -c '^C_URL$')"
+[ "$MISS21_A" = "0" ] && [ "$MISS21_C" = "0" ] \
+  && pass "AC21 DECLINE: missing prints 0 lines for a name covered by requiredEnv (A_URL) or declined (C_URL) — 2 of 2" \
+  || fail "AC21 DECLINE: expected 0/0, got A_URL=$MISS21_A C_URL=$MISS21_C (missing output: [$MISSING21])"
+
+# --- NEGATIVE CONTROL --------------------------------------------------
+MUT21="$TMPROOT/quetrex-env-derive.no-membership-check"
+sed -E 's/^var QX_DECLARE_VERIFY_MEMBERSHIP_ENABLED = true;$/var QX_DECLARE_VERIFY_MEMBERSHIP_ENABLED = false;/' "$TOOL" > "$MUT21"
+chmod +x "$MUT21"
+MUT21_DIFF="$(diff "$TOOL" "$MUT21" | grep -c '^[<>]')"
+[ "$MUT21_DIFF" = "2" ] && pass "AC21 NEGATIVE CONTROL: the membership-check mutation changes exactly one line in the tool" \
+  || fail "AC21 NEGATIVE CONTROL: expected the mutation to touch exactly 1 line (2 diff lines), got $MUT21_DIFF"
+
+F21neg="$TMPROOT/ac21neg"
+git_init_repo "$F21neg"
+mkdir -p "$F21neg/src" "$F21neg/.quetrex"
+cp "$F21/.env.example" "$F21neg/.env.example" 2>/dev/null || printf 'A_URL=x\n' > "$F21neg/.env.example"
+cat > "$F21neg/src/db.js" <<'EOF'
+const a = process.env.A_URL;
+EOF
+jq -cn '{verify:["npm run build"]}' > "$F21neg/.quetrex/verify.json"
+git -C "$F21neg" add .env.example src/db.js .quetrex/verify.json
+git -C "$F21neg" commit -q -m "chore: AC21 negative-control fixture"
+
+"$MUT21" declare "$F21neg" --cmd "npm run nope" --env A_URL >/dev/null 2>&1
+NOPE21NEG="$(jq -c '.requiredEnv["npm run nope"] // empty' "$F21neg/.quetrex/verify.json")"
+[ "$NOPE21NEG" = '["A_URL"]' ] \
+  && pass "AC21 NEGATIVE CONTROL: disabling the membership check wrongly writes a key for a command not in .verify[] — proves the check is load-bearing" \
+  || fail "AC21 NEGATIVE CONTROL: expected the mutated tool to (wrongly) write requiredEnv[\"npm run nope\"], got '$NOPE21NEG'"
