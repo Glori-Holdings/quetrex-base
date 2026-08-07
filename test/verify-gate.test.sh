@@ -1405,6 +1405,141 @@ else
   fail "AC28 EMPTY-HEAD: expected exit 0 + 1 block decision, got exit $CODE28B blocks $BLOCKS28B (out: [$OUT28B])"
 fi
 
+# =============================================================================
+# ADV-K — ANTI-REINTRODUCTION CONTROL: resolve_from_claude_md()'s awk RULE
+# ORDER. Found while porting this hook to quetrex-factory's drifted copy,
+# which still has the OLD order (heading rule evaluated unconditionally,
+# before the fence toggle): any `#`-prefixed line inside a fenced
+# Verification block matches the heading pattern and resets insec=0,
+# silently ending the section. A completely ordinary CLAUDE.md — one
+# explanatory comment per command, no malice required — captures ZERO
+# commands under the old order and falls through with NO error surfaced.
+# This exact fixture is the empirical repro: three commands, each preceded
+# by a plain comment.
+# =============================================================================
+F_K="$TMPROOT/advk"
+git_init_repo "$F_K"
+mkdir -p "$F_K/.claude"
+cat > "$F_K/.claude/CLAUDE.md" <<'MD'
+# fixture
+
+## Verification
+
+```
+# lint first
+echo LINT_MARKER
+# then build
+echo BUILD_MARKER
+# finally the tests
+sh -c 'echo TEST_MARKER; exit 7'
+```
+MD
+git -C "$F_K" add .claude/CLAUDE.md
+git -C "$F_K" commit -q -m "chore: add a commented CLAUDE.md verification fence"
+
+LEDGER_K="$F_K/.quetrex/verify-ledger.jsonl"
+OUTK="$(run_hook "$F_K" "Stop" 2>&1)"; CODEK=$?
+BLOCKSK="$(count_block_decisions "$OUTK")"
+REASONK="$(printf '%s' "$OUTK" | jq -r '.reason // empty' 2>/dev/null)"
+
+if [ "$CODEK" -eq 0 ] && [ "$BLOCKSK" = "1" ]; then
+  pass "ADV-K: a commented CLAUDE.md Verification fence still blocks on its real (3rd) failure"
+else
+  fail "ADV-K: expected exit 0 + 1 block decision, got exit $CODEK blocks $BLOCKSK (out: [$OUTK]) — the fence was likely swallowed to 0 commands (awk rule order regression)"
+fi
+if printf '%s' "$REASONK" | grep -q "exited 7"; then
+  pass "ADV-K: the block reason names the 3rd command's real exit code (7), not a spurious 'nothing to gate'"
+else
+  fail "ADV-K: block reason does not name exit 7 [$REASONK]"
+fi
+LEDGER_K_LINES=0
+LINT_RAN=0
+BUILD_RAN=0
+TEST_RAN=0
+if [ -f "$LEDGER_K" ]; then
+  while IFS= read -r l; do
+    [ -z "$l" ] && continue
+    LEDGER_K_LINES=$((LEDGER_K_LINES + 1))
+    cm="$(printf '%s' "$l" | jq -r '.cmd')"
+    case "$cm" in
+      "echo LINT_MARKER") LINT_RAN=1 ;;
+      "echo BUILD_MARKER") BUILD_RAN=1 ;;
+      "sh -c 'echo TEST_MARKER; exit 7'") TEST_RAN=1 ;;
+    esac
+  done < "$LEDGER_K"
+fi
+if [ "$LEDGER_K_LINES" = "3" ]; then
+  pass "ADV-K: the ledger gained exactly 3 lines — all 3 commented commands ran, none swallowed by the comment lines"
+else
+  fail "ADV-K: expected exactly 3 ledger lines (one per command), got $LEDGER_K_LINES — a fence-order regression captures 0"
+fi
+if [ "$LINT_RAN" = "1" ] && [ "$BUILD_RAN" = "1" ] && [ "$TEST_RAN" = "1" ]; then
+  pass "ADV-K: all three specific commands (lint, build, test markers) are present in the ledger, in order, not just a count"
+else
+  fail "ADV-K: expected all 3 marker commands in the ledger, got lint=$LINT_RAN build=$BUILD_RAN test=$TEST_RAN"
+fi
+
+# =============================================================================
+# ADV-L — ANTI-REINTRODUCTION CONTROL: resolve_from_verify_json()'s verifyQuick
+# SUBSET ENFORCEMENT. Found in the same drift audit: the factory's unfixed
+# copy trusts verifyQuick[] verbatim as the whole SubagentStop chain whenever
+# it is present and non-empty, with no relationship to verify[] required —
+# `"verifyQuick":["true"]` (or any stale entry left by an ordinary rename)
+# would pass every SubagentStop while the REAL verify[] chain (which would
+# have failed) is never run and never proven. Every verifyQuick entry must be
+# a byte-for-byte member of verify[]; on any mismatch the FULL verify[] chain
+# must run instead.
+# =============================================================================
+F_L="$TMPROOT/advl"
+git_init_repo "$F_L"
+mkdir -p "$F_L/.quetrex"
+REALCMD_L="sh -c 'exit 9'"
+jq -cn --arg real "$REALCMD_L" '{verify: [$real], verifyQuick: ["true"]}' \
+  > "$F_L/.quetrex/verify.json"
+git -C "$F_L" add .quetrex/verify.json
+git -C "$F_L" commit -q -m "chore: verifyQuick is NOT a subset of verify (adversarial)"
+
+LEDGER_L="$F_L/.quetrex/verify-ledger.jsonl"
+OUTL="$(run_hook "$F_L" "SubagentStop" 2>&1)"; CODEL=$?
+BLOCKSL="$(count_block_decisions "$OUTL")"
+REASONL="$(printf '%s' "$OUTL" | jq -r '.reason // empty' 2>/dev/null)"
+
+if [ "$CODEL" -eq 0 ] && [ "$BLOCKSL" = "1" ]; then
+  pass "ADV-L: a non-subset verifyQuick does not pass SubagentStop — the FULL verify[] chain ran and its real failure blocked"
+else
+  fail "ADV-L: expected exit 0 + 1 block decision, got exit $CODEL blocks $BLOCKSL (out: [$OUTL]) — verifyQuick was likely trusted verbatim (subset-enforcement regression)"
+fi
+if printf '%s' "$REASONL" | grep -qE 'exited 9\b'; then
+  pass "ADV-L: the block reason names the REAL chain's exit code (9), proving verify[] ran, not verifyQuick's \`true\`"
+else
+  fail "ADV-L: block reason does not name exit 9 [$REASONL]"
+fi
+if printf '%s' "$REASONL" | grep -qi 'not a subset'; then
+  pass "ADV-L: the block reason names the subset mismatch (QUICK_NOTE) so the misconfiguration is visible, not silent"
+else
+  fail "ADV-L: block reason does not mention the subset mismatch [$REASONL]"
+fi
+REALCMD_L_RAN=0
+TRUE_ALONE_RAN=0
+if [ -f "$LEDGER_L" ]; then
+  while IFS= read -r l; do
+    [ -z "$l" ] && continue
+    cm="$(printf '%s' "$l" | jq -r '.cmd')"
+    [ "$cm" = "$REALCMD_L" ] && REALCMD_L_RAN=1
+    [ "$cm" = "true" ] && TRUE_ALONE_RAN=1
+  done < "$LEDGER_L"
+fi
+if [ "$REALCMD_L_RAN" = "1" ]; then
+  pass "ADV-L: the ledger shows \`$REALCMD_L\` (the real chain) genuinely ran"
+else
+  fail "ADV-L: the ledger has no line for \`$REALCMD_L\` — the real chain never ran"
+fi
+if [ "$TRUE_ALONE_RAN" = "0" ]; then
+  pass "ADV-L: the ledger has no line for bare \`true\` — verifyQuick's rejected chain never ran on its own"
+else
+  fail "ADV-L: the ledger shows verifyQuick's \`true\` ran — the non-subset chain was trusted"
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "verify-gate.test.sh: all checks passed"
