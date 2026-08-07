@@ -1072,6 +1072,131 @@ else
 fi
 unset QX_DECLARE_SHIM_LOG
 
+# =============================================================================
+# F2 (CONFIRMED, reviewer) — propose must never fabricate a pairing between a
+# candidate NAME and a verify[] command, and read_at must never point at
+# .quetrex/verify.json itself.
+# =============================================================================
+
+# --- F2 READ_AT: a chain command string that itself contains the literal
+# text "process.env.NAME" must not corrupt the reported read site. ----------
+F2RA="$TMPROOT/f2-readat"
+git_init_repo "$F2RA"
+mkdir -p "$F2RA/src" "$F2RA/.quetrex"
+printf 'FOO_URL=f2-value-should-never-leak\n' > "$F2RA/.env.example"
+cat > "$F2RA/src/db.js" <<'EOF'
+const a = process.env.FOO_URL;
+EOF
+# The chain command string below is deliberately shaped so that a whole-tree
+# grep for "process.env.NAME" ALSO matches inside .quetrex/verify.json —
+# this is the exact reviewer repro, not a contrived edge case: any verify[]
+# entry that inspects an env var via a one-liner reproduces it.
+jq -cn '{verify:["node -e \"console.log(process.env.FOO_URL)\""]}' > "$F2RA/.quetrex/verify.json"
+git -C "$F2RA" add .env.example src/db.js .quetrex/verify.json
+git -C "$F2RA" commit -q -m "chore: F2 read_at fixture — verify.json's own text matches the read pattern"
+
+SCAN_F2RA="$("$TOOL" scan "$F2RA" 2>/dev/null)"
+READAT_F2RA="$(printf '%s' "$SCAN_F2RA" | cut -f2)"
+[ "$READAT_F2RA" = "src/db.js:1" ] && pass "F2 READ_AT: scan reports the real source location src/db.js:1, not .quetrex/verify.json" \
+  || fail "F2 READ_AT: expected src/db.js:1, got '$READAT_F2RA' (scan out: [$SCAN_F2RA])"
+
+PROPOSE_F2RA="$("$TOOL" propose "$F2RA" 2>/dev/null)"
+PREADAT_F2RA="$(printf '%s' "$PROPOSE_F2RA" | jq -r '.candidates[0].read_at' 2>/dev/null)"
+[ "$PREADAT_F2RA" = "src/db.js:1" ] && pass "F2 READ_AT: propose's .candidates[0].read_at is src/db.js:1, not .quetrex/verify.json" \
+  || fail "F2 READ_AT: expected src/db.js:1 from propose, got '$PREADAT_F2RA'"
+
+# --- NEGATIVE CONTROL: reverting only the .quetrex exclusion in
+# fallbacklessReads() regresses read_at back to the config file. -----------
+MUT_F2RA="$TMPROOT/quetrex-env-derive.no-quetrex-exclusion"
+sed -E 's/\["grep", "-n", "-I", "-E", combined, "HEAD", "--", "\.", ":!\.quetrex"\]/["grep", "-n", "-I", "-E", combined, "HEAD", "--"]/' "$TOOL" > "$MUT_F2RA"
+chmod +x "$MUT_F2RA"
+MUT_F2RA_DIFF="$(diff "$TOOL" "$MUT_F2RA" | grep -c '^[<>]')"
+[ "$MUT_F2RA_DIFF" = "2" ] && pass "F2 NEGATIVE CONTROL: the .quetrex-exclusion mutation changes exactly one line" \
+  || fail "F2 NEGATIVE CONTROL: expected the mutation to touch exactly 1 line (2 diff lines), got $MUT_F2RA_DIFF"
+
+READAT_F2RANEG="$("$MUT_F2RA" scan "$F2RA" 2>/dev/null | cut -f2)"
+[ "$READAT_F2RANEG" = ".quetrex/verify.json:1" ] && pass "F2 NEGATIVE CONTROL: reverting the exclusion reproduces the wrong read_at (.quetrex/verify.json:1) — proving the fix is load-bearing" \
+  || fail "F2 NEGATIVE CONTROL: expected the mutated tool to (wrongly) report .quetrex/verify.json:1, got '$READAT_F2RANEG'"
+
+# --- F2 HONESTY: propose's own JSON says, in the output itself, that no
+# pairing is claimed — and never carries a cmd/command key on a candidate. --
+NOTE_F2="$(printf '%s' "$PROPOSE_F2RA" | jq -r '.note')"
+printf '%s' "$NOTE_F2" | grep -qF 'NOT paired to any verify' \
+  && pass "F2 HONESTY: propose's .note states candidates are NOT paired to a verify[] command" \
+  || fail "F2 HONESTY: expected .note to contain 'NOT paired to any verify', got '$NOTE_F2'"
+
+CANDKEYS_F2="$(printf '%s' "$PROPOSE_F2RA" | jq -r '.candidates[0] | keys | sort | join(",")')"
+[ "$CANDKEYS_F2" = "name,read_at" ] && pass "F2 HONESTY: a candidate carries exactly name,read_at — never a cmd/command key" \
+  || fail "F2 HONESTY: expected exactly 'name,read_at', got '$CANDKEYS_F2'"
+
+# --- F2 INIT.MD SHAPE: the fabricated 3-column table and its invented
+# question text are gone; the real chain is rendered instead. ---------------
+OLDCOL_F2="$(grep -c 'it could gate' "$INIT_MD")"
+[ "$OLDCOL_F2" = "0" ] && pass "F2 INIT.MD: 0 occurrences of the fabricated 'it could gate' column" \
+  || fail "F2 INIT.MD: the fabricated column phrase still appears $OLDCOL_F2 time(s)"
+
+OLDQ_F2="$(grep -c 'looks required by' "$INIT_MD")"
+[ "$OLDQ_F2" = "0" ] && pass "F2 INIT.MD: 0 occurrences of the old invented 'looks required by' question" \
+  || fail "F2 INIT.MD: the old invented question phrase still appears $OLDQ_F2 time(s)"
+
+NEWCHAIN_F2="$(grep -c 'The real verify chain' "$INIT_MD")"
+[ "$NEWCHAIN_F2" -ge 1 ] && pass "F2 INIT.MD: the real verify chain is rendered as its own section" \
+  || fail "F2 INIT.MD: expected the real-chain rendering section, got $NEWCHAIN_F2"
+
+MULTISEL_F2="$(grep -c 'multi-select' "$INIT_MD")"
+[ "$MULTISEL_F2" -ge 1 ] && pass "F2 INIT.MD: the question is documented as multi-select (a name may gate more than one real command)" \
+  || fail "F2 INIT.MD: expected a multi-select mention, got $MULTISEL_F2"
+
+# =============================================================================
+# F3 (CONFIRMED, reviewer) — init.md's verify.json staging line must surface
+# a genuine git-add failure instead of swallowing it with 2>/dev/null || true.
+# =============================================================================
+F3_LINE="$(grep -F '[ -f "$REPO_ROOT/.quetrex/verify.json" ]  && git -C "$REPO_ROOT" add .quetrex/verify.json' "$INIT_MD")"
+[ -n "$F3_LINE" ] && pass "F3: extracted the verify.json staging line verbatim from init.md" \
+  || fail "F3: could not find the verify.json staging line in init.md"
+
+SWALLOW_F3="$(printf '%s\n' "$F3_LINE" | grep -c '2>/dev/null')"
+[ "$SWALLOW_F3" = "0" ] && pass "F3: the verify.json staging line no longer swallows its exit code" \
+  || fail "F3: expected 0 occurrences of '2>/dev/null' on this line, got $SWALLOW_F3 (line: [$F3_LINE])"
+
+# --- CONTROL: a neighboring, un-fixed line still swallows (proves this was
+# a scoped fix, not a blanket rewrite of every add line). -------------------
+NEIGHBOR_F3="$(grep -F '[ -f "$REPO_ROOT/.worktreeinclude" ]      && git -C "$REPO_ROOT" add .worktreeinclude' "$INIT_MD")"
+NEIGHBOR_SWALLOW_F3="$(printf '%s\n' "$NEIGHBOR_F3" | grep -c '2>/dev/null || true')"
+[ "$NEIGHBOR_SWALLOW_F3" = "1" ] && pass "F3 CONTROL: the neighboring .worktreeinclude line is untouched and still swallows — this was a scoped fix" \
+  || fail "F3 CONTROL: expected the neighboring line to still swallow, got $NEIGHBOR_SWALLOW_F3"
+
+# --- BEHAVIORAL: run the extracted line for real against a fixture where
+# .quetrex/verify.json is gitignored — git add genuinely fails, and that
+# failure must now be visible (nonzero exit, real stderr), not swallowed. ---
+F3FIX="$TMPROOT/f3-fixture"
+git_init_repo "$F3FIX"
+mkdir -p "$F3FIX/.quetrex"
+printf '.quetrex/*\n' > "$F3FIX/.gitignore"
+jq -cn '{verify:["npm test"]}' > "$F3FIX/.quetrex/verify.json"
+git -C "$F3FIX" add .gitignore
+git -C "$F3FIX" commit -q -m "chore: F3 fixture — .quetrex/* is gitignored"
+
+run_f3_line() {  # run_f3_line <repo-root> <line>
+  local repo="$1" line="$2"
+  REPO_ROOT="$repo" bash -c "$line" 2>&1
+}
+
+OUT_F3="$(run_f3_line "$F3FIX" "$F3_LINE")"; CODE_F3=$?
+[ "$CODE_F3" -ne 0 ] && pass "F3 BEHAVIORAL: a genuine git-add failure now exits non-zero" \
+  || fail "F3 BEHAVIORAL: expected non-zero exit on a real git-add failure, got 0"
+printf '%s' "$OUT_F3" | grep -qi 'ignored' && pass "F3 BEHAVIORAL: git's real error text (mentions 'ignored') is visible, not swallowed" \
+  || fail "F3 BEHAVIORAL: expected git's error text to be visible, got: [$OUT_F3]"
+
+# --- NEGATIVE CONTROL: restoring the swallow suffix makes the exact same
+# failure disappear — exit 0, no output — proving the assertions are real. --
+OUT_F3NEG="$(run_f3_line "$F3FIX" "$F3_LINE 2>/dev/null || true")"; CODE_F3NEG=$?
+if [ "$CODE_F3NEG" -eq 0 ] && [ -z "$OUT_F3NEG" ]; then
+  pass "F3 NEGATIVE CONTROL: restoring '2>/dev/null || true' makes the same real failure silently exit 0 with no output — proving the fix is load-bearing"
+else
+  fail "F3 NEGATIVE CONTROL: expected exit 0 and no output with the swallow suffix restored, got exit=$CODE_F3NEG out=[$OUT_F3NEG]"
+fi
+
 if [ "$FAIL" -eq 0 ]; then
   echo
   echo "env-derive.test.sh: all checks passed"

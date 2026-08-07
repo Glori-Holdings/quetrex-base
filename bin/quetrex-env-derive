@@ -78,11 +78,15 @@
 #       Read-only; never touches .quetrex/verify.json.
 #   quetrex-env-derive propose <repo-root>
 #       Print one JSON object on stdout: {candidates, chain, requiredEnv,
-#       requiredEnvDeclined} — candidates from committed evidence, the rest
-#       from the COMMITTED .quetrex/verify.json (never the working tree).
-#       READ-ONLY, writes nothing, ever. May also print an informational
-#       stderr hint per name that looks like a candidate but is not fully
-#       committed yet — never a confirmable candidate.
+#       requiredEnvDeclined, note} — candidates from committed evidence, the
+#       rest from the COMMITTED .quetrex/verify.json (never the working
+#       tree). A candidate is NEVER paired to a verify[] command (F2,
+#       CONFIRMED) — `note` says so in the output itself, not only in this
+#       comment, so nothing reading raw JSON can mistake `chain` sitting
+#       next to `candidates` for a derived association. READ-ONLY, writes
+#       nothing, ever. May also print an informational stderr hint per name
+#       that looks like a candidate but is not fully committed yet — never a
+#       confirmable candidate.
 #   quetrex-env-derive seed-chain <repo-root> <cmd>...
 #       Create .quetrex/verify.json's .verify[] ONLY when the file is
 #       absent and at least one non-blank command was given. Refuses (exits
@@ -210,7 +214,15 @@ function fallbacklessReads(repoRoot) {
   var found = {};
   var patterns = envReadPatterns();
   var combined = "process\\.env\\.[A-Za-z_]|os\\.environ\\[|System\\.getenv\\(|ENV\\[";
-  var out = runGit(repoRoot, ["grep", "-n", "-I", "-E", combined, "HEAD", "--"]);
+  // Exclude .quetrex/** from the read-site search (F2, CONFIRMED). Without
+  // this, a chain command string committed inside .quetrex/verify.json that
+  // happens to CONTAIN "process.env.NAME" as literal text (e.g. a `node -e`
+  // one-liner used as a verify[] entry) is itself a git-grep hit, and
+  // ".quetrex/verify.json" sorts before most source paths — so the first-
+  // occurrence-wins logic below recorded read_at as the CONFIG file, never
+  // the real source line, and a human confirming a `propose` candidate was
+  // shown a location they could never actually go read.
+  var out = runGit(repoRoot, ["grep", "-n", "-I", "-E", combined, "HEAD", "--", ".", ":!.quetrex"]);
   if (out === null) return found;
   var lines = out.split("\n");
   for (var li = 0; li < lines.length; li++) {
@@ -273,7 +285,12 @@ function readCommittedVerifyJson(repoRoot) {
 // `declare` to authorize a write.
 // ---------------------------------------------------------------------
 function workingTreeFileList(repoRoot) {
-  var out = runGit(repoRoot, ["ls-files", "--cached", "--others", "--exclude-standard"]);
+  // Excludes .quetrex/** for the same reason fallbacklessReads() does (F2):
+  // a chain command string sitting inside .quetrex/verify.json can itself
+  // contain "process.env.NAME" as literal text, which would otherwise
+  // corrupt the read_at that workingTreeFallbacklessReads() computes, the
+  // same way.
+  var out = runGit(repoRoot, ["ls-files", "--cached", "--others", "--exclude-standard", "--", ".", ":!.quetrex"]);
   if (out === null) return [];
   return out.split("\n").filter(Boolean);
 }
@@ -385,7 +402,16 @@ function cmdPropose(args) {
     candidates: candidates,
     chain: committed.verify,
     requiredEnv: committed.requiredEnv,
-    requiredEnvDeclined: committed.requiredEnvDeclined
+    requiredEnvDeclined: committed.requiredEnvDeclined,
+    // F2 (CONFIRMED): a candidate is never paired to a verify[] command here
+    // — there is no evidence that could make that pairing true, and a
+    // fabricated one is exactly what let a genuinely-red command get
+    // silently skipped forever. `chain` above is the real, unmodified
+    // .verify[] list; a human must pick which entry (if any) actually needs
+    // this name and pass it to `declare --cmd`. This field exists so that
+    // truth is visible to a caller reading raw JSON, not only to a caller
+    // that also reads the comments in this file.
+    note: "candidates are NOT paired to any verify[] command — no evidence links a name to a specific command; choose the command yourself, then run declare --cmd <command> --env <NAME>"
   };
   process.stdout.write(JSON.stringify(out) + "\n");
 

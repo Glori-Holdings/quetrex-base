@@ -428,22 +428,47 @@ condition. Its `.candidates[]` are names this repo's own COMMITTED `.env.example
 evidence `verify-gate.sh` itself re-checks on read (SEC-4), so nothing shown to the human
 below can ever be a pairing the gate would then silently refuse to honor.
 
+**A candidate is never paired to a `.verify[]` command.** `propose`'s own `.note` field
+says this in the JSON itself — there is no code path anywhere that determines which chain
+command actually reaches a given candidate's read site, and a prior version of this step
+asked the MODEL to invent that pairing and present it as derived. That is exactly the F2
+defect the human-confirmation design exists to prevent, not a shortcut it can afford:
+`declare`'s only defense is that `--cmd` names a byte-for-byte member of `.verify[]`, and
+every real command trivially satisfies that — so a fabricated pairing a human rubber-stamps
+is just as capable of silently un-gating a genuinely-red command as the deleted inference
+engine ever was. The fix is not a better guess; it is never guessing.
+
 ### 5c. Confirm with the human, then write only the confirmed pairs
 
 When `${QUETREX_ENV_DERIVE_PROPOSAL}` has zero `.candidates`, there is nothing to
-confirm — skip straight to step 6. Otherwise, for every candidate, render a compact
-table BEFORE asking — never ask cold:
+confirm — skip straight to step 6. Otherwise, render two things BEFORE asking — never ask
+cold, and never render a column with no data behind it:
 
-| name | read_at | chain command |
-|------|---------|----------------|
-| `.candidates[].name` | `.candidates[].read_at` | the `.verify[]` entry it could gate |
+**1. The candidates**, name and read_at only — both are real, from `.candidates[]`:
 
-Then ask with `AskUserQuestion`, one question per candidate/command pairing. Cap the
-interaction at no more than 1 AskUserQuestion round trip per 4 candidates (batch beyond
-that). The first option of every question is always the decline option, labeled **"No —
-leave undeclared"**; the second is **"Yes — declare it"**. Example question:
-*"`<NAME>` looks required by `<command>` — should `verify-gate` skip `<command>` when
-`<NAME>` is unset in this checkout?"*
+| name | read_at |
+|------|---------|
+| `.candidates[].name` | `.candidates[].read_at` |
+
+**2. The real verify chain**, verbatim from `.chain` (never re-typed, never summarized):
+
+```
+1) .chain[0]
+2) .chain[1]
+...
+```
+
+If `.chain` is empty, there is nothing any candidate could ever gate — skip straight to
+step 6 for the same reason zero candidates does.
+
+Then ask with `AskUserQuestion`, **one question per candidate**, options built from the
+real chain list above: first option always **"No — leave undeclared"**, followed by one
+option per chain command, **"Yes — gate `<chain[i]>`"**, `AskUserQuestion`'s multi-select
+so a human can pick more than one command for the same name when that is genuinely true.
+Cap the interaction at no more than 1 AskUserQuestion round trip per 4 candidates (batch
+beyond that). Example question: *"`<NAME>` is a committed candidate, read at `<read_at>` —
+which of these commands, if any, should `verify-gate` skip when `<NAME>` is unset in this
+checkout? (Nothing here was derived — you are the only source of this pairing.)"*
 
 **Non-interactive guard — propose nothing, write nothing.** When there is nobody to
 ask — the literal env var `QUETREX_INIT_NONINTERACTIVE` is set, or a no-TTY test
@@ -930,7 +955,15 @@ git -C "$REPO_ROOT" add .quetrex/project.json 2>/dev/null || true
 [ -f "$REPO_ROOT/CLAUDE.md" ]        && git -C "$REPO_ROOT" add CLAUDE.md 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/CLAUDE.md" ] && git -C "$REPO_ROOT" add .claude/CLAUDE.md 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/settings.json" ] && git -C "$REPO_ROOT" add .claude/settings.json 2>/dev/null || true
-[ -f "$REPO_ROOT/.quetrex/verify.json" ]  && git -C "$REPO_ROOT" add .quetrex/verify.json 2>/dev/null || true
+# F3 (CONFIRMED): unlike the lines above, this one is NOT swallowed on
+# failure. .quetrex/* is commonly gitignored wholesale in a target repo, and
+# a future install-time hardening (SEC-2's own remediation) is expected to
+# assert exactly that — which would silently kill the whole requiredEnv
+# mechanism everywhere unless that same hardening also adds
+# `!.quetrex/verify.json` as an exception. If `git add` here ever fails, the
+# human/model running this step needs to see it, not have it disappear
+# behind `|| true` the way every neighboring line still does.
+[ -f "$REPO_ROOT/.quetrex/verify.json" ]  && git -C "$REPO_ROOT" add .quetrex/verify.json
 [ -f "$REPO_ROOT/.worktreeinclude" ]      && git -C "$REPO_ROOT" add .worktreeinclude 2>/dev/null || true
 # The committed engine pin is read by cloud routines from the repo, so it must be
 # committed. `.mcp.json` uses `add -A` on purpose: step 4h now REMOVES the dead
