@@ -156,10 +156,10 @@ else
   fail "AC1: block .reason should be <= 3 lines and non-empty, got ($REASON1_LINES lines): [$REASON1]"
 fi
 
-if printf '%s' "$REASON1" | grep -q '\.quetrex/verify-gate\.log'; then
-  pass "AC1: block .reason references .quetrex/verify-gate.log"
+if printf '%s' "$REASON1" | grep -q '\.quetrex/verify-gate-failed\.log'; then
+  pass "AC1: block .reason references .quetrex/verify-gate-failed.log (the preserved-failure slot, AC26)"
 else
-  fail "AC1: block .reason does not reference .quetrex/verify-gate.log: [$REASON1]"
+  fail "AC1: block .reason does not reference .quetrex/verify-gate-failed.log: [$REASON1]"
 fi
 
 LOG1="$F1/.quetrex/verify-gate.log"
@@ -1038,14 +1038,20 @@ for needle in 'git worktree list' '--git-common-dir' 'QUETREX_VERIFY_FORCE' 'MAI
   fi
 done
 
+# The threshold here is a secondary proxy for the deletion, not the load-
+# bearing proof (the 4 grep-count checks above are that). It was 80 before
+# this round added AC26's second, bounded log slot and AC28's SEC-2 $HEAD_SHA
+# pin — both genuinely necessary growth — so it is lowered to 50 to absorb
+# that growth while still requiring the file to be measurably, substantially
+# smaller than the pre-deletion baseline.
 HOOK_LINES="$(wc -l < "$HOOK_SRC" | tr -d ' ')"
 OLD_HOOK_LINES="$(git -C "$REPO_ROOT" show 63bb114:.claude/hooks/verify-gate.sh 2>/dev/null | wc -l | tr -d ' ')"
 case "$OLD_HOOK_LINES" in ''|0|*[!0-9]*) OLD_HOOK_LINES=724 ;; esac
 DELTA=$((OLD_HOOK_LINES - HOOK_LINES))
-if [ "$DELTA" -ge 80 ]; then
-  pass "AC10: verify-gate.sh is at least 80 lines shorter than at 63bb114 (delta $DELTA)"
+if [ "$DELTA" -ge 50 ]; then
+  pass "AC10: verify-gate.sh is at least 50 lines shorter than at 63bb114 (delta $DELTA)"
 else
-  fail "AC10: verify-gate.sh is only $DELTA lines shorter than at 63bb114 (need >= 80)"
+  fail "AC10: verify-gate.sh is only $DELTA lines shorter than at 63bb114 (need >= 50)"
 fi
 
 # =============================================================================
@@ -1085,6 +1091,287 @@ if [ -n "$REASON9" ] && [ "$REASON9_LINES" -le 3 ]; then
   pass "AC9: the block reason stays within the <=3-line quiet-output budget even with a skip note"
 else
   fail "AC9: block reason exceeded the 3-line budget (got $REASON9_LINES lines): [$REASON9]"
+fi
+
+# =============================================================================
+# AC26 — THE LOG SURVIVES THE VERY NEXT INVOCATION. verify-gate.log is
+# unlinked+recreated on EVERY run, so the SubagentStop that ordinarily follows
+# a blocking Stop (an agent dispatching a subagent to investigate) erases the
+# failure and leaves an all-green quick-chain log at exactly the path the
+# block reason pointed at — the operator's original complaint, recreated. A
+# RED run's own failing-command output must now also be PRESERVED into a
+# second, single, mode-600 slot that the block reason names instead, bounded
+# at two files, replaced only by a NEWER genuine failure, never by a green.
+# =============================================================================
+count_glob_files() {  # count_glob_files <dir> <pattern> -> N (maxdepth 1)
+  find "$1" -maxdepth 1 -name "$2" 2>/dev/null | wc -l | tr -d ' '
+}
+log_tokens() {  # log_tokens <text> -> whitespace-split tokens ending in .log
+  printf '%s' "$1" | tr -s ' \t\n' '\n' | grep -c '\.log$' 2>/dev/null || echo 0
+}
+first_log_token() {  # first_log_token <text> -> first whitespace token ending in .log
+  printf '%s' "$1" | tr -s ' \t\n' '\n' | grep '\.log$' 2>/dev/null | head -n1
+}
+all_mode_600() {  # all_mode_600 <dir> <pattern> -> "1" iff every match is mode 600 (and >=1 match)
+  local d="$1" pat="$2" f mode ok=1 n=0
+  for f in "$d"/$pat; do
+    [ -f "$f" ] || continue
+    n=$((n + 1))
+    mode="$(stat -f '%Lp' "$f" 2>/dev/null || stat -c '%a' "$f" 2>/dev/null)"
+    [ "$mode" = "600" ] || ok=0
+  done
+  [ "$n" -ge 1 ] && [ "$ok" -eq 1 ] && printf '1' || printf '0'
+}
+
+F26="$TMPROOT/ac26"
+git_init_repo "$F26"
+mkdir -p "$F26/.quetrex"
+# The failing command's OWN STRING must never contain the marker text — the
+# log's "cmd: <string>" header line echoes the command verbatim, so a marker
+# embedded in the command string itself would double-count against the
+# marker's grep -c, masking whether the OUTPUT genuinely carries it (matches
+# the AC1 fixture's wrapper-script pattern above for the same reason).
+cat > "$F26/fail26.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+echo "THE-REAL-STACK-TRACE-LINE-1"
+echo "TRACE-2" >&2
+exit 3
+SCRIPT
+chmod +x "$F26/fail26.sh"
+FAILCMD26="bash \"$F26/fail26.sh\""
+jq -cn --arg failcmd "$FAILCMD26" '{verify: ["echo QUICKOK", $failcmd], verifyQuick: ["echo QUICKOK"]}' \
+  > "$F26/.quetrex/verify.json"
+
+# --- RUN 1: Stop, full chain, blocks on the real failure -------------------
+OUT26_1="$(run_hook "$F26" "Stop" 2>&1)"; CODE26_1=$?
+BLOCKS26_1="$(count_block_decisions "$OUT26_1")"
+REASON26_1="$(printf '%s' "$OUT26_1" | jq -r '.reason // empty' 2>/dev/null)"
+
+if [ "$CODE26_1" -eq 0 ] && [ "$BLOCKS26_1" = "1" ]; then
+  pass "AC26 RUN1: exactly 1 block decision on the real failure"
+else
+  fail "AC26 RUN1: expected exit 0 + 1 block decision, got exit $CODE26_1 blocks $BLOCKS26_1 (out: [$OUT26_1])"
+fi
+
+TOKENS26_1="$(log_tokens "$REASON26_1")"
+PRESERVED26_1="$(first_log_token "$REASON26_1")"
+if [ "$TOKENS26_1" = "1" ]; then
+  pass "AC26 RUN1: block .reason contains exactly 1 token ending in '.log'"
+else
+  fail "AC26 RUN1: expected exactly 1 '.log' token in reason, got $TOKENS26_1 [$REASON26_1]"
+fi
+
+if [ -f "$PRESERVED26_1" ] && [ "$(grep -c 'THE-REAL-STACK-TRACE-LINE-1' "$PRESERVED26_1" 2>/dev/null)" = "1" ] \
+   && [ "$(grep -c 'TRACE-2' "$PRESERVED26_1" 2>/dev/null)" = "1" ]; then
+  pass "AC26 RUN1: the preserved-failure log named in the reason contains the real failure's output"
+else
+  fail "AC26 RUN1: preserved log [$PRESERVED26_1] missing expected failure content"
+fi
+
+MODE26_1="$(stat -f '%Lp' "$PRESERVED26_1" 2>/dev/null || stat -c '%a' "$PRESERVED26_1" 2>/dev/null)"
+if [ "$MODE26_1" = "600" ]; then
+  pass "AC26 RUN1: preserved-failure log is mode 600"
+else
+  fail "AC26 RUN1: expected mode 600, got [$MODE26_1]"
+fi
+
+# --- RUN 2: SubagentStop, quick chain (single passing command), green ------
+OUT26_2="$(run_hook "$F26" "SubagentStop" 2>&1)"; CODE26_2=$?
+BLOCKS26_2="$(count_block_decisions "$OUT26_2")"
+if [ "$CODE26_2" -eq 0 ] && [ "$BLOCKS26_2" = "0" ]; then
+  pass "AC26 RUN2: quick chain is green — exit 0, 0 block decisions"
+else
+  fail "AC26 RUN2: expected exit 0 + 0 blocks, got exit $CODE26_2 blocks $BLOCKS26_2 (out: [$OUT26_2])"
+fi
+
+if [ -f "$PRESERVED26_1" ] && [ "$(grep -c 'THE-REAL-STACK-TRACE-LINE-1' "$PRESERVED26_1" 2>/dev/null)" = "1" ]; then
+  pass "AC26 AFTER-RUN2: the path named in RUN1's reason still contains the real failure"
+else
+  fail "AC26 AFTER-RUN2: preserved log lost its content after the green SubagentStop run"
+fi
+if [ "$(grep -c 'QUICKOK' "$PRESERVED26_1" 2>/dev/null)" = "0" ]; then
+  pass "AC26 AFTER-RUN2: the preserved-failure log contains 0 lines from the green run"
+else
+  fail "AC26 AFTER-RUN2: the green run's output leaked into the preserved-failure log"
+fi
+MODE26_2="$(stat -f '%Lp' "$PRESERVED26_1" 2>/dev/null || stat -c '%a' "$PRESERVED26_1" 2>/dev/null)"
+if [ "$MODE26_2" = "600" ]; then
+  pass "AC26 AFTER-RUN2: preserved-failure log is still mode 600"
+else
+  fail "AC26 AFTER-RUN2: expected mode 600, got [$MODE26_2]"
+fi
+
+# --- BOUNDED: at most 2 verify-gate*.log files, all mode 600, after every run
+for label in RUN1 RUN2; do
+  n="$(count_glob_files "$F26/.quetrex" 'verify-gate*.log')"
+  if [ "$n" -le 2 ]; then
+    pass "AC26 $label: at most 2 verify-gate*.log files on disk (got $n)"
+  else
+    fail "AC26 $label: expected <=2 verify-gate*.log files, got $n"
+  fi
+done
+if [ "$(all_mode_600 "$F26/.quetrex" 'verify-gate*.log')" = "1" ]; then
+  pass "AC26: every verify-gate*.log file is mode 600"
+else
+  fail "AC26: at least one verify-gate*.log file is not mode 600"
+fi
+if [ "$(git -C "$F26" status --porcelain 2>/dev/null | grep -c 'verify-gate')" = "0" ]; then
+  pass "AC26: neither log file is ever staged/tracked (.quetrex/* is gitignored)"
+else
+  fail "AC26: a verify-gate log leaked into git status"
+fi
+
+# --- RUN 3: a NEW Stop whose failing command prints a DIFFERENT marker -----
+cat > "$F26/fail26-round3.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+echo "ROUND3-MARKER"
+exit 4
+SCRIPT
+chmod +x "$F26/fail26-round3.sh"
+FAILCMD26_R3="bash \"$F26/fail26-round3.sh\""
+jq -cn --arg failcmd "$FAILCMD26_R3" '{verify: ["echo QUICKOK", $failcmd], verifyQuick: ["echo QUICKOK"]}' \
+  > "$F26/.quetrex/verify.json"
+OUT26_3="$(run_hook "$F26" "Stop" 2>&1)"; CODE26_3=$?
+REASON26_3="$(printf '%s' "$OUT26_3" | jq -r '.reason // empty' 2>/dev/null)"
+PRESERVED26_3="$(first_log_token "$REASON26_3")"
+
+if [ -f "$PRESERVED26_3" ] \
+   && [ "$(grep -c 'THE-REAL-STACK-TRACE-LINE-1' "$PRESERVED26_3" 2>/dev/null)" = "0" ] \
+   && [ "$(grep -c 'ROUND3-MARKER' "$PRESERVED26_3" 2>/dev/null)" = "1" ]; then
+  pass "AC26 RUN3: a newer real failure REPLACES the older one in the preserved slot"
+else
+  fail "AC26 RUN3: preserved log [$PRESERVED26_3] does not reflect a clean replacement"
+fi
+n26_3="$(count_glob_files "$F26/.quetrex" 'verify-gate*.log')"
+if [ "$n26_3" -le 2 ]; then
+  pass "AC26 RUN3: still at most 2 verify-gate*.log files on disk (got $n26_3)"
+else
+  fail "AC26 RUN3: expected <=2 verify-gate*.log files, got $n26_3"
+fi
+
+# --- SYMLINK SAFETY (SEC-3 extended to the preserved-failure path) ---------
+F26S="$TMPROOT/ac26-sym"
+git_init_repo "$F26S"
+mkdir -p "$F26S/.quetrex"
+jq -cn '{verify: ["false"]}' > "$F26S/.quetrex/verify.json"
+VICTIM26="$TMPROOT/ac26-sym-victim"
+printf 'PRECIOUS DATA -- DO NOT TOUCH\n' > "$VICTIM26"
+chmod 644 "$VICTIM26"
+ln -s "$VICTIM26" "$F26S/.quetrex/verify-gate-failed.log"
+
+OUT26S="$(run_hook "$F26S" "Stop" 2>&1)"; CODE26S=$?
+VICTIM26_CONTENT="$(cat "$VICTIM26" 2>/dev/null)"
+if [ "$VICTIM26_CONTENT" = "PRECIOUS DATA -- DO NOT TOUCH" ]; then
+  pass "AC26 SYMLINK: a symlinked preserved-failure path does not truncate/overwrite its target"
+else
+  fail "AC26 SYMLINK: the symlink target was modified (content: [$VICTIM26_CONTENT])"
+fi
+FAILLOG26S="$F26S/.quetrex/verify-gate-failed.log"
+if [ -f "$FAILLOG26S" ] && [ ! -L "$FAILLOG26S" ]; then
+  pass "AC26 SYMLINK: the preserved-failure path is now a regular file, not a symlink"
+else
+  fail "AC26 SYMLINK: the preserved-failure path is still a symlink (or missing)"
+fi
+MODE26S="$(stat -f '%Lp' "$FAILLOG26S" 2>/dev/null || stat -c '%a' "$FAILLOG26S" 2>/dev/null)"
+if [ "$MODE26S" = "600" ]; then
+  pass "AC26 SYMLINK: the preserved-failure path is mode 600"
+else
+  fail "AC26 SYMLINK: expected mode 600, got [$MODE26S]"
+fi
+if [ "$CODE26S" -eq 0 ] && [ "$(count_block_decisions "$OUT26S")" = "1" ]; then
+  pass "AC26 SYMLINK: the chain still ran and blocked normally despite the symlink attempt"
+else
+  fail "AC26 SYMLINK: expected exit 0 + 1 block decision, got exit $CODE26S (out: [$OUT26S])"
+fi
+
+# =============================================================================
+# AC28 — SEC-2: every committed read `should_skip_for_env` makes is now pinned
+# to $HEAD_SHA (captured once, before the chain runs) instead of a freshly
+# re-resolved `HEAD`, so a chain command that commits mid-run cannot author
+# the authorization for a LATER command in the SAME invocation. The reviewer's
+# exact repro: ./mutate.sh rewrites+commits a requiredEnv mapping for the
+# command that runs immediately after it and would otherwise be skipped.
+# =============================================================================
+F28="$TMPROOT/ac28"
+git_init_repo "$F28"
+mkdir -p "$F28/.quetrex"
+SKIPCMD_28="sh -c 'exit 7'"
+cat > "$F28/mutate.sh" <<'MUTATESCRIPT'
+#!/usr/bin/env bash
+set -e
+jq -n --arg skipcmd "sh -c 'exit 7'" \
+  '{verify: ["./mutate.sh", $skipcmd], requiredEnv: {($skipcmd): ["A_URL"]}}' \
+  > .quetrex/verify.json
+git add .quetrex/verify.json
+git commit -q -m "mutate: add requiredEnv mapping mid-run"
+exit 0
+MUTATESCRIPT
+chmod +x "$F28/mutate.sh"
+jq -cn --arg skipcmd "$SKIPCMD_28" '{verify: ["./mutate.sh", $skipcmd]}' > "$F28/.quetrex/verify.json"
+printf 'A_URL=\n' > "$F28/.env.example"
+git -C "$F28" add mutate.sh .quetrex/verify.json .env.example
+git -C "$F28" commit -q -m "chore: add mutate fixture (no requiredEnv yet)"
+
+OUT28="$(run_hook "$F28" "Stop" 2>&1)"; CODE28=$?
+BLOCKS28="$(count_block_decisions "$OUT28")"
+SKIPS28="$(count_skip_lines "$OUT28")"
+REASON28="$(printf '%s' "$OUT28" | jq -r '.reason // empty' 2>/dev/null)"
+
+if [ "$CODE28" -eq 0 ] && [ "$BLOCKS28" = "1" ]; then
+  pass "AC28: exactly 1 block decision — the mid-run commit did not authorize a skip"
+else
+  fail "AC28: expected exit 0 + 1 block decision, got exit $CODE28 blocks $BLOCKS28 (out: [$OUT28])"
+fi
+if printf '%s' "$REASON28" | grep -q "$SKIPCMD_28" && printf '%s' "$REASON28" | grep -qE 'exited 7\b'; then
+  pass "AC28: the block reason names \`$SKIPCMD_28\` and its exit code 7"
+else
+  fail "AC28: block reason does not name the failing command/exit code [$REASON28]"
+fi
+if [ "$SKIPS28" = "0" ]; then
+  pass "AC28: 0 'VERIFY SKIPPED' lines — the pinned \$HEAD_SHA closes the TOCTOU"
+else
+  fail "AC28: the mid-run commit laundered a skip past the pinned HEAD_SHA (out: [$OUT28])"
+fi
+
+# --- SOURCE-LEVEL: every committed read is pinned to $HEAD_SHA, none to a
+# freshly re-resolved literal `"HEAD:` -----------------------------------
+HOOK_SRC28="$REPO_ROOT/.claude/hooks/verify-gate.sh"
+N_LITERAL_HEAD="$(grep -c 'show "HEAD:' "$HOOK_SRC28" 2>/dev/null)"; N_LITERAL_HEAD="${N_LITERAL_HEAD:-0}"
+N_PINNED="$(grep -c '\$HEAD_SHA:' "$HOOK_SRC28" 2>/dev/null)"; N_PINNED="${N_PINNED:-0}"
+if [ "$N_LITERAL_HEAD" = "0" ]; then
+  pass "AC28: 0 occurrences of the literal 'show \"HEAD:' in verify-gate.sh"
+else
+  fail "AC28: found $N_LITERAL_HEAD occurrence(s) of 'show \"HEAD:' — an unpinned read remains"
+fi
+if [ "$N_PINNED" -ge 2 ]; then
+  pass "AC28: >= 2 occurrences of the pinned '\$HEAD_SHA:' read pattern (got $N_PINNED)"
+else
+  fail "AC28: expected >= 2 '\$HEAD_SHA:' reads, got $N_PINNED"
+fi
+
+# --- EMPTY-HEAD TRAP CLOSED: a repo with NO commits at all -----------------
+F28B="$TMPROOT/ac28-empty-head"
+mkdir -p "$F28B/.quetrex"
+git -C "$F28B" init -q -b main
+git -C "$F28B" config user.email "test@example.com"
+git -C "$F28B" config user.name "Fixture"
+SKIPCMD_28B="sh -c 'exit 5'"
+jq -cn --arg skipcmd "$SKIPCMD_28B" '{verify: [$skipcmd], requiredEnv: {($skipcmd): ["A_URL"]}}' \
+  > "$F28B/.quetrex/verify.json"
+printf 'A_URL=\n' > "$F28B/.env.example"
+
+OUT28B="$(run_hook "$F28B" "Stop" 2>&1)"; CODE28B=$?
+SKIPS28B="$(count_skip_lines "$OUT28B")"
+BLOCKS28B="$(count_block_decisions "$OUT28B")"
+if [ "$SKIPS28B" = "0" ]; then
+  pass "AC28 EMPTY-HEAD: an empty \$HEAD_SHA (no commits) never authorizes a skip"
+else
+  fail "AC28 EMPTY-HEAD: a repo with no commits produced a VERIFY SKIPPED line (out: [$OUT28B])"
+fi
+if [ "$CODE28B" -eq 0 ] && [ "$BLOCKS28B" = "1" ]; then
+  pass "AC28 EMPTY-HEAD: the chain still ran for real and blocked (fail-closed, not fail-open)"
+else
+  fail "AC28 EMPTY-HEAD: expected exit 0 + 1 block decision, got exit $CODE28B blocks $BLOCKS28B (out: [$OUT28B])"
 fi
 
 echo
