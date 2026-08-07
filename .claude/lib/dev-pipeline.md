@@ -292,10 +292,11 @@ Each entry carries exactly these four keys and no others:
   that read for the whole `verify` chain.
 - `why` — one sentence naming the verify command that needs it.
 
-**Produced by:** the **architect**, from its own fallback-less grep unioned with whatever
-`bin/quetrex-env-derive verify-json` already wrote into the committed `.quetrex/verify.json`'s
-`requiredEnv` map (it reads that file at plan time — see step 3 above); and then, deterministically,
-by the **dispatcher** (`/quetrex:task-build`), which calls `bin/quetrex-env-derive plan
+**Produced by:** the **architect**, from its own fallback-less grep unioned with whatever a
+**human already confirmed** via `bin/quetrex-env-derive declare` into the committed
+`.quetrex/verify.json`'s `requiredEnv` map (it reads that file at plan time — see step 3 above);
+and then, deterministically, by the **dispatcher** (`/quetrex:task-build`), which calls
+`bin/quetrex-env-derive plan
 "$TMP_WT/.quetrex/plan/$TASK_ID.json" "$REPO_ROOT"` immediately after `quetrex-plan-stamp`, before
 the spec worktree is committed and pushed. The dispatcher call exists because the architect's
 frontmatter grants `tools: Read, Grep, Glob, Write` with **no Bash**, so it cannot run the shared
@@ -341,25 +342,55 @@ than merely losing it.
 
 ### The shared discovery tool
 
-Both projections come from **one** static discovery pass, `bin/quetrex-env-derive`, so the
-candidate-selection rule (a committed `.env.example`/`.env.sample` key intersected with a
-fallback-less read in tracked source) and the command-attribution rule (scope-filtered through the
-chain command's own leaf script, resolved through the repo's own manifest) are never re-specified
-in a second place:
+Both projections read from **one** committed artifact — `.quetrex/verify.json`'s `requiredEnv`
+map — so the candidate-selection rule (a committed `.env.example`/`.env.sample` key intersected
+with a fallback-less read in tracked source) is never re-specified in a second place. That map is
+written by exactly one code path, and it is a human decision, not an inference:
 
-- `quetrex-env-derive verify-json <repo-root>` writes the `requiredEnv` map into the COMMITTED
-  `.quetrex/verify.json` that `verify-gate.sh`'s declarative env skip reads — called from
-  `/quetrex:init` step 4b.
-- `quetrex-env-derive plan <plan.json> <repo-root>` stamps Contract A `required_env[]` entries into
-  a plan artifact — called from the `/quetrex:task-build` dispatcher, one line after
-  `quetrex-plan-stamp`.
-- `quetrex-env-derive missing <repo-root>` is report-only, used by `/quetrex:doctor` Check 5.
+- `quetrex-env-derive scan <repo-root>` — read-only. Prints one `NAME<TAB>file:line` line per
+  COMMITTED candidate (a name that clears the candidate-selection rule above). Never touches
+  `.quetrex/verify.json`.
+- `quetrex-env-derive propose <repo-root>` — read-only. Prints one JSON object —
+  `{candidates, chain, requiredEnv, requiredEnvDeclined}` — built from committed evidence for a
+  human to review. Writes nothing, ever; this is what `/quetrex:init` shows the operator before
+  asking anything.
+- `quetrex-env-derive seed-chain <repo-root> <cmd>...` — creates `.quetrex/verify.json`'s
+  `.verify[]` only when the file is absent and at least one non-blank command was given. Never
+  touches an already-existing chain.
+- `quetrex-env-derive declare <repo-root> [--cmd <cmd> --env <NAME>[,<NAME>...]]... [--decline <NAME>]...`
+  — **the ONLY writer of `requiredEnv`, anywhere in this tool.** It writes ONLY the exact
+  `--cmd`/`--env` pairs a human supplied — refusing each one unless `--cmd` is a byte-for-byte
+  member of `.verify[]` and every `--env` name independently proves out against COMMITTED evidence
+  — and with zero pairs and zero `--decline` flags it writes nothing at all, structurally, not by
+  prose discipline. This is called interactively during `/quetrex:init`, after `propose` has
+  surfaced candidates and a human has answered a scannable confirmation question for each one; an
+  unattended run that skips that question calls `declare` with nothing to write and nothing gets
+  written.
+- `quetrex-env-derive missing <repo-root>` — report-only, used by `/quetrex:doctor` Check 5.
+  Never writes anything.
+- `quetrex-env-derive plan <plan.json> <repo-root>` — stamps Contract A `required_env[]` entries
+  into a plan artifact by reading the SAME committed `requiredEnv` map `declare` wrote — never
+  re-derived, never inferred — intersected with the plan's own `verify[]`. Called from the
+  `/quetrex:task-build` dispatcher, one line after `quetrex-plan-stamp`.
 
-Both writing subcommands are **union-only and never-narrow**: they add names, never remove or
-narrow an existing entry, and neither ever writes a `requiredEnv`/`required_env` key that is not
-already a member of the resulting `.verify[]`. Static discovery only — the tool never executes,
-evals, or shells out to a string it reads from `verify.json`, a `package.json` script, or a
-Makefile recipe.
+**`declare` is union-only and never-narrow:** it adds names, never removes or narrows an existing
+entry, and it can never write a `requiredEnv` key that is not already a member of `.verify[]`.
+Static discovery only, everywhere in this tool — it never executes, evals, or shells out to a
+string it reads from `verify.json`, a `package.json` script, or a Makefile recipe.
+
+**Why there is no command-to-variable inference here, and there must never be again.** An earlier
+version of this tool tried to resolve a `verify[]` command string down to a leaf script and
+scope-filter candidate names against that leaf's own path arguments. It was wrong in both
+directions and there is no tuning that fixes it, only which repo shape lands on which horn:
+**over-attribution** treated a leaf with no path arguments (the dominant `tsc --noEmit` / `eslint
+.` / `jest` shape) as "attribute to the whole tree," silently SKIPPING a command whenever that
+variable happened to be unset — the gate was off by default for exactly the repos that most needed
+it on. **Under-attribution** resolved a leaf through any indirection (`next build`, `vite build`,
+`vitest run`, `cargo test`, `python -m pytest -q` — the dominant *next-build* shape) to NOTHING at
+all, so once the gate stopped deferring in the main checkout, a repo shaped that way went red on a
+variable no checkout could ever satisfy, blocking the operator outright. So the engine no longer
+guesses which command needs which variable; a human types the pairing once, through `declare`, and
+that pairing is the only thing that can ever land in a reviewed diff.
 
 ---
 

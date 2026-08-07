@@ -115,9 +115,11 @@ Field rules:
 - **`required_env[]`** — the environment variable names the `verify` chain will actually demand:
   **discovered, never enumerated.** Two sources feed this field, and you emit the union of both —
   never only one. **Source 1: read the committed derivation.** Read `./.quetrex/verify.json`'s
-  `requiredEnv` map (a `{command: [names...]}` object keyed by verify-chain command; written by
-  `bin/quetrex-env-derive verify-json` at `/quetrex:init`, and the same static discovery this
-  dispatcher-stamped field ultimately reuses — see Contract A below). Every name that appears
+  `requiredEnv` map (a `{command: [names...]}` object keyed by verify-chain command; written ONLY
+  by `bin/quetrex-env-derive declare`, from an explicit human-confirmed `--cmd`/`--env` pair typed
+  during `/quetrex:init` — never inferred, never enumerated by the tool itself — and the same
+  committed declaration this dispatcher-stamped field ultimately projects from — see Contract A
+  below). Every name that appears
   anywhere in that map's values, for a command present in your `verify[]`, belongs in
   `required_env[]`. You have `Read`, so you CAN read this committed, already-reviewed derivation —
   do not re-derive it by re-implementing the scan yourself; reading it is strictly more reliable
