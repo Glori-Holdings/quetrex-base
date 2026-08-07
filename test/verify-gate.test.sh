@@ -52,6 +52,13 @@ fi
 FAIL=0
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'NOT OK - %s\n' "$1"; FAIL=1; }
+# Distinct from both: an assertion that is only meaningful for quetrex-base's
+# OWN copy (e.g. a line-count delta against a quetrex-base commit sha) is
+# N/A, not proven, against a foreign hook pointed at by QX_VERIFY_GATE_HOOK.
+# Printing 'ok' would be a silent false pass; printing 'NOT OK' would fail a
+# file for not being a copy it was never claimed to be. SKIP is neither —
+# it does not touch FAIL and is not counted by a plain `grep -c '^ok '`.
+skip() { printf 'SKIP - %s\n' "$1"; }
 
 TMPROOT="$(mktemp -d "${TMPDIR:-/tmp}/verify-gate-test.XXXXXX")"
 cleanup() { rm -rf "$TMPROOT"; }
@@ -1027,7 +1034,14 @@ fi
 # removal at the source level: the guard's own vocabulary must not appear in
 # the hook AT ALL, and the file must be measurably smaller.
 # =============================================================================
-HOOK_SRC="$REPO_ROOT/.claude/hooks/verify-gate.sh"
+# SOURCE-LEVEL checks must inspect the file actually under test — $HOOK,
+# which honors QX_VERIFY_GATE_HOOK — never a hardcoded quetrex-base path.
+# Pointing this suite at a foreign copy (e.g. the quetrex-factory plugin's
+# drifted copy) while these two lines stayed pinned to
+# $REPO_ROOT/.claude/hooks/verify-gate.sh would silently re-inspect
+# quetrex-base's OWN file and report a pass that proves nothing about the
+# file under test — a false green, not an honest failure.
+HOOK_SRC="$HOOK"
 for needle in 'git worktree list' '--git-common-dir' 'QUETREX_VERIFY_FORCE' 'MAIN checkout'; do
   n="$(grep -c -- "$needle" "$HOOK_SRC" 2>/dev/null)"
   n="${n:-0}"
@@ -1044,14 +1058,27 @@ done
 # pin — both genuinely necessary growth — so it is lowered to 50 to absorb
 # that growth while still requiring the file to be measurably, substantially
 # smaller than the pre-deletion baseline.
-HOOK_LINES="$(wc -l < "$HOOK_SRC" | tr -d ' ')"
-OLD_HOOK_LINES="$(git -C "$REPO_ROOT" show 63bb114:.claude/hooks/verify-gate.sh 2>/dev/null | wc -l | tr -d ' ')"
-case "$OLD_HOOK_LINES" in ''|0|*[!0-9]*) OLD_HOOK_LINES=724 ;; esac
-DELTA=$((OLD_HOOK_LINES - HOOK_LINES))
-if [ "$DELTA" -ge 50 ]; then
-  pass "AC10: verify-gate.sh is at least 50 lines shorter than at 63bb114 (delta $DELTA)"
+#
+# MEANINGFUL ONLY FOR QUETREX-BASE'S OWN COPY. 63bb114 is a commit in THIS
+# repo's history; a foreign hook (e.g. quetrex-factory's plugin copy, or any
+# other project's) has a different size and no relationship to that sha at
+# all, so comparing against it would be either a category error (foreign
+# file just happens to be smaller: a meaningless pass) or an unfair failure
+# (foreign file is a legitimately different size: a meaningless fail).
+# `-ef` compares by inode, not by string, so this still recognizes $HOOK as
+# native through a symlink or a relative-vs-absolute path difference.
+if [ "$HOOK" -ef "$REPO_ROOT/.claude/hooks/verify-gate.sh" ]; then
+  HOOK_LINES="$(wc -l < "$HOOK_SRC" | tr -d ' ')"
+  OLD_HOOK_LINES="$(git -C "$REPO_ROOT" show 63bb114:.claude/hooks/verify-gate.sh 2>/dev/null | wc -l | tr -d ' ')"
+  case "$OLD_HOOK_LINES" in ''|0|*[!0-9]*) OLD_HOOK_LINES=724 ;; esac
+  DELTA=$((OLD_HOOK_LINES - HOOK_LINES))
+  if [ "$DELTA" -ge 50 ]; then
+    pass "AC10: verify-gate.sh is at least 50 lines shorter than at 63bb114 (delta $DELTA)"
+  else
+    fail "AC10: verify-gate.sh is only $DELTA lines shorter than at 63bb114 (need >= 50)"
+  fi
 else
-  fail "AC10: verify-gate.sh is only $DELTA lines shorter than at 63bb114 (need >= 50)"
+  skip "AC10: line-delta-vs-63bb114 check not applicable — \$HOOK ($HOOK) is not quetrex-base's own copy"
 fi
 
 # =============================================================================
@@ -1335,7 +1362,11 @@ fi
 
 # --- SOURCE-LEVEL: every committed read is pinned to $HEAD_SHA, none to a
 # freshly re-resolved literal `"HEAD:` -----------------------------------
-HOOK_SRC28="$REPO_ROOT/.claude/hooks/verify-gate.sh"
+# Same rule as AC10 above: inspect $HOOK, the file actually under test, never
+# a hardcoded quetrex-base path — otherwise pointing this suite at a foreign
+# hook would silently re-prove quetrex-base's own SEC-2 fix and report a pass
+# that says nothing about the file under test.
+HOOK_SRC28="$HOOK"
 N_LITERAL_HEAD="$(grep -c 'show "HEAD:' "$HOOK_SRC28" 2>/dev/null)"; N_LITERAL_HEAD="${N_LITERAL_HEAD:-0}"
 N_PINNED="$(grep -c '\$HEAD_SHA:' "$HOOK_SRC28" 2>/dev/null)"; N_PINNED="${N_PINNED:-0}"
 if [ "$N_LITERAL_HEAD" = "0" ]; then
