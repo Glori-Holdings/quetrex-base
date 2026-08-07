@@ -1,26 +1,29 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 #
-# quetrex-env-derive — the ONE place `requiredEnv` (verify-gate.sh's
-# declarative env skip) and `required_env` (the architect's Contract A plan
-# field) are discovered from a repo's own manifest. Both are projections of a
-# single scan; this file is why they never specify the same discovery logic
-# twice and drift.
+# quetrex-env-derive — the ONE place a repo's own committed evidence
+# (a tracked .env.example/.env.sample plus a fallback-less env read in
+# tracked source) is turned into a CANDIDATE name a human can confirm. It
+# never decides, on its own, which verify[] command needs which name — see
+# .quetrex/plan/VERIFY-GATE-QUIET.json for the full history of why that
+# inference was deleted outright rather than tuned.
 #
-# WHY THIS EXISTS. verify-gate.sh has fully implemented a per-command
-# `requiredEnv` skip (should_skip_for_env) for a while, but NOTHING ANYWHERE
-# EVER WRITES `requiredEnv` — not .claude/templates/verify.json, not
-# init.md (which only STAGES the file, never authors the key), not
-# bin/quetrex-arm. The mechanism is proven and correct; it is simply inert.
-# The real-world consequence: a fixture repo's `npm run build` needs
-# DEMO_DATABASE_URL, that var is unset (correctly — it cannot exist in every
-# checkout), the command exits non-zero, and the gate blocks the agent from
-# finishing with a message the operator read as "my healthy build is red".
-# This tool closes that gap by DERIVING the association from the repo itself
-# and handing it to two callers who each write it into a COMMITTED,
-# human-reviewed artifact — /quetrex:init (verify-json) and the task-build
-# dispatcher (plan) — so the association is always visible in a reviewed diff
-# before it can ever cause a skip.
+# STOP INFERRING. A prior version of this tool tried to resolve a verify[]
+# command string down to a leaf script and scope-filter candidate names
+# against that leaf's own explicit path arguments. That attribution engine
+# was provably wrong in BOTH directions: a leaf with no path arguments (most
+# `tsc --noEmit` / `eslint .` / `jest` shapes) attributed a candidate to the
+# WHOLE tree, silently skipping a command whenever that variable happened to
+# be unset; a leaf resolved through an indirection (`next build`, `vite
+# build`, `vitest run`, `cargo test`, `python -m pytest -q`) attributed
+# NOTHING at all, and once the gate stopped deferring in the main checkout, a
+# repo shaped that way went red on a variable no checkout could ever have.
+# Any tuning of that parser only moves which repo shapes land on which horn;
+# there is no safe version of "guess which command reads which variable from
+# a command string". So there is no such engine here anymore. This tool now
+# only ever SUGGESTS candidate NAMES; a human decides which command, if any,
+# gets to skip on a missing one, and that decision is the ONLY thing that
+# ever writes `requiredEnv`.
 #
 # WHY A bin/ EXECUTABLE AND NOT PROSE. This repo has measured the same
 # failure three times: bin/quetrex-arm exists because inline node prose in
@@ -39,60 +42,75 @@
 # green and derive NOTHING for exactly the repos that need this most, and it
 # would add an execution surface driven by an untrusted verify.json (a
 # hostile .verify[] entry becomes an arbitrary-command runner on the
-# operator's machine). This tool is STATIC ONLY: it reads text (a tracked
-# .env.example/.env.sample, tracked source, package.json, a Makefile) and
-# never executes, evals, or shells out to any string it reads from a
-# verify.json, a package.json script, or a Makefile recipe. It does spawn
-# `git` itself, for its own plumbing (ls-files / tracked checks) — that is
-# not a verify command and never comes from an untrusted string.
+# operator's machine). This tool is STATIC ONLY: it reads text via `git`
+# plumbing (never fs.readFileSync of a working-tree file for anything that
+# can ever become a candidate) and never executes, evals, or shells out to
+# any string it reads from a verify.json, a package.json script, or source.
 #
-# FAIL CLOSED. A name is only ever a candidate when it is BOTH (a) a key in a
-# TRACKED (staged or committed — visible in a reviewed diff, never a scratch
-# file only on disk) .env.example, or .env.sample when .env.example is
-# entirely absent, AND (b) read with no fallback (no `??`, `||`, or a
-# `.get(x, default)`-shaped default) anywhere in TRACKED source. A candidate
-# is attributed to a verify[] command only when the command RESOLVES through
-# the repo's own manifest (package.json scripts, recursively for chained
-# `npm run X`; a Makefile target's first recipe line) to a leaf command line,
-# and the read's file falls inside that leaf's own explicit path arguments —
-# or the whole tracked tree when the leaf names none. A command that cannot
-# be resolved at all gets NOTHING, never the whole tree: a missing entry
-# means the chain runs normally (safe); a wrong entry means a command is
-# silently skipped (not safe) — see security_surface in
-# .quetrex/plan/VERIFY-GATE-QUIET.json. No variable name and no fixture name
-# is ever hardcoded here; every name comes from the repo handed to it.
+# COMMITTED EVIDENCE ONLY, FOR ANYTHING CONFIRMABLE (SEC-4). A name only
+# ever reaches `scan`/`propose`/`declare` when it is BOTH (a) a key in the
+# COMMITTED blob (at HEAD) of a tracked .env.example, or .env.sample when
+# .env.example is entirely absent at HEAD, AND (b) read with no fallback (no
+# `??`, `||`, or a `.get(x, default)`-shaped default) somewhere in the
+# COMMITTED tree at HEAD (`git grep ... HEAD`). This is the exact evidence
+# base verify-gate.sh itself re-checks on read (`git show HEAD:...`), so a
+# human confirming a `propose` candidate can never be shown, and never
+# confirm, a pairing the gate would then silently refuse to honor. Working-
+# tree-only evidence (an uncommitted edit, an untracked file) is used for
+# nothing except an informational stderr hint in `propose` — never for a
+# confirmable candidate, never for a write.
 #
-# UNION-ONLY, NEVER-NARROW, NAMES ONLY. `verify-json` never rewrites
-# `.verify[]`, never deletes an existing `requiredEnv` key or overwrites one
-# that already exists (a human's own association wins, untouched), and never
-# writes a key that is not already a byte-for-byte member of the resulting
-# `.verify[]`. `plan` never removes an architect-authored `required_env[]`
-# entry, only appends names the architect did not already list. Neither
-# subcommand ever prints or writes a VALUE — names and `file:line` read sites
-# only, everywhere, always.
+# THE ONLY WRITER OF requiredEnv IS `declare`, AND ONLY WITH EXPLICIT PAIRS.
+# `declare <repo-root> [--cmd C --env N[,N...]]... [--decline N]...` is the
+# ONE code path in this file that may ever write a `requiredEnv` key, and it
+# writes ONLY the exact --cmd/--env pairs it was given — each one refused
+# unless it can independently prove both halves from committed evidence, and
+# each one refused unless --cmd is a byte-for-byte member of the target
+# .verify[]. With ZERO pairs and ZERO --decline flags it writes NOTHING —
+# structurally, not by prose discipline, so an unattended run that skips the
+# human confirmation step still cannot manufacture a declaration. Every
+# write is union-only: an existing entry (hand-written or from an earlier
+# run) is never deleted or overwritten, only appended to.
 #
 # usage:
 #   quetrex-env-derive scan <repo-root>
-#       Print one "NAME<TAB>file:line" line per discovered candidate. Read-
-#       only; never touches .quetrex/verify.json.
-#   quetrex-env-derive verify-json <repo-root> [<cmd>...]
-#       Merge a derived requiredEnv map into <repo-root>/.quetrex/verify.json
-#       (working tree — committing it is the caller's job, e.g. /quetrex:init
-#       step 6). If the file is absent and <cmd>... was given, seeds
-#       {"verify": [<cmd>...]} first; if absent and no <cmd>... was given,
-#       does nothing (there is no chain to attribute against yet).
+#       Print one "NAME<TAB>file:line" line per COMMITTED candidate.
+#       Read-only; never touches .quetrex/verify.json.
+#   quetrex-env-derive propose <repo-root>
+#       Print one JSON object on stdout: {candidates, chain, requiredEnv,
+#       requiredEnvDeclined} — candidates from committed evidence, the rest
+#       from the COMMITTED .quetrex/verify.json (never the working tree).
+#       READ-ONLY, writes nothing, ever. May also print an informational
+#       stderr hint per name that looks like a candidate but is not fully
+#       committed yet — never a confirmable candidate.
+#   quetrex-env-derive seed-chain <repo-root> <cmd>...
+#       Create .quetrex/verify.json's .verify[] ONLY when the file is
+#       absent and at least one non-blank command was given. Refuses (exits
+#       non-zero, writes nothing) on zero commands or an all-blank list.
+#       Never touches an already-existing chain.
+#   quetrex-env-derive declare <repo-root> [--cmd <cmd> --env <NAME>[,<NAME>...]]... [--decline <NAME>]...
+#       The ONLY writer of `requiredEnv`. Refuses (exits non-zero, writes
+#       nothing) unless --cmd is a byte-for-byte member of the target
+#       .verify[] and every --env name is a committed candidate. Union-only.
+#       `--decline NAME` records the name in `requiredEnvDeclined` (names
+#       only) so `missing` never nags for it again. Zero pairs and zero
+#       declines writes nothing at all.
 #   quetrex-env-derive missing <repo-root>
-#       Report-only: print one name per line that WOULD be added by
-#       `verify-json` right now but is not yet covered by any existing
-#       requiredEnv entry. Never writes anything. Used by /quetrex:doctor
-#       Check 5 to tell an already-adopted repo it predates this feature.
+#       Report-only: print one committed-candidate name per line that is
+#       covered by NEITHER an existing `requiredEnv` entry NOR
+#       `requiredEnvDeclined`. Never writes anything. Used by
+#       /quetrex:doctor Check 5 to suggest a declaration, never to demand
+#       one.
 #   quetrex-env-derive plan <plan.json> <repo-root>
-#       Stamp Contract A required_env[] entries (name, read_at,
+#       Stamp Contract A `required_env[]` entries (name, read_at,
 #       placeholderable, why — see .claude/lib/dev-pipeline.md) into
-#       <plan.json>, derived against <plan.json>'s own `.verify[]` chain.
-#       Union-only against any entries the architect already emitted.
-#       Idempotent; writes via a temp file + atomic rename so a crash never
-#       leaves a half-written plan.
+#       <plan.json>, reading the SAME committed `requiredEnv` map
+#       verify-gate.sh reads, intersected with <plan.json>'s own `.verify[]`
+#       — never re-derived, never inferred. Union-only against any entries
+#       the architect already emitted. Idempotent; writes via a temp file +
+#       atomic rename. Root-contained (SEC-3): refuses unless the resolved
+#       parent directory ends in "/.quetrex/plan" and the target already
+#       exists as a regular file that is never a symlink.
 #
 # Requires node (>=18) and git.
 
@@ -104,13 +122,12 @@ command -v node >/dev/null 2>&1 || die "node (>=18) is required"
 command -v git  >/dev/null 2>&1 || die "git is required"
 
 SUB="${1:-}"
-[ -n "$SUB" ] || die "usage: quetrex-env-derive <scan|verify-json|missing|plan> ..."
+[ -n "$SUB" ] || die "usage: quetrex-env-derive <scan|propose|seed-chain|declare|missing|plan> ..."
 shift
 
 # All logic lives in ONE embedded program (not one per subcommand) so the
-# scan / scope-resolution / attribution rules exist exactly once and every
-# subcommand is a thin projection of the same discovery pass — the whole
-# point of this file existing as a single shared tool.
+# committed-evidence rules exist exactly once and every subcommand is a thin
+# projection of the same discovery pass.
 node -e '
 "use strict";
 var fs = require("fs");
@@ -124,41 +141,32 @@ function die(msg) {
 
 function runGit(repoRoot, args) {
   try {
-    return cp.execFileSync("git", ["-C", repoRoot].concat(args), { encoding: "utf8" });
+    // stdio pins stdin/stderr to "ignore" — execFileSync otherwise INHERITS
+    // the child stderr onto this process real stderr, so a routine miss
+    // ("path does not exist in HEAD", "no match" from a grep with 0 hits)
+    // would leak straight through and corrupt every stderr-line-count
+    // assertion downstream (propose liveness hint, declare refusals).
+    return cp.execFileSync("git", ["-C", repoRoot].concat(args), { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   } catch (e) {
     return null;
   }
 }
 
-function isTracked(repoRoot, relPath) {
-  try {
-    cp.execFileSync("git", ["-C", repoRoot, "ls-files", "--error-unmatch", "--", relPath], { stdio: "ignore" });
-    return true;
-  } catch (e) {
-    return false;
-  }
+// ---------------------------------------------------------------------
+// COMMITTED evidence (SEC-4) — the ONLY evidence a candidate name, or a
+// `declare` write, may ever be based on. Every read here is pinned to the
+// blob at HEAD via `git show`/`git grep ... HEAD`, never the working tree
+// and never the staged index.
+// ---------------------------------------------------------------------
+function committedBlob(repoRoot, relPath) {
+  return runGit(repoRoot, ["show", "HEAD:" + relPath]);
 }
 
-function trackedFiles(repoRoot) {
-  var out = runGit(repoRoot, ["ls-files"]);
-  if (out === null) return [];
-  return out.split("\n").filter(Boolean);
-}
-
-// ---------------------------------------------------------------------
-// Step 1 — declared names: keys of a TRACKED .env.example, falling back
-// to a TRACKED .env.sample only when .env.example is entirely absent.
-// Never both, never invented.
-// ---------------------------------------------------------------------
 function declaredNames(repoRoot) {
   var candidates = [".env.example", ".env.sample"];
   for (var i = 0; i < candidates.length; i++) {
-    var f = candidates[i];
-    var abs = path.join(repoRoot, f);
-    if (!fs.existsSync(abs)) continue;
-    if (!isTracked(repoRoot, f)) continue;
-    var text;
-    try { text = fs.readFileSync(abs, "utf8"); } catch (e) { continue; }
+    var text = committedBlob(repoRoot, candidates[i]);
+    if (text === null) continue;
     var seen = {};
     var names = [];
     var lines = text.split(/\r?\n/);
@@ -174,16 +182,11 @@ function declaredNames(repoRoot) {
   return [];
 }
 
-// ---------------------------------------------------------------------
-// Step 2 — fallback-less reads across TRACKED source, one repo-wide pass.
 // Equivalence list: process.env.NAME (JS/TS), os.environ[...] (Python),
 // System.getenv(...) (Java), ENV[...] (Ruby). A read counts only when
 // nothing supplying a default sits immediately behind it on the same line.
-// ---------------------------------------------------------------------
-function fallbacklessReads(repoRoot) {
-  var files = trackedFiles(repoRoot);
-  var found = {};
-  var patterns = [
+function envReadPatterns() {
+  return [
     {
       re: /process\.env\.([A-Za-z_][A-Za-z0-9_]*)/g,
       hasFallback: function (rest) { return /^\s*(\?\?|\|\|)/.test(rest); }
@@ -201,6 +204,110 @@ function fallbacklessReads(repoRoot) {
       hasFallback: function () { return false; }
     }
   ];
+}
+
+function fallbacklessReads(repoRoot) {
+  var found = {};
+  var patterns = envReadPatterns();
+  var combined = "process\\.env\\.[A-Za-z_]|os\\.environ\\[|System\\.getenv\\(|ENV\\[";
+  var out = runGit(repoRoot, ["grep", "-n", "-I", "-E", combined, "HEAD", "--"]);
+  if (out === null) return found;
+  var lines = out.split("\n");
+  for (var li = 0; li < lines.length; li++) {
+    var rawLine = lines[li];
+    if (!rawLine) continue;
+    if (rawLine.slice(0, 5) !== "HEAD:") continue;
+    var rest = rawLine.slice(5);
+    var m = /^(.*?):(\d+):(.*)$/.exec(rest);
+    if (!m) continue;
+    var relPath = m[1];
+    var lineNo = parseInt(m[2], 10);
+    var content = m[3];
+    for (var pi = 0; pi < patterns.length; pi++) {
+      var p = patterns[pi];
+      p.re.lastIndex = 0;
+      var mm;
+      while ((mm = p.re.exec(content)) !== null) {
+        var name = mm[1];
+        var restOfLine = content.slice(mm.index + mm[0].length);
+        if (p.hasFallback(restOfLine)) continue;
+        if (!Object.prototype.hasOwnProperty.call(found, name)) {
+          found[name] = { file: relPath, line: lineNo };
+        }
+      }
+    }
+  }
+  return found;
+}
+
+function candidateList(repoRoot) {
+  var names = declaredNames(repoRoot);
+  var reads = fallbacklessReads(repoRoot);
+  var out = [];
+  for (var i = 0; i < names.length; i++) {
+    var name = names[i];
+    var r = reads[name];
+    if (r) out.push({ name: name, read_at: r.file + ":" + r.line });
+  }
+  return out;
+}
+
+function readCommittedVerifyJson(repoRoot) {
+  var empty = { verify: [], requiredEnv: {}, requiredEnvDeclined: [] };
+  var raw = runGit(repoRoot, ["show", "HEAD:.quetrex/verify.json"]);
+  if (raw === null) return empty;
+  var obj;
+  try { obj = JSON.parse(raw); } catch (e) { return empty; }
+  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return empty;
+  return {
+    verify: Array.isArray(obj.verify) ? obj.verify : [],
+    requiredEnv: (obj.requiredEnv && typeof obj.requiredEnv === "object" && !Array.isArray(obj.requiredEnv)) ? obj.requiredEnv : {},
+    requiredEnvDeclined: Array.isArray(obj.requiredEnvDeclined) ? obj.requiredEnvDeclined : []
+  };
+}
+
+// ---------------------------------------------------------------------
+// WORKING-TREE evidence — used ONLY to print an informational stderr hint
+// in `propose` ("this looks like a candidate but is not committed yet").
+// NEVER used to populate a confirmable candidate and NEVER used by
+// `declare` to authorize a write.
+// ---------------------------------------------------------------------
+function workingTreeFileList(repoRoot) {
+  var out = runGit(repoRoot, ["ls-files", "--cached", "--others", "--exclude-standard"]);
+  if (out === null) return [];
+  return out.split("\n").filter(Boolean);
+}
+
+function workingTreeDeclaredNames(repoRoot) {
+  var candidates = [".env.example", ".env.sample"];
+  var files = workingTreeFileList(repoRoot);
+  var fileSet = {};
+  for (var fi = 0; fi < files.length; fi++) fileSet[files[fi]] = true;
+  for (var i = 0; i < candidates.length; i++) {
+    var f = candidates[i];
+    if (!fileSet[f]) continue;
+    var abs = path.join(repoRoot, f);
+    var text;
+    try { text = fs.readFileSync(abs, "utf8"); } catch (e) { continue; }
+    var seen = {};
+    var names = [];
+    var lines = text.split(/\r?\n/);
+    for (var j = 0; j < lines.length; j++) {
+      var m = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(lines[j]);
+      if (m && !Object.prototype.hasOwnProperty.call(seen, m[1])) {
+        seen[m[1]] = true;
+        names.push(m[1]);
+      }
+    }
+    return names;
+  }
+  return [];
+}
+
+function workingTreeFallbacklessReads(repoRoot) {
+  var files = workingTreeFileList(repoRoot);
+  var found = {};
+  var patterns = envReadPatterns();
   for (var fi = 0; fi < files.length; fi++) {
     var relPath = files[fi];
     var abs = path.join(repoRoot, relPath);
@@ -228,140 +335,9 @@ function fallbacklessReads(repoRoot) {
   return found;
 }
 
-function candidateList(repoRoot) {
-  var names = declaredNames(repoRoot);
-  var reads = fallbacklessReads(repoRoot);
-  var out = [];
-  for (var i = 0; i < names.length; i++) {
-    var name = names[i];
-    var r = reads[name];
-    if (r) out.push({ name: name, read_at: r.file + ":" + r.line });
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------
-// Scope resolution — resolve a verify[] command STRING to a leaf command
-// line through the repo own manifest, STATIC ONLY. An unresolvable
-// command attributes NOTHING (fail closed): resolved:false, never a
-// whole-tree fallback.
-// ---------------------------------------------------------------------
-function readPackageJson(repoRoot) {
-  var p = path.join(repoRoot, "package.json");
-  if (!fs.existsSync(p)) return null;
-  try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch (e) { return null; }
-}
-
-function readMakefile(repoRoot) {
-  var names = ["Makefile", "makefile"];
-  for (var i = 0; i < names.length; i++) {
-    var p = path.join(repoRoot, names[i]);
-    if (fs.existsSync(p)) {
-      try { return fs.readFileSync(p, "utf8"); } catch (e) { return null; }
-    }
-  }
-  return null;
-}
-
-function leafPathArgs(leafCmd) {
-  var tokens = leafCmd.trim().split(/\s+/).filter(Boolean);
-  if (tokens.length <= 1) return [];
-  var args = [];
-  for (var i = 1; i < tokens.length; i++) {
-    var t = tokens[i];
-    if (t.charAt(0) === "-") continue;
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) continue;
-    args.push(t);
-  }
-  if (args.indexOf(".") !== -1) return [];
-  return args;
-}
-
-function escapeForRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function resolveMakeTarget(repoRoot, target) {
-  var mk = readMakefile(repoRoot);
-  if (mk === null) return { resolved: false, scope: [] };
-  var lines = mk.split(/\r?\n/);
-  var headRe = new RegExp("^" + escapeForRegex(target) + "\\s*:");
-  var idx = -1;
-  for (var i = 0; i < lines.length; i++) {
-    if (headRe.test(lines[i])) { idx = i; break; }
-  }
-  if (idx === -1) return { resolved: false, scope: [] };
-  var recipe = null;
-  for (var j = idx + 1; j < lines.length; j++) {
-    if (/^\t/.test(lines[j])) { recipe = lines[j].replace(/^\t/, ""); break; }
-    if (/^[A-Za-z0-9_.-]+\s*:/.test(lines[j])) break;
-  }
-  if (recipe === null) return { resolved: true, scope: [] };
-  return { resolved: true, scope: leafPathArgs(recipe) };
-}
-
-function resolveScope(repoRoot, cmd, depth) {
-  var d = depth || 0;
-  if (d > 5) return { resolved: false, scope: [] };
-  var trimmed = cmd.trim();
-  if (trimmed === "") return { resolved: false, scope: [] };
-  var npmMatch = /^npm run\s+([A-Za-z0-9_:.-]+)/.exec(trimmed);
-  if (npmMatch) {
-    var pkg = readPackageJson(repoRoot);
-    if (!pkg || !pkg.scripts || typeof pkg.scripts[npmMatch[1]] !== "string") {
-      return { resolved: false, scope: [] };
-    }
-    var leaf = pkg.scripts[npmMatch[1]];
-    if (/^npm run\s+/.test(leaf.trim())) {
-      return resolveScope(repoRoot, leaf, d + 1);
-    }
-    return { resolved: true, scope: leafPathArgs(leaf) };
-  }
-  var makeMatch = /^make\s+([A-Za-z0-9_.-]+)/.exec(trimmed);
-  if (makeMatch) {
-    return resolveMakeTarget(repoRoot, makeMatch[1]);
-  }
-  // Not a package-manager indirection: the command string IS the leaf.
-  return { resolved: true, scope: leafPathArgs(trimmed) };
-}
-
-// This one comparison is the entire scope filter: it is what stops a name
-// discovered anywhere in the tree from being attributed to a command whose
-// own leaf script declares a narrower explicit path than "the whole repo".
-// AC14 negative-controls exactly this function (and only this function) —
-// see test/env-derive.test.sh, which runs a mutated copy with this
-// disabled to prove the filter is load-bearing, not decorative.
-var QX_SCOPE_FILTER_ENABLED = true;
-function inScope(readAt, scope) {
-  if (!QX_SCOPE_FILTER_ENABLED) return true;
-  if (!scope || scope.length === 0) return true;
-  var file = readAt.split(":")[0];
-  for (var i = 0; i < scope.length; i++) {
-    var s = String(scope[i]).replace(/\/$/, "");
-    if (file === s || file.indexOf(s + "/") === 0) return true;
-  }
-  return false;
-}
-
-function attributeToCommands(repoRoot, candidates, commands) {
-  var out = {};
-  for (var i = 0; i < commands.length; i++) {
-    var cmd = commands[i];
-    var r = resolveScope(repoRoot, cmd, 0);
-    if (!r.resolved) continue;
-    var names = [];
-    for (var j = 0; j < candidates.length; j++) {
-      if (inScope(candidates[j].read_at, r.scope)) names.push(candidates[j].name);
-    }
-    if (names.length) out[cmd] = names;
-  }
-  return out;
-}
-
 // ---------------------------------------------------------------------
 // Shared atomic writer. rename(2), never a direct/in-place write: a crash
-// mid-write must never leave a half-written, unparseable file behind (the
-// same load-bearing property bin/quetrex-plan-stamp already proves).
+// mid-write must never leave a half-written, unparseable file behind.
 // ---------------------------------------------------------------------
 function writeJsonAtomic(targetPath, obj) {
   var dir = path.dirname(targetPath);
@@ -395,117 +371,272 @@ function cmdScan(args) {
 }
 
 // ---------------------------------------------------------------------
-// verify-json <repo-root> [<cmd>...]
+// propose <repo-root> — READ-ONLY, writes nothing, ever.
 // ---------------------------------------------------------------------
-var QX_REQUIRED_ENV_WRITE_ENABLED = true;
-function cmdVerifyJson(args) {
+function cmdPropose(args) {
   var repoRoot = args[0];
-  if (!repoRoot) die("usage: quetrex-env-derive verify-json <repo-root> [<cmd>...]");
+  if (!repoRoot) die("usage: quetrex-env-derive propose <repo-root>");
   if (!fs.existsSync(repoRoot)) die("repo root not found: " + repoRoot);
-  var seedCmds = args.slice(1);
-  var qdir = path.join(repoRoot, ".quetrex");
-  var vfile = path.join(qdir, "verify.json");
 
-  var obj = null;
-  if (fs.existsSync(vfile)) {
-    var raw;
-    try { raw = fs.readFileSync(vfile, "utf8"); } catch (e) { die("cannot read " + vfile + ": " + e.message); }
-    try { obj = JSON.parse(raw); } catch (e) {
-      process.stderr.write("quetrex-env-derive: " + vfile + " does not parse as JSON, leaving it untouched\n");
-      return;
-    }
-    if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
-      process.stderr.write("quetrex-env-derive: " + vfile + " is not a JSON object, leaving it untouched\n");
-      return;
-    }
-  } else if (seedCmds.length) {
-    obj = { verify: seedCmds };
-  } else {
-    return; // nothing to seed and nothing to merge into
+  var candidates = candidateList(repoRoot);
+  var committed = readCommittedVerifyJson(repoRoot);
+
+  var out = {
+    candidates: candidates,
+    chain: committed.verify,
+    requiredEnv: committed.requiredEnv,
+    requiredEnvDeclined: committed.requiredEnvDeclined
+  };
+  process.stdout.write(JSON.stringify(out) + "\n");
+
+  // Informational liveness hint only (working-tree evidence) — never
+  // written, never a confirmable candidate (SEC-4): a name only ever
+  // reaches .candidates once it is committed, exactly like verify-gate.sh
+  // own read.
+  var committedNames = {};
+  for (var i = 0; i < candidates.length; i++) committedNames[candidates[i].name] = true;
+  var wNames = workingTreeDeclaredNames(repoRoot);
+  var wReads = workingTreeFallbacklessReads(repoRoot);
+  for (var j = 0; j < wNames.length; j++) {
+    var nm = wNames[j];
+    if (committedNames[nm]) continue;
+    var r = wReads[nm];
+    if (!r) continue;
+    process.stderr.write(nm + " looks like a candidate but is not committed yet (" + r.file + ":" + r.line + ") — commit it, then re-run propose\n");
   }
+}
 
-  var verifyArr = Array.isArray(obj.verify) ? obj.verify : null;
-  if (verifyArr === null) {
-    process.stderr.write("quetrex-env-derive: .verify is not an array in " + vfile + ", leaving requiredEnv untouched\n");
+// ---------------------------------------------------------------------
+// seed-chain <repo-root> <cmd>...
+// ---------------------------------------------------------------------
+function cmdSeedChain(args) {
+  var repoRoot = args[0];
+  if (!repoRoot) die("usage: quetrex-env-derive seed-chain <repo-root> <cmd>...");
+  if (!fs.existsSync(repoRoot)) die("repo root not found: " + repoRoot);
+  var cmds = args.slice(1);
+  var vfile = path.join(repoRoot, ".quetrex", "verify.json");
+
+  if (fs.existsSync(vfile)) {
+    process.stdout.write(vfile + " already has a verify chain — leaving it untouched\n");
     return;
   }
 
-  var candidates = candidateList(repoRoot);
-  var attribution = attributeToCommands(repoRoot, candidates, verifyArr);
-
-  var existingRequiredEnv = (obj.requiredEnv && typeof obj.requiredEnv === "object" && !Array.isArray(obj.requiredEnv)) ? obj.requiredEnv : {};
-  var merged = {};
-  var existingKeys = Object.keys(existingRequiredEnv);
-  for (var i = 0; i < existingKeys.length; i++) {
-    merged[existingKeys[i]] = existingRequiredEnv[existingKeys[i]];
+  var nonBlank = [];
+  for (var i = 0; i < cmds.length; i++) {
+    var c = cmds[i];
+    if (c !== undefined && c !== null && String(c).trim() !== "") nonBlank.push(c);
   }
-  // Never touch a command that already has a requiredEnv entry — hand-
-  // written or from an earlier run: "the pre-existing entry stays UNCHANGED"
-  // is the whole union-only/never-narrow contract, not merely non-deletion.
-  if (QX_REQUIRED_ENV_WRITE_ENABLED) {
-    var attributedKeys = Object.keys(attribution);
-    for (var k = 0; k < attributedKeys.length; k++) {
-      var cmd = attributedKeys[k];
-      if (!Object.prototype.hasOwnProperty.call(merged, cmd)) {
-        merged[cmd] = attribution[cmd];
+  if (nonBlank.length === 0) {
+    die("seed-chain refuses an empty chain (got " + cmds.length + " argument(s), 0 non-empty) — nothing written");
+  }
+
+  writeJsonAtomic(vfile, { verify: nonBlank });
+  process.stdout.write("seeded " + vfile + " with " + nonBlank.length + " command(s)\n");
+}
+
+// ---------------------------------------------------------------------
+// declare <repo-root> [--cmd <cmd> --env <NAME>[,<NAME>...]]... [--decline <NAME>]...
+// The ONLY writer of requiredEnv.
+// ---------------------------------------------------------------------
+function parseDeclareArgs(rawArgs) {
+  var pairs = [];
+  var declines = [];
+  var i = 0;
+  var pendingCmd = null;
+  while (i < rawArgs.length) {
+    var tok = rawArgs[i];
+    if (tok === "--cmd") {
+      var cmdVal = rawArgs[i + 1];
+      if (cmdVal === undefined) die("--cmd requires a value");
+      pendingCmd = cmdVal;
+      i += 2;
+      continue;
+    }
+    if (tok === "--env") {
+      if (pendingCmd === null) die("--env given without a preceding --cmd");
+      var envVal = rawArgs[i + 1];
+      if (envVal === undefined) die("--env requires a value");
+      var envs = envVal.split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+      if (envs.length === 0) die("--env given an empty value");
+      pairs.push({ cmd: pendingCmd, envs: envs });
+      pendingCmd = null;
+      i += 2;
+      continue;
+    }
+    if (tok === "--decline") {
+      var declVal = rawArgs[i + 1];
+      if (declVal === undefined) die("--decline requires a value");
+      declines.push(declVal);
+      i += 2;
+      continue;
+    }
+    die("unrecognized argument to declare: " + tok);
+  }
+  if (pendingCmd !== null) die("--cmd " + JSON.stringify(pendingCmd) + " given with no following --env");
+  return { pairs: pairs, declines: declines };
+}
+
+// Guards the ONE membership check whose removal a negative control proves
+// load-bearing (test/env-derive.test.sh AC21). Flipping this is the entire
+// mutation the negative control applies — one line, sed-targetable.
+var QX_DECLARE_VERIFY_MEMBERSHIP_ENABLED = true;
+
+function cmdDeclare(args) {
+  var repoRoot = args[0];
+  if (!repoRoot) die("usage: quetrex-env-derive declare <repo-root> [--cmd <cmd> --env <NAME>[,<NAME>...]]... [--decline <NAME>]...");
+  if (!fs.existsSync(repoRoot)) die("repo root not found: " + repoRoot);
+
+  var parsed = parseDeclareArgs(args.slice(1));
+  var pairs = parsed.pairs;
+  var declines = parsed.declines;
+
+  // STRUCTURAL non-interactive safety: zero pairs and zero declines writes
+  // NOTHING, unconditionally — a model that skips the human confirmation
+  // step still cannot manufacture a declaration.
+  if (pairs.length === 0 && declines.length === 0) {
+    process.stdout.write("nothing declared (no --cmd/--env or --decline given)\n");
+    return;
+  }
+
+  var vfile = path.join(repoRoot, ".quetrex", "verify.json");
+  if (!fs.existsSync(vfile)) die("no " + vfile + " found — run seed-chain first");
+  var raw;
+  try { raw = fs.readFileSync(vfile, "utf8"); } catch (e) { die("cannot read " + vfile + ": " + e.message); }
+  var obj;
+  try { obj = JSON.parse(raw); } catch (e) { die(vfile + " does not parse as JSON, refusing to declare"); }
+  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) die(vfile + " is not a JSON object, refusing to declare");
+  var verifyArr = Array.isArray(obj.verify) ? obj.verify : null;
+  if (verifyArr === null) die(".verify is not an array in " + vfile + ", refusing to declare");
+
+  var candidates = candidateList(repoRoot);
+  var validNames = {};
+  for (var ci = 0; ci < candidates.length; ci++) validNames[candidates[ci].name] = true;
+
+  // Validate EVERYTHING before writing anything — all-or-nothing, so a
+  // partially-invalid request never lands a partial mapping.
+  var pi3, ei2;
+  for (pi3 = 0; pi3 < pairs.length; pi3++) {
+    var pair = pairs[pi3];
+    if (QX_DECLARE_VERIFY_MEMBERSHIP_ENABLED && verifyArr.indexOf(pair.cmd) === -1) {
+      die("--cmd " + JSON.stringify(pair.cmd) + " is not a byte-for-byte member of .verify[] in " + vfile + " — refusing to declare");
+    }
+    for (ei2 = 0; ei2 < pair.envs.length; ei2++) {
+      var nm2 = pair.envs[ei2];
+      if (!Object.prototype.hasOwnProperty.call(validNames, nm2)) {
+        die("--env " + nm2 + " is not a provable candidate (must be a key of the COMMITTED .env.example/.env.sample AND have a fallback-less committed read) — refusing to declare");
       }
     }
   }
-
-  var nextObj = Object.assign({}, obj);
-  if (Object.keys(merged).length) {
-    nextObj.requiredEnv = merged;
+  for (var dj2 = 0; dj2 < declines.length; dj2++) {
+    if (!declines[dj2]) die("--decline given an empty name");
   }
 
+  // Everything validated; write, union-only, never narrowing.
+  var existingRequiredEnv = (obj.requiredEnv && typeof obj.requiredEnv === "object" && !Array.isArray(obj.requiredEnv)) ? obj.requiredEnv : {};
+  var mergedRequiredEnv = {};
+  Object.keys(existingRequiredEnv).forEach(function (k) { mergedRequiredEnv[k] = existingRequiredEnv[k]; });
+
+  var pj2;
+  for (pj2 = 0; pj2 < pairs.length; pj2++) {
+    var pr = pairs[pj2];
+    var cur = Array.isArray(mergedRequiredEnv[pr.cmd]) ? mergedRequiredEnv[pr.cmd].slice() : [];
+    var seen = {};
+    cur.forEach(function (n) { seen[n] = true; });
+    for (var pe2 = 0; pe2 < pr.envs.length; pe2++) {
+      var n3 = pr.envs[pe2];
+      if (!seen[n3]) { cur.push(n3); seen[n3] = true; }
+    }
+    mergedRequiredEnv[pr.cmd] = cur;
+  }
+
+  var existingDeclined = Array.isArray(obj.requiredEnvDeclined) ? obj.requiredEnvDeclined.slice() : [];
+  var declinedSeen = {};
+  existingDeclined.forEach(function (n) { declinedSeen[n] = true; });
+  var dj3;
+  for (dj3 = 0; dj3 < declines.length; dj3++) {
+    var dn2 = declines[dj3];
+    if (!declinedSeen[dn2]) { existingDeclined.push(dn2); declinedSeen[dn2] = true; }
+  }
+
+  var nextObj = Object.assign({}, obj);
+  if (Object.keys(mergedRequiredEnv).length) nextObj.requiredEnv = mergedRequiredEnv;
+  if (existingDeclined.length) nextObj.requiredEnvDeclined = existingDeclined;
+
   var wrote = writeJsonAtomic(vfile, nextObj);
-  process.stdout.write((wrote ? "wrote " : vfile + " already current") + (wrote ? vfile : "") + "\n");
+  process.stdout.write(wrote ? ("declared into " + vfile + "\n") : (vfile + " already current\n"));
 }
 
 // ---------------------------------------------------------------------
 // missing <repo-root> — report-only, never writes. Used by doctor Check 5.
+// Excludes names covered by requiredEnv AND names in requiredEnvDeclined.
 // ---------------------------------------------------------------------
 function cmdMissing(args) {
   var repoRoot = args[0];
   if (!repoRoot) die("usage: quetrex-env-derive missing <repo-root>");
   if (!fs.existsSync(repoRoot)) die("repo root not found: " + repoRoot);
   var vfile = path.join(repoRoot, ".quetrex", "verify.json");
-  if (!fs.existsSync(vfile)) return;
-  var obj;
-  try { obj = JSON.parse(fs.readFileSync(vfile, "utf8")); } catch (e) { return; }
-  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return;
-  var verifyArr = Array.isArray(obj.verify) ? obj.verify : [];
-  if (verifyArr.length === 0) return;
-  var candidates = candidateList(repoRoot);
-  if (candidates.length === 0) return;
-  var attribution = attributeToCommands(repoRoot, candidates, verifyArr);
-  var existing = (obj.requiredEnv && typeof obj.requiredEnv === "object" && !Array.isArray(obj.requiredEnv)) ? obj.requiredEnv : {};
-  var covered = {};
-  var ekeys = Object.keys(existing);
-  for (var i = 0; i < ekeys.length; i++) {
-    var arr = Array.isArray(existing[ekeys[i]]) ? existing[ekeys[i]] : [];
-    for (var j = 0; j < arr.length; j++) covered[arr[j]] = true;
+  var requiredEnv = {};
+  var declined = [];
+  if (fs.existsSync(vfile)) {
+    try {
+      var obj = JSON.parse(fs.readFileSync(vfile, "utf8"));
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+        if (obj.requiredEnv && typeof obj.requiredEnv === "object" && !Array.isArray(obj.requiredEnv)) requiredEnv = obj.requiredEnv;
+        if (Array.isArray(obj.requiredEnvDeclined)) declined = obj.requiredEnvDeclined;
+      }
+    } catch (e) { /* treat as no declared state */ }
   }
-  var missing = {};
-  var akeys = Object.keys(attribution);
-  for (var a = 0; a < akeys.length; a++) {
-    var names = attribution[akeys[a]];
-    for (var n = 0; n < names.length; n++) {
-      if (!Object.prototype.hasOwnProperty.call(covered, names[n])) missing[names[n]] = true;
+
+  var covered = {};
+  Object.keys(requiredEnv).forEach(function (c) {
+    var arr = Array.isArray(requiredEnv[c]) ? requiredEnv[c] : [];
+    arr.forEach(function (n) { covered[n] = true; });
+  });
+  declined.forEach(function (n) { covered[n] = true; });
+
+  var candidates = candidateList(repoRoot);
+  for (var i = 0; i < candidates.length; i++) {
+    if (!Object.prototype.hasOwnProperty.call(covered, candidates[i].name)) {
+      process.stdout.write(candidates[i].name + "\n");
     }
   }
-  var out = Object.keys(missing);
-  for (var o = 0; o < out.length; o++) process.stdout.write(out[o] + "\n");
 }
 
 // ---------------------------------------------------------------------
-// plan <plan.json> <repo-root>
+// plan <plan.json> <repo-root> — SEC-3 root-contained.
 // ---------------------------------------------------------------------
+function validatePlanPath(planPath) {
+  var absPlanPath = path.isAbsolute(planPath) ? planPath : path.resolve(planPath);
+  var dir = path.dirname(absPlanPath);
+  var realDir;
+  try { realDir = fs.realpathSync(dir); } catch (e) {
+    die("refusing to write a plan: parent directory does not exist: " + dir);
+  }
+  var suffix = "/.quetrex/plan";
+  var endsWithSuffix = realDir.length >= suffix.length && realDir.slice(realDir.length - suffix.length) === suffix;
+  if (!endsWithSuffix) {
+    die("refusing to write a plan outside a .quetrex/plan directory (resolved parent: " + realDir + ")");
+  }
+  var target = path.join(realDir, path.basename(absPlanPath));
+  var st;
+  try { st = fs.lstatSync(target); } catch (e) {
+    die("plan file not found: " + target);
+  }
+  if (st.isSymbolicLink()) {
+    die("refusing to write through a symlink at " + target);
+  }
+  if (!st.isFile()) {
+    die("plan path is not a regular file: " + target);
+  }
+  return target;
+}
+
 function cmdPlan(args) {
-  var planPath = args[0];
+  var planPathArg = args[0];
   var repoRoot = args[1];
-  if (!planPath || !repoRoot) die("usage: quetrex-env-derive plan <plan.json> <repo-root>");
-  if (!fs.existsSync(planPath)) die("plan file not found: " + planPath);
+  if (!planPathArg || !repoRoot) die("usage: quetrex-env-derive plan <plan.json> <repo-root>");
   if (!fs.existsSync(repoRoot)) die("repo root not found: " + repoRoot);
+  var planPath = validatePlanPath(planPathArg);
 
   var raw;
   try { raw = fs.readFileSync(planPath, "utf8"); } catch (e) { die("cannot read plan: " + e.message); }
@@ -516,24 +647,26 @@ function cmdPlan(args) {
   }
 
   var chain = Array.isArray(obj.verify) ? obj.verify : [];
+
+  // Read the SAME committed declaration verify-gate.sh reads — never
+  // re-derived, never inferred.
+  var committed = readCommittedVerifyJson(repoRoot);
+  var requiredEnv = committed.requiredEnv;
+
   var candidates = candidateList(repoRoot);
-  var attribution = attributeToCommands(repoRoot, candidates, chain);
+  var readAtByName = {};
+  for (var ci = 0; ci < candidates.length; ci++) readAtByName[candidates[ci].name] = candidates[ci].read_at;
 
   var byName = {};
   var order = [];
   for (var i = 0; i < chain.length; i++) {
     var cmd = chain[i];
-    var names = attribution[cmd] || [];
+    var names = Array.isArray(requiredEnv[cmd]) ? requiredEnv[cmd] : [];
     for (var j = 0; j < names.length; j++) {
-      var name = names[j];
-      if (!Object.prototype.hasOwnProperty.call(byName, name)) {
-        var readAt = "";
-        for (var k = 0; k < candidates.length; k++) {
-          if (candidates[k].name === name) { readAt = candidates[k].read_at; break; }
-        }
-        byName[name] = { read_at: readAt, cmd: cmd };
-        order.push(name);
-      }
+      var nm = names[j];
+      if (Object.prototype.hasOwnProperty.call(byName, nm)) continue;
+      byName[nm] = { read_at: readAtByName[nm] || "", cmd: cmd };
+      order.push(nm);
     }
   }
 
@@ -545,19 +678,19 @@ function cmdPlan(args) {
 
   var additions = [];
   for (var o = 0; o < order.length; o++) {
-    var nm = order[o];
-    if (Object.prototype.hasOwnProperty.call(existingNames, nm)) continue;
-    var info = byName[nm];
+    var name2 = order[o];
+    if (Object.prototype.hasOwnProperty.call(existingNames, name2)) continue;
+    var info = byName[name2];
     additions.push({
-      name: nm,
+      name: name2,
       read_at: info.read_at,
       placeholderable: true,
-      why: "read with no fallback and `" + info.cmd + "` needs it"
+      why: "declared in the committed requiredEnv for `" + info.cmd + "`"
     });
   }
 
   if (additions.length === 0) {
-    process.stdout.write("no new required_env names derived for " + planPath + "\n");
+    process.stdout.write("no new required_env names to stamp for " + planPath + "\n");
     return;
   }
 
@@ -576,9 +709,11 @@ var sub = process.argv[1];
 var rest = process.argv.slice(2);
 switch (sub) {
   case "scan": cmdScan(rest); break;
-  case "verify-json": cmdVerifyJson(rest); break;
+  case "propose": cmdPropose(rest); break;
+  case "seed-chain": cmdSeedChain(rest); break;
+  case "declare": cmdDeclare(rest); break;
   case "missing": cmdMissing(rest); break;
   case "plan": cmdPlan(rest); break;
-  default: die("unknown subcommand: " + sub + " (expected scan|verify-json|missing|plan)");
+  default: die("unknown subcommand: " + sub + " (expected scan|propose|seed-chain|declare|missing|plan)");
 }
 ' "$SUB" "$@"
