@@ -278,6 +278,58 @@ else
 fi
 
 # =============================================================================
+# AC29 (plan VERIFY-GATE-QUIET, workstream doctorfix) — QA-AUTHORED,
+# independent of AC-B1..AC-B4 above. The plan requires statusline-command.sh
+# RESTORED to the LEGACY candidate list (not permanently removed) with an
+# EXACT-path guard (tokenize, expand a leading ~ to $HOME, resolve, compare
+# for equality) so a genuinely stale/orphaned statusline-command.sh is still
+# detected (the SEC-6 lost-detection case) while a live statusLine.command
+# target is still suppressed. AC-B1/AC-B2 above assert the OPPOSITE of this
+# plan requirement (unconditional removal from the list) — they encode the
+# doctorfix workstream's own chosen deviation, not the plan's acceptance
+# criterion. These assertions test the plan's actual measure directly against
+# the shipped doctor.md source and a live fixture, independent of AC-B1/AC-B2.
+# =============================================================================
+
+# --- AC29 RESTORED-TO-LIST: the plan's own source-level measure.
+STATUSLINE_IN_LIST="$(awk '/^for f in/,/^done$/' "$DOCTOR_MD" | grep -c 'statusline-command.sh' || true)"
+[ -n "$STATUSLINE_IN_LIST" ] || STATUSLINE_IN_LIST=0
+if [ "$STATUSLINE_IN_LIST" -eq 1 ]; then
+  pass "AC29 RESTORED-TO-LIST: 'statusline-command.sh' appears exactly once in the Check 3 LEGACY for-loop list"
+else
+  fail "AC29 RESTORED-TO-LIST: expected 'statusline-command.sh' to appear exactly 1 time in the Check 3 LEGACY list, got $STATUSLINE_IN_LIST — the plan (.quetrex/plan/VERIFY-GATE-QUIET.json AC29) requires it RESTORED, not permanently removed; removing it entirely reintroduces the SEC-6 lost-detection case for every OTHER stale artifact class too, since a repo with a genuinely orphaned statusline-command.sh now gets 0 signal, silently, forever"
+fi
+
+# --- AC29 STATE 4 (behavioural): orphaned statusline-command.sh, NO
+# statusLine key anywhere -> the plan requires it IS reported.
+B29S4_HOME="$WORK/b29-state4-home"
+mkdir -p "$B29S4_HOME/.claude"
+echo '#!/usr/bin/env bash' > "$B29S4_HOME/.claude/statusline-command.sh"
+OUT_B29S4="$(run_check3 "$B29S4_HOME" bash 2>&1)"
+if printf '%s' "$OUT_B29S4" | grep -q 'statusline-command.sh'; then
+  pass "AC29 STATE 4: an orphaned statusline-command.sh with NO statusLine key anywhere IS reported (SEC-6 lost-detection case restored)"
+else
+  fail "AC29 STATE 4: an orphaned statusline-command.sh with NO statusLine key anywhere is NOT reported (out: [$OUT_B29S4]) — this IS the SEC-6 lost-detection defect the plan required closed: a genuinely stale statusline-command.sh now produces zero signal in any repo, forever"
+fi
+
+# --- AC29 STATE-2-equivalent (behavioural, exact-match guard): a candidate
+# STILL in the list (team-protocol.md) is orphaned, but statusLine.command
+# references a SUPERSTRING of its path (team-protocol.md.bak) — the plan
+# requires exact-path comparison, so a superstring must NOT suppress it.
+B29SUP_HOME="$WORK/b29-superstring-home"
+mkdir -p "$B29SUP_HOME/.claude"
+echo 'legacy content' > "$B29SUP_HOME/.claude/team-protocol.md"
+cat > "$B29SUP_HOME/.claude/settings.json" <<EOF
+{ "statusLine": { "type": "command", "command": "bash $B29SUP_HOME/.claude/team-protocol.md.bak" } }
+EOF
+OUT_B29SUP="$(run_check3 "$B29SUP_HOME" bash 2>&1)"
+if printf '%s' "$OUT_B29SUP" | grep -q 'team-protocol.md'; then
+  pass "AC29 SUPERSTRING: a statusLine.command referencing team-protocol.md.bak (a superstring) does not suppress the orphaned team-protocol.md — exact-path guard confirmed"
+else
+  fail "AC29 SUPERSTRING: a statusLine.command referencing team-protocol.md.bak wrongly SUPPRESSED the orphaned team-protocol.md (out: [$OUT_B29SUP]) — is_live_statusline() still uses a substring \`grep -qF\` match, not the exact-path (tokenize/expand ~/resolve/compare-equal) guard the plan requires; this is the original SEC-6 fail-open, still reachable for every candidate still in the list"
+fi
+
+# =============================================================================
 # DEFECT C — Check 3 npm-era command glob, bash/zsh parity
 # =============================================================================
 
