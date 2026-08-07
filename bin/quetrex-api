@@ -141,37 +141,99 @@ resolve_project() {
 #       curl returns (explicit rm — portable across bash and zsh).
 #     - 401      -> "Run /quetrex:login" (stderr), return 1
 #     - 403/404  -> "No access — contact your administrator" (stderr), return 1
-#     - other non-2xx -> "Quetrex API error (HTTP <code>)" (stderr), return 1
+#     - other non-2xx -> "Quetrex API error (HTTP <code>): <server's response
+#       body, truncated, token-scrubbed>" (stderr), return 1. A bare status code
+#       with no diagnostic is what made a genuinely transient 500 indistinguishable
+#       from the tool being broken; the server's own message is what makes it
+#       actionable.
 #     - 2xx      -> prints the JSON response body to stdout, return 0
+#
+#   RETRY. A connection-level failure (curl never got a response at all — the
+#   request cannot have reached application code, so nothing could have been
+#   written) is retried for EVERY method. Beyond that, retry eligibility is
+#   gated on whether repeating the request can ever create a duplicate:
+#     - GET/PUT/DELETE are idempotent by HTTP semantics — repeating the exact
+#       same request converges to the same end state — so any 5xx is retried.
+#     - POST/PATCH are NOT safe to retry on a generic 5xx: the request may have
+#       already been fully processed server-side (write committed) before the
+#       response was lost, and a repeated POST here creates a permanent
+#       duplicate task (there is no DELETE /api/tasks). Retried ONLY on 429
+#       (rate-limited — never dispatched) and 503 (service unavailable — a
+#       gateway/load-balancer rejection that, by definition, occurs before the
+#       request reaches application code). Never 500/502/504 for these methods.
+#   Bounded at 3 total attempts, 1s/2s backoff between them, and every retry is
+#   announced on stderr so a pause is never silent.
 qapi() {
   # NOTE: do not name a local `path` — zsh ties lowercase `path` to $PATH.
   local method="$1" endpoint="$2" body="${3:-}"
   local url="${QX_KANBAN_URL}${endpoint}"
-  local cfg bodyf code rc=1
+  local cfg bodyf code="" curl_rc=0 rc=1
+  local attempt max_attempts=3
 
-  cfg="$(mktemp)"   || { echo "Quetrex API error (temp file)" >&2; return 1; }
-  bodyf="$(mktemp)" || { rm -f "$cfg"; echo "Quetrex API error (temp file)" >&2; return 1; }
-  # Both temp files may hold sensitive bytes: cfg the bearer token, bodyf the
-  # response body (which for /secrets/export is the vault map). Lock both to 0600
-  # on creation and rm -f each on every return path below.
-  chmod 600 "$cfg" "$bodyf"
+  for attempt in 1 2 3; do
+    cfg="$(mktemp)"   || { echo "Quetrex API error (temp file)" >&2; return 1; }
+    bodyf="$(mktemp)" || { rm -f "$cfg"; echo "Quetrex API error (temp file)" >&2; return 1; }
+    # Both temp files may hold sensitive bytes: cfg the bearer token, bodyf the
+    # response body (which for /secrets/export is the vault map). Lock both to
+    # 0600 on creation and rm -f each on every path below, every attempt.
+    chmod 600 "$cfg" "$bodyf"
 
-  # The token's only on-disk home: a 0600 curl config (-K), never on argv.
-  printf 'header = "Authorization: Bearer %s"\n' "$_QX_TOKEN" > "$cfg"
+    # The token's only on-disk home: a 0600 curl config (-K), never on argv.
+    printf 'header = "Authorization: Bearer %s"\n' "$_QX_TOKEN" > "$cfg"
 
-  if [ -n "$body" ]; then
-    code="$(curl -sS -K "$cfg" \
-      -H 'Content-Type: application/json' \
-      -X "$method" --data "$body" \
-      -o "$bodyf" -w '%{http_code}' "$url")"
-  else
-    code="$(curl -sS -K "$cfg" \
-      -X "$method" \
-      -o "$bodyf" -w '%{http_code}' "$url")"
-  fi
+    if [ -n "$body" ]; then
+      code="$(curl -sS -K "$cfg" \
+        -H 'Content-Type: application/json' \
+        -X "$method" --data "$body" \
+        -o "$bodyf" -w '%{http_code}' "$url")"
+    else
+      code="$(curl -sS -K "$cfg" \
+        -X "$method" \
+        -o "$bodyf" -w '%{http_code}' "$url")"
+    fi
+    curl_rc=$?
 
-  # Token's on-disk copy is no longer needed — wipe it before doing anything else.
-  rm -f "$cfg"
+    # Token's on-disk copy is no longer needed — wipe it before doing anything else.
+    rm -f "$cfg"
+
+    # A curl-level failure (couldn't connect, timed out below the HTTP layer,
+    # TLS error, etc.) never produces a valid 3-digit code — normalize so the
+    # case switch below has one unambiguous value to match on.
+    [ "$curl_rc" -eq 0 ] && [ -n "$code" ] || code="000"
+
+    local should_retry=0
+    if [ "$curl_rc" -ne 0 ] || [ "$code" = "000" ]; then
+      should_retry=1
+    else
+      case "$method" in
+        GET | PUT | DELETE)
+          case "$code" in
+            5??) should_retry=1 ;;
+          esac
+          ;;
+        POST | PATCH)
+          case "$code" in
+            429 | 503) should_retry=1 ;;
+          esac
+          ;;
+      esac
+    fi
+
+    if [ "$should_retry" -eq 1 ] && [ "$attempt" -lt "$max_attempts" ]; then
+      local why
+      if [ "$curl_rc" -ne 0 ] || [ "$code" = "000" ]; then
+        why="connection failed"
+      else
+        why="HTTP $code"
+      fi
+      echo "Quetrex API: transient error ($why) on $method $endpoint — retrying ($((attempt + 1))/$max_attempts)..." >&2
+      rm -f "$bodyf"
+      sleep "$attempt"
+      continue
+    fi
+
+    break
+  done
 
   case "$code" in
     2*)
@@ -185,7 +247,30 @@ qapi() {
       echo "No access — contact your administrator" >&2
       ;;
     *)
-      echo "Quetrex API error (HTTP $code)" >&2
+      local errbody
+      errbody="$(cat "$bodyf" 2>/dev/null)"
+      # Defensive scrub: the token should never appear in a response body (it
+      # is the CLIENT's own credential, not something the server echoes), but
+      # this guarantees it cannot leak through this path even if a server ever
+      # reflected the Authorization header back (many debug/error pages do).
+      # Quoting $_QX_TOKEN inside the pattern forces a literal match, never a
+      # glob, so token bytes that happen to look like glob metacharacters are
+      # matched byte-for-byte rather than (mis)interpreted.
+      if [ -n "${_QX_TOKEN:-}" ]; then
+        errbody="${errbody//"$_QX_TOKEN"/[REDACTED]}"
+      fi
+      # Truncate so one enormous HTML error page can't flood the operator's
+      # terminal; a few hundred characters is enough to be actionable.
+      if [ "${#errbody}" -gt 500 ]; then
+        errbody="$(printf '%s' "$errbody" | head -c 500)... [truncated]"
+      fi
+      if [ "$code" = "000" ]; then
+        echo "Quetrex API error: could not reach the server (connection failed) after $attempt attempt(s)" >&2
+      elif [ -n "$errbody" ]; then
+        echo "Quetrex API error (HTTP $code): $errbody" >&2
+      else
+        echo "Quetrex API error (HTTP $code): <empty response body>" >&2
+      fi
       ;;
   esac
 
