@@ -456,3 +456,279 @@ NOPE21NEG="$(jq -c '.requiredEnv["npm run nope"] // empty' "$F21neg/.quetrex/ver
 [ "$NOPE21NEG" = '["A_URL"]' ] \
   && pass "AC21 NEGATIVE CONTROL: disabling the membership check wrongly writes a key for a command not in .verify[] — proves the check is load-bearing" \
   || fail "AC21 NEGATIVE CONTROL: expected the mutated tool to (wrongly) write requiredEnv[\"npm run nope\"], got '$NOPE21NEG'"
+
+# =============================================================================
+# AC22 — SEC-4: propose/declare read the SAME committed evidence base
+# verify-gate.sh reads. A human confirming a `propose` candidate can never be
+# shown, and never confirm, a pairing the gate would then silently refuse.
+# =============================================================================
+F22="$TMPROOT/ac22"
+git_init_repo "$F22"
+mkdir -p "$F22/src" "$F22/.quetrex"
+printf 'A_URL=ac22-a-value-should-never-leak\n' > "$F22/.env.example"
+cat > "$F22/src/db.js" <<'EOF'
+// db client
+// A_URL: no fallback — line 3 is the provable, committed read
+const a = process.env.A_URL;
+EOF
+jq -cn '{verify:["npm run build"]}' > "$F22/.quetrex/verify.json"
+git -C "$F22" add .env.example src/db.js .quetrex/verify.json
+git -C "$F22" commit -q -m "chore: AC22 fixture — A_URL fully committed"
+
+# Uncommitted second key + uncommitted read, exactly the SEC-4 shape:
+# .env.example gets a WORKING-TREE-ONLY edit, and the read lives in an
+# UNTRACKED file — neither half of U_ONLY ever touched HEAD.
+printf 'U_ONLY=ac22-u-value-should-never-leak\n' >> "$F22/.env.example"
+cat > "$F22/src/u.js" <<'EOF'
+const u = process.env.U_ONLY;
+EOF
+
+OUT22="$("$TOOL" propose "$F22" 2>"$TMPROOT/ac22.stderr")"; CODE22=$?
+ERR22="$(cat "$TMPROOT/ac22.stderr")"
+
+[ "$CODE22" -eq 0 ] && pass "AC22: propose exits 0" || fail "AC22: expected exit 0, got $CODE22 (out: [$OUT22])"
+CANDLEN22="$(printf '%s' "$OUT22" | jq '.candidates | length' 2>/dev/null)"
+[ "$CANDLEN22" = "1" ] && pass "AC22: .candidates|length == 1" \
+  || fail "AC22: expected .candidates|length == 1, got '$CANDLEN22' (out: [$OUT22])"
+CANDNAME22="$(printf '%s' "$OUT22" | jq -r '.candidates[0].name' 2>/dev/null)"
+[ "$CANDNAME22" = "A_URL" ] && pass "AC22: .candidates[0].name == A_URL" \
+  || fail "AC22: expected A_URL, got '$CANDNAME22'"
+CANDPROJ22="$(printf '%s' "$OUT22" | jq -c '.candidates' 2>/dev/null)"
+U22="$(printf '%s' "$CANDPROJ22" | grep -c 'U_ONLY')"
+[ "$U22" = "0" ] && pass "AC22: U_ONLY does not appear in the .candidates projection" \
+  || fail "AC22: U_ONLY leaked into .candidates: [$CANDPROJ22]"
+
+ERRLINES22="$(printf '%s\n' "$ERR22" | grep -c .)"
+ERRHINT22="$(printf '%s\n' "$ERR22" | grep -c 'U_ONLY.*not committed')"
+[ "$ERRLINES22" = "1" ] && [ "$ERRHINT22" = "1" ] \
+  && pass "AC22: exactly 1 stderr line naming U_ONLY and containing 'not committed'" \
+  || fail "AC22: expected exactly 1 stderr line naming U_ONLY / 'not committed', got $ERRLINES22 line(s) (stderr: [$ERR22])"
+
+PRE22="$(cat "$F22/.quetrex/verify.json")"
+"$TOOL" declare "$F22" --cmd "npm run build" --env U_ONLY >/dev/null 2>&1
+CODE22D=$?
+POST22="$(cat "$F22/.quetrex/verify.json")"
+[ "$CODE22D" -ne 0 ] && pass "AC22: declare --env U_ONLY exits non-zero (not a provable candidate)" \
+  || fail "AC22: expected declare --env U_ONLY to refuse, got exit 0"
+[ "$PRE22" = "$POST22" ] && pass "AC22: .quetrex/verify.json byte-identical after the refused declare" \
+  || fail "AC22: .quetrex/verify.json changed after a refused declare"
+
+# --- EVIDENCE-BASE EQUIVALENCE: propose stdout byte-identical after every
+# uncommitted/untracked file is deleted -------------------------------------
+OUT22_BEFORE="$OUT22"
+git -C "$F22" checkout -q -- .env.example
+git -C "$F22" clean -q -fd
+OUT22_AFTER="$("$TOOL" propose "$F22" 2>/dev/null)"
+if diff <(printf '%s' "$OUT22_BEFORE") <(printf '%s' "$OUT22_AFTER") >/dev/null 2>&1; then
+  pass "AC22: propose stdout is byte-identical before and after every uncommitted/untracked file is deleted"
+else
+  fail "AC22: propose stdout changed after deleting uncommitted/untracked files: before=[$OUT22_BEFORE] after=[$OUT22_AFTER]"
+fi
+
+HEADCOLON22="$(grep -c 'HEAD:' "$TOOL")"
+if [ "$HEADCOLON22" -ge 2 ]; then
+  pass "AC22: bin/quetrex-env-derive contains >= 2 occurrences of the literal 'HEAD:' ($HEADCOLON22)"
+else
+  fail "AC22: expected >= 2 occurrences of 'HEAD:' in the tool, got $HEADCOLON22"
+fi
+
+# --- HOOK PARITY -------------------------------------------------------------
+HOOKPARITY22="$(git -C "$F22" show HEAD:.env.example | grep -cE '^A_URL=')"
+[ "$HOOKPARITY22" = "1" ] && pass "AC22 HOOK PARITY: the accepted name A_URL is a key in the COMMITTED .env.example at HEAD (matches verify-gate.sh's own read)" \
+  || fail "AC22 HOOK PARITY: expected exactly 1 match for ^A_URL= in the committed blob, got $HOOKPARITY22"
+
+# --- NEGATIVE CONTROL --------------------------------------------------------
+# A SEPARATE fixture isolates exactly what breaks when declaredNames() alone
+# regresses to reading the working tree: U_ONLY needs a COMMITTED read (so
+# fallbacklessReads, left untouched, already carries it) but an UNCOMMITTED
+# declaration — the one axis the mutation controls.
+F22neg="$TMPROOT/ac22neg"
+git_init_repo "$F22neg"
+mkdir -p "$F22neg/src" "$F22neg/.quetrex"
+printf 'A_URL=x\n' > "$F22neg/.env.example"
+cat > "$F22neg/src/db.js" <<'EOF'
+const a = process.env.A_URL;
+const u = process.env.U_ONLY;
+EOF
+jq -cn '{verify:["npm run build"]}' > "$F22neg/.quetrex/verify.json"
+git -C "$F22neg" add .env.example src/db.js .quetrex/verify.json
+git -C "$F22neg" commit -q -m "chore: AC22 negative-control fixture — U_ONLY has a COMMITTED read but no committed declaration"
+printf 'U_ONLY=y\n' >> "$F22neg/.env.example"  # working-tree-only declaration
+
+MUT22="$TMPROOT/quetrex-env-derive.declarednames-fs"
+sed -E 's/^([[:space:]]*)var text = committedBlob\(repoRoot, candidates\[i\]\);$/\1var text = null; try { text = fs.readFileSync(path.join(repoRoot, candidates[i]), "utf8"); } catch (e) { text = null; }/' "$TOOL" > "$MUT22"
+chmod +x "$MUT22"
+MUT22_DIFF="$(diff "$TOOL" "$MUT22" | grep -c '^[<>]')"
+[ "$MUT22_DIFF" = "2" ] && pass "AC22 NEGATIVE CONTROL: the declaredNames()-to-fs mutation changes exactly one line in the tool" \
+  || fail "AC22 NEGATIVE CONTROL: expected the mutation to touch exactly 1 line (2 diff lines), got $MUT22_DIFF"
+
+OUT22NEG="$("$MUT22" propose "$F22neg" 2>/dev/null)"
+CANDLEN22NEG="$(printf '%s' "$OUT22NEG" | jq '.candidates | length' 2>/dev/null)"
+UPRESENT22NEG="$(printf '%s' "$OUT22NEG" | jq -c '.candidates' 2>/dev/null | grep -c 'U_ONLY')"
+if [ "$CANDLEN22NEG" = "2" ] && [ "$UPRESENT22NEG" = "1" ]; then
+  pass "AC22 NEGATIVE CONTROL: reverting declaredNames() to a working-tree fs read wrongly surfaces U_ONLY as a candidate (candidates|length 1 -> 2, U_ONLY present) — proving both assertions are load-bearing, not vacuous"
+else
+  fail "AC22 NEGATIVE CONTROL: expected the mutated tool to wrongly surface U_ONLY (length 2, present), got length=$CANDLEN22NEG present=$UPRESENT22NEG (out: [$OUT22NEG])"
+fi
+
+# =============================================================================
+# AC31 — `plan <plan.json> <repo-root>` stamps Contract A required_env[]
+# entries by reading the SAME committed requiredEnv declaration verify-
+# gate.sh reads — never re-derived, never inferred — and is root-contained
+# (SEC-3): it can only ever write a plan artifact where a plan artifact
+# belongs.
+# =============================================================================
+F31="$TMPROOT/ac31"
+git_init_repo "$F31"
+mkdir -p "$F31/src" "$F31/.quetrex/plan"
+cat > "$F31/src/db.js" <<'EOF'
+// db client
+// A_URL: no fallback — line 3 is the provable read
+const a = process.env.A_URL;
+EOF
+printf 'A_URL=ac31-value-should-never-leak\n' > "$F31/.env.example"
+jq -cn '{verify:["npm run build"],requiredEnv:{"npm run build":["A_URL"]}}' > "$F31/.quetrex/verify.json"
+git -C "$F31" add src/db.js .env.example .quetrex/verify.json
+git -C "$F31" commit -q -m "chore: AC31 fixture — committed requiredEnv for npm run build"
+
+mk_plan() {  # mk_plan <path> <extra-json-merge>
+  jq -cn --argjson extra "$2" '{task:"AC31-TASK", base_sha:"deadbeef", verify:["npm run build"]} + $extra' > "$1"
+}
+
+PLAN31="$F31/.quetrex/plan/AC31-TASK.json"
+mk_plan "$PLAN31" '{}'
+PRE31_NOREQ="$(jq 'del(.required_env)' "$PLAN31")"
+
+OUT31="$("$TOOL" plan "$PLAN31" "$F31" 2>&1)"; CODE31=$?
+[ "$CODE31" -eq 0 ] && pass "AC31 STAMP: plan exits 0" || fail "AC31 STAMP: expected exit 0, got $CODE31 (out: [$OUT31])"
+
+REQLEN31="$(jq '.required_env | length' "$PLAN31")"
+[ "$REQLEN31" = "1" ] && pass "AC31 STAMP: .required_env|length == 1" || fail "AC31 STAMP: expected 1, got $REQLEN31"
+KEYS31="$(jq -r '.required_env[0] | keys | sort | join(",")' "$PLAN31")"
+[ "$KEYS31" = "name,placeholderable,read_at,why" ] && pass "AC31 STAMP: entry keys are exactly name,placeholderable,read_at,why" \
+  || fail "AC31 STAMP: expected 'name,placeholderable,read_at,why', got '$KEYS31'"
+NAME31="$(jq -r '.required_env[0].name' "$PLAN31")"
+[ "$NAME31" = "A_URL" ] && pass "AC31 STAMP: [0].name == A_URL" || fail "AC31 STAMP: expected A_URL, got '$NAME31'"
+READAT31="$(jq -r '.required_env[0].read_at' "$PLAN31")"
+[ "$READAT31" = "src/db.js:3" ] && pass "AC31 STAMP: [0].read_at == src/db.js:3" || fail "AC31 STAMP: expected src/db.js:3, got '$READAT31'"
+
+POST31_NOREQ="$(jq 'del(.required_env)' "$PLAN31")"
+if diff <(printf '%s' "$PRE31_NOREQ") <(printf '%s' "$POST31_NOREQ") >/dev/null 2>&1; then
+  pass "AC31 STAMP: del(.required_env) is byte-identical to the pre-stamp plan with required_env deleted"
+else
+  fail "AC31 STAMP: stamping mutated fields other than required_env"
+fi
+
+cp "$PLAN31" "$TMPROOT/ac31-after-stamp1.json"
+"$TOOL" plan "$PLAN31" "$F31" >/dev/null
+cmp -s "$TMPROOT/ac31-after-stamp1.json" "$PLAN31" && pass "AC31 STAMP: a second stamp leaves the file byte-identical" \
+  || fail "AC31 STAMP: a second stamp changed the file"
+
+STRAY31="$(find "$F31/.quetrex/plan" -maxdepth 1 -name '*.envderive.*' -o -maxdepth 1 -name '*.stamp.*' 2>/dev/null | grep -c .)"
+[ "$STRAY31" = "0" ] && pass "AC31 STAMP: 0 stray .envderive.*/.stamp.* files remain in the plan directory" \
+  || fail "AC31 STAMP: found $STRAY31 stray temp file(s) in the plan directory"
+
+# --- UNION ---------------------------------------------------------------
+PLAN31U="$F31/.quetrex/plan/AC31-UNION.json"
+jq -cn '{task:"AC31-UNION", base_sha:"deadbeef", verify:["npm run build"], required_env:[{name:"ARCHITECT_VAR",read_at:"src/other.js:1",placeholderable:true,why:"architect-authored"}]}' > "$PLAN31U"
+"$TOOL" plan "$PLAN31U" "$F31" >/dev/null
+UNIONLEN31="$(jq '.required_env | length' "$PLAN31U")"
+ARCH31="$(jq -r '.required_env[] | select(.name=="ARCHITECT_VAR") | .why' "$PLAN31U")"
+[ "$UNIONLEN31" = "2" ] && [ "$ARCH31" = "architect-authored" ] \
+  && pass "AC31 UNION: an existing architect entry yields length 2 with the architect's entry unchanged" \
+  || fail "AC31 UNION: expected length 2 with architect entry preserved, got length=$UNIONLEN31 why='$ARCH31'"
+
+# --- NO INFERENCE (load-bearing) -----------------------------------------
+F31ni="$TMPROOT/ac31ni"
+git_init_repo "$F31ni"
+mkdir -p "$F31ni/src" "$F31ni/.quetrex/plan"
+cp "$F31/src/db.js" "$F31ni/src/db.js"
+cp "$F31/.env.example" "$F31ni/.env.example"
+jq -cn '{verify:["npm run build"]}' > "$F31ni/.quetrex/verify.json"  # requiredEnv REMOVED
+git -C "$F31ni" add src/db.js .env.example .quetrex/verify.json
+git -C "$F31ni" commit -q -m "chore: AC31 no-inference fixture — A_URL is a committed candidate but NOT declared"
+
+PLAN31NI="$F31ni/.quetrex/plan/AC31-NI.json"
+mk_plan "$PLAN31NI" '{}'
+"$TOOL" plan "$PLAN31NI" "$F31ni" >/dev/null
+NILEN31="$(jq '.required_env // [] | length' "$PLAN31NI")"
+[ "$NILEN31" = "0" ] && pass "AC31 NO INFERENCE: with requiredEnv absent, the stamp adds 0 entries even though A_URL is a committed candidate" \
+  || fail "AC31 NO INFERENCE: expected 0 entries, got $NILEN31"
+
+# --- CONTAINMENT, 4 probes ------------------------------------------------
+# (a) outside .quetrex/plan entirely
+OUTSIDE_DIR="$TMPROOT/ac31-outside"
+mkdir -p "$OUTSIDE_DIR"
+EVIL_PLAN="$OUTSIDE_DIR/evil-plan.json"
+mk_plan "$EVIL_PLAN" '{}'
+cp "$EVIL_PLAN" "$TMPROOT/ac31-evil-precopy.json"
+"$TOOL" plan "$EVIL_PLAN" "$F31" >"$TMPROOT/ac31a.out" 2>&1; CODE31A=$?
+[ "$CODE31A" -ne 0 ] && pass "AC31 CONTAINMENT (a): plan outside .quetrex/plan exits non-zero" \
+  || fail "AC31 CONTAINMENT (a): expected non-zero exit, got 0"
+cmp -s "$TMPROOT/ac31-evil-precopy.json" "$EVIL_PLAN" && pass "AC31 CONTAINMENT (a): the outside file is byte-identical afterward" \
+  || fail "AC31 CONTAINMENT (a): the outside file was modified"
+grep -qi 'plan' "$TMPROOT/ac31a.out" && pass "AC31 CONTAINMENT (a): stderr names the rule" \
+  || fail "AC31 CONTAINMENT (a): stderr did not name a reason: [$(cat "$TMPROOT/ac31a.out")]"
+
+# (b) resolved parent directory does not end in /.quetrex/plan
+mkdir -p "$F31/.quetrex/plans"
+WRONGDIR_PLAN="$F31/.quetrex/plans/wrong.json"
+mk_plan "$WRONGDIR_PLAN" '{}'
+cp "$WRONGDIR_PLAN" "$TMPROOT/ac31-wrongdir-precopy.json"
+"$TOOL" plan "$WRONGDIR_PLAN" "$F31" >/dev/null 2>&1; CODE31B=$?
+[ "$CODE31B" -ne 0 ] && pass "AC31 CONTAINMENT (b): a planPath whose parent dir is not /.quetrex/plan is refused" \
+  || fail "AC31 CONTAINMENT (b): expected non-zero exit, got 0"
+cmp -s "$TMPROOT/ac31-wrongdir-precopy.json" "$WRONGDIR_PLAN" && pass "AC31 CONTAINMENT (b): the target file is byte-identical afterward" \
+  || fail "AC31 CONTAINMENT (b): the target file was modified"
+
+# (c) planPath is itself a symlink
+VICTIM31="$F31/.quetrex/plan/victim.json"
+mk_plan "$VICTIM31" '{}'
+cp "$VICTIM31" "$TMPROOT/ac31-victim-precopy.json"
+SYMLINK31="$F31/.quetrex/plan/symlinked.json"
+ln -sf "$VICTIM31" "$SYMLINK31"
+"$TOOL" plan "$SYMLINK31" "$F31" >/dev/null 2>&1; CODE31C=$?
+[ "$CODE31C" -ne 0 ] && pass "AC31 CONTAINMENT (c): a symlinked planPath is refused" \
+  || fail "AC31 CONTAINMENT (c): expected non-zero exit, got 0"
+cmp -s "$TMPROOT/ac31-victim-precopy.json" "$VICTIM31" && pass "AC31 CONTAINMENT (c): the symlink's victim file is byte-identical afterward" \
+  || fail "AC31 CONTAINMENT (c): the victim file was modified"
+rm -f "$SYMLINK31"
+
+# (d) the REAL dispatcher shape: mktemp -d OUTSIDE the repo root holding
+# .quetrex/plan/<TASK_ID>.json — must be ACCEPTED.
+TMP_WT31="$(mktemp -d "${TMPDIR:-/tmp}/ac31-tmpwt.XXXXXX")"
+mkdir -p "$TMP_WT31/.quetrex/plan"
+DISPATCH_PLAN="$TMP_WT31/.quetrex/plan/AC31-DISPATCH.json"
+mk_plan "$DISPATCH_PLAN" '{}'
+"$TOOL" plan "$DISPATCH_PLAN" "$F31" >/dev/null 2>&1; CODE31D=$?
+[ "$CODE31D" -eq 0 ] && pass "AC31 CONTAINMENT (d): the real dispatcher shape (mktemp -d outside repo root) is ACCEPTED" \
+  || fail "AC31 CONTAINMENT (d): expected exit 0 for the real dispatcher shape, got $CODE31D"
+rm -rf "$TMP_WT31"
+
+# --- NEGATIVE CONTROL ------------------------------------------------------
+MUT31="$TMPROOT/quetrex-env-derive.no-parent-check"
+sed -E 's/^([[:space:]]*)if \(!endsWithSuffix\) \{$/\1if (false) {/' "$TOOL" > "$MUT31"
+chmod +x "$MUT31"
+MUT31_DIFF="$(diff "$TOOL" "$MUT31" | grep -c '^[<>]')"
+[ "$MUT31_DIFF" = "2" ] && pass "AC31 NEGATIVE CONTROL: the parent-directory-check mutation changes exactly one line" \
+  || fail "AC31 NEGATIVE CONTROL: expected the mutation to touch exactly 1 line (2 diff lines), got $MUT31_DIFF"
+
+EVIL_PLAN2="$OUTSIDE_DIR/evil-plan2.json"
+mk_plan "$EVIL_PLAN2" '{}'
+cp "$EVIL_PLAN2" "$TMPROOT/ac31-evil2-precopy.json"
+"$MUT31" plan "$EVIL_PLAN2" "$F31" >/dev/null 2>&1; CODE31NEG=$?
+if [ "$CODE31NEG" -eq 0 ] && ! cmp -s "$TMPROOT/ac31-evil2-precopy.json" "$EVIL_PLAN2"; then
+  pass "AC31 NEGATIVE CONTROL: removing the parent-directory check makes probe (a) exit 0 and write — proving the check is load-bearing"
+else
+  fail "AC31 NEGATIVE CONTROL: expected the mutated tool to (wrongly) accept and write outside .quetrex/plan, got exit=$CODE31NEG"
+fi
+
+if [ "$FAIL" -eq 0 ]; then
+  echo
+  echo "env-derive.test.sh: all checks passed"
+  exit 0
+else
+  echo
+  echo "env-derive.test.sh: FAILURES ABOVE"
+  exit 1
+fi
