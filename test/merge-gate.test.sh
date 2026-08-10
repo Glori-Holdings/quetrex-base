@@ -23,6 +23,17 @@
 # A bash test invoking merge-gate.sh directly against a fixture repo, per the
 # accepted approach for exercising a PreToolUse hook script outside the actual
 # Claude Code runtime.
+#
+# ALSO COVERS DEFECT C (added by a later branch): review-verdict.json's .sha,
+# security-findings.json's .head_sha, and each verify-ledger.jsonl entry's
+# .sha are artifacts NAMING the commit they approve. If one of those files
+# ever gets committed (contrary to git-workflow.md's convention that .quetrex/*
+# stays gitignored), the commit that adds it moves HEAD and the artifact's own
+# pin can never equal HEAD again -- denying every subsequent operation
+# forever, including the commit that would repair the mistake. The fix: an
+# old pin still authorizes HEAD when it is an ancestor of HEAD AND every
+# commit in the range touches nothing outside .quetrex/. See the DEFECT C
+# section below for the full case matrix.
 
 set -uo pipefail
 
@@ -449,6 +460,241 @@ if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
 else
   fail "ALLOW(sensitive diff w/ artifact): expected exit 0 + empty stdout, got exit $CODE stdout: [$OUT]"
 fi
+
+# =============================================================================
+# DEFECT C — artifact-only commits must not self-invalidate an approval.
+#
+# Every sha-pin this gate trusts (review-verdict.json's .sha,
+# security-findings.json's .head_sha, each verify-ledger.jsonl entry's .sha)
+# is an artifact NAMING the commit it approves. Per git-workflow.md these are
+# runtime control-plane files that must never be committed (.gitignore should
+# ignore .quetrex/* and un-ignore only project.json/verify.json). When a
+# repo's gitignore drifts from that and one of these DOES get committed, the
+# commit that adds it moves HEAD -- and the artifact's own pin, recorded
+# before that commit existed, can never equal HEAD again. A strict
+# sha-equality check then denies every subsequent operation forever,
+# including the commit that would remove the artifact and repair the
+# mistake: the gate blocks its own repair.
+#
+# THE FIX: an old pin still authorizes HEAD when (a) it is an ANCESTOR of HEAD
+# and (b) every commit in old..HEAD touches NOTHING outside .quetrex/. A
+# single commit touching anything else anywhere in the range disqualifies the
+# whole range -- code changed, so the deny must still fire exactly as before.
+#
+# Builds a small commit graph on top of $HEAD_SHA (call it C0):
+#   C0 -- C1 (touches only .quetrex/notes.txt)
+#            \-- C2 (touches .quetrex/notes.txt AND src/code.ts)
+#   C0 -- C3 (touches only src/code.ts)                          [sibling]
+#   C0 -- C4 (touches .quetrexfoo/evil.txt — a LOOKALIKE prefix)  [sibling]
+#   C0 -- C4B (touches src/.quetrex/nested.txt — a NESTED lookalike) [sibling]
+#   C0 -- D  (a divergent commit, NOT an ancestor of C1/C2/C3/C4)
+#
+# Every case pins RV/ledger/sec to C0 (older than current HEAD) and asks:
+# does the range from C0 to the new HEAD still count as artifact-only?
+# =============================================================================
+reset_clean_baseline() {  # reset_clean_baseline <sha> — pin RV/ledger/sec, drop ESCALATION
+  write_ledger_at "$1"
+  write_verdict_at "$1"
+  write_sec "$1" none
+  rm -f "$FIXTURE/.quetrex/ESCALATION"
+}
+
+C0="$HEAD_SHA"
+
+git -C "$FIXTURE" checkout -q -b branch-c1 "$C0"
+mkdir -p "$FIXTURE/.quetrex" "$FIXTURE/src"
+echo "note 1" > "$FIXTURE/.quetrex/notes.txt"
+git -C "$FIXTURE" add .quetrex/notes.txt
+git -C "$FIXTURE" commit -q -m "chore: pipeline artifact commit"
+C1="$(git -C "$FIXTURE" rev-parse HEAD)"
+
+echo "note 2" > "$FIXTURE/.quetrex/notes.txt"
+echo "console.log('hi')" > "$FIXTURE/src/code.ts"
+git -C "$FIXTURE" add .quetrex/notes.txt src/code.ts
+git -C "$FIXTURE" commit -q -m "feat: real code change alongside an artifact update"
+C2="$(git -C "$FIXTURE" rev-parse HEAD)"
+
+git -C "$FIXTURE" checkout -q -b branch-c3 "$C0"
+mkdir -p "$FIXTURE/src"
+echo "console.log('code only')" > "$FIXTURE/src/code.ts"
+git -C "$FIXTURE" add src/code.ts
+git -C "$FIXTURE" commit -q -m "feat: code-only change"
+C3="$(git -C "$FIXTURE" rev-parse HEAD)"
+
+# Two SEPARATE lookalike commits, each in isolation, so a mutation that only
+# breaks one form of the anchor check (e.g. a naive prefix test that still
+# rejects a nested path but accepts an unslashed sibling-name prefix) cannot
+# hide behind the other lookalike disqualifying the range on its own.
+git -C "$FIXTURE" checkout -q -b branch-c4 "$C0"
+mkdir -p "$FIXTURE/.quetrexfoo"
+echo "evil" > "$FIXTURE/.quetrexfoo/evil.txt"
+git -C "$FIXTURE" add .quetrexfoo/evil.txt
+git -C "$FIXTURE" commit -q -m "chore: a sibling directory name that LOOKS like a .quetrex/ prefix"
+C4="$(git -C "$FIXTURE" rev-parse HEAD)"
+
+git -C "$FIXTURE" checkout -q -b branch-c4b "$C0"
+mkdir -p "$FIXTURE/src/.quetrex"
+echo "evil" > "$FIXTURE/src/.quetrex/nested.txt"
+git -C "$FIXTURE" add src/.quetrex/nested.txt
+git -C "$FIXTURE" commit -q -m "chore: a NESTED .quetrex/ that is not the repo-root one"
+C4B="$(git -C "$FIXTURE" rev-parse HEAD)"
+
+git -C "$FIXTURE" checkout -q -b branch-d "$C0"
+echo "divergent" > "$FIXTURE/DIVERGENT.md"
+git -C "$FIXTURE" add DIVERGENT.md
+git -C "$FIXTURE" commit -q -m "chore: an unrelated sibling commit"
+D="$(git -C "$FIXTURE" rev-parse HEAD)"
+
+# --- C1: artifact-only commit -> ACCEPTED (RV, ledger, and sec all forgive) -
+git -C "$FIXTURE" checkout -q branch-c1  # HEAD = C1
+git -C "$FIXTURE" reset -q --hard "$C1"
+reset_clean_baseline "$C0"
+OUT="$(run_hook "$FIXTURE")"; CODE=$?
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "ALLOW: artifact-only commit since the pinned sha -> approval still stands"
+else
+  fail "ALLOW(artifact-only): expected exit 0 + empty stdout, got exit $CODE stdout: [$OUT]"
+fi
+
+# --- C2: mixed artifact+code commit in the range -> DENIED ------------------
+git -C "$FIXTURE" reset -q --hard "$C2"
+reset_clean_baseline "$C0"
+OUT="$(run_hook "$FIXTURE")"
+if is_deny "$OUT"; then
+  pass "DENY: a commit touching .quetrex/ AND code in the range disqualifies it"
+else
+  fail "DENY(mixed commit): expected a deny decision, got [$OUT]"
+fi
+
+# --- C3: code-only commit in the range -> DENIED -----------------------------
+git -C "$FIXTURE" checkout -q branch-c3
+reset_clean_baseline "$C0"
+OUT="$(run_hook "$FIXTURE")"
+if is_deny "$OUT"; then
+  pass "DENY: a code-only commit since the pinned sha is a genuine stale approval"
+else
+  fail "DENY(code-only): expected a deny decision, got [$OUT]"
+fi
+
+# --- C4: lookalike-path commit (.quetrexfoo/) -> DENIED --------------------
+# Isolates the ANCHOR: ".quetrexfoo" shares the literal prefix ".quetrex" but
+# is not followed by "/", so a naive (unanchored) prefix test would wrongly
+# accept it.
+git -C "$FIXTURE" checkout -q branch-c4
+reset_clean_baseline "$C0"
+OUT="$(run_hook "$FIXTURE")"
+if is_deny "$OUT"; then
+  pass "DENY: .quetrexfoo/ is NOT the .quetrex/ directory (anchor, not naive prefix)"
+else
+  fail "DENY(lookalike sibling path): expected a deny decision, got [$OUT]"
+fi
+
+# --- C4B: lookalike-path commit (src/.quetrex/) -> DENIED -------------------
+# Isolates NESTING: a .quetrex/ directory that is not at the repo root must
+# not count as the control-plane directory this gate exempts.
+git -C "$FIXTURE" checkout -q branch-c4b
+reset_clean_baseline "$C0"
+OUT="$(run_hook "$FIXTURE")"
+if is_deny "$OUT"; then
+  pass "DENY: src/.quetrex/ (nested) is NOT the repo-root .quetrex/ directory"
+else
+  fail "DENY(nested lookalike path): expected a deny decision, got [$OUT]"
+fi
+
+# --- D: non-ancestor sha pinned -> DENIED ------------------------------------
+# Deliberately isolated from the path-scope check: D and C1 are SIBLINGS (both
+# children of C0), and the naive rev-list range "D..C1" (ignoring ancestry
+# altogether) contains only C1, which IS artifact-only on its own. So this
+# case can ONLY be caught by actually verifying D is an ancestor of C1 — a
+# range that merely LOOKS artifact-only when walked without that check must
+# still be denied.
+git -C "$FIXTURE" checkout -q branch-c1
+git -C "$FIXTURE" reset -q --hard "$C1"   # HEAD = C1 (artifact-only on its own)
+reset_clean_baseline "$D"                 # D is a SIBLING, not an ancestor of C1
+OUT="$(run_hook "$FIXTURE")"
+if is_deny "$OUT"; then
+  pass "DENY: a pinned sha that is not an ancestor of HEAD is never forgiven (even when the naive range looks artifact-only)"
+else
+  fail "DENY(non-ancestor): expected a deny decision, got [$OUT]"
+fi
+
+git -C "$FIXTURE" reset -q --hard "$C2"   # leave HEAD at C2 for the tests below
+
+# --- unresolvable sha (missing object / shallow-clone stand-in) -> DENIED ---
+# A well-formed 40-hex sha that was never committed to this fixture repo at
+# all. This is the fail-closed path: the ancestry check cannot even resolve
+# the object, so it must never be treated as "safe".
+GARBAGE_SHA="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+reset_clean_baseline "$GARBAGE_SHA"
+OUT="$(run_hook "$FIXTURE")"
+if is_deny "$OUT"; then
+  pass "DENY: an unresolvable sha (missing object) fails closed"
+else
+  fail "DENY(unresolvable sha): expected a deny decision, got [$OUT]"
+fi
+
+# --- same forgiveness must apply to a MERGE COMMIT in the range -------------
+# A merge commit's diff can hide changes depending on how it's listed (plain
+# `git show`/`diff-tree` without `-m` prints NOTHING for a merge by default).
+# Build one that legitimately only merges two artifact-only branches, and
+# confirm it is still recognized as in-scope (not silently treated as
+# "nothing changed", which would be a false ALLOW for the wrong reason, and
+# not mis-flagged as touching code either).
+git -C "$FIXTURE" checkout -q -b branch-merge-artifact "$C0"
+echo "note m1" > "$FIXTURE/.quetrex/notes.txt"
+git -C "$FIXTURE" add .quetrex/notes.txt
+git -C "$FIXTURE" commit -q -m "chore: artifact side A"
+git -C "$FIXTURE" checkout -q -b branch-merge-other "$C0"
+echo "note m2" > "$FIXTURE/.quetrex/other-notes.txt"
+git -C "$FIXTURE" add .quetrex/other-notes.txt
+git -C "$FIXTURE" commit -q -m "chore: artifact side B"
+git -C "$FIXTURE" checkout -q branch-merge-artifact
+git -C "$FIXTURE" merge -q --no-ff -m "chore: merge two artifact-only branches" branch-merge-other
+reset_clean_baseline "$C0"
+OUT="$(run_hook "$FIXTURE")"; CODE=$?
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "ALLOW: a merge commit whose sides are both artifact-only stays in scope"
+else
+  fail "ALLOW(artifact-only merge commit): expected exit 0 + empty stdout, got exit $CODE stdout: [$OUT]"
+fi
+
+# ...and a merge commit that injects an out-of-scope file ONLY as part of its
+# own conflict resolution — NOT present in full in either single-parent
+# commit — must still be caught. This is the case that specifically requires
+# `-m`: every OTHER commit in the range (both conflict sides) is, on its own,
+# .quetrex/-only, so if the merge commit's own diff were silently skipped (no
+# `-m`, git's default for a merge is to print nothing), the whole range would
+# wrongly look artifact-only. Two sides deliberately conflict on the SAME
+# path so the merge cannot fast-forward and requires a real resolution commit.
+git -C "$FIXTURE" checkout -q -b branch-conflict-a "$C0"
+echo "content A" > "$FIXTURE/.quetrex/conflict.txt"
+git -C "$FIXTURE" add .quetrex/conflict.txt
+git -C "$FIXTURE" commit -q -m "chore: conflict side A (artifact-only)"
+git -C "$FIXTURE" checkout -q -b branch-conflict-b "$C0"
+echo "content B" > "$FIXTURE/.quetrex/conflict.txt"
+git -C "$FIXTURE" add .quetrex/conflict.txt
+git -C "$FIXTURE" commit -q -m "chore: conflict side B (artifact-only)"
+git -C "$FIXTURE" checkout -q branch-conflict-a
+git -C "$FIXTURE" merge --no-ff branch-conflict-b -m "temp" >/dev/null 2>&1 || true
+mkdir -p "$FIXTURE/src"
+echo "resolved" > "$FIXTURE/.quetrex/conflict.txt"
+echo "console.log('injected only during merge resolution')" > "$FIXTURE/src/injected.ts"
+git -C "$FIXTURE" add .quetrex/conflict.txt src/injected.ts
+git -C "$FIXTURE" commit -q -m "chore: resolve conflict, sneaking in an out-of-scope file"
+reset_clean_baseline "$C0"
+OUT="$(run_hook "$FIXTURE")"
+if is_deny "$OUT"; then
+  pass "DENY: an out-of-scope file added only in a merge commit's own resolution is caught (-m is load-bearing)"
+else
+  fail "DENY(merge-resolution-only code): expected a deny decision, got [$OUT]"
+fi
+
+# Leave the fixture back on its actual "main" branch: the SYNCING section
+# below re-derives the CURRENT checked-out branch of $FIXTURE from disk (via
+# `git -C $FIXTURE branch --show-current` inside the hook itself) to decide
+# whether "git merge" is even a main-directed vector. Leaving checkout on one
+# of the branches created above would silently ungate every case below.
+git -C "$FIXTURE" checkout -q main
 
 # =============================================================================
 # SYNCING main FROM ITS OWN UPSTREAM IS NOT A SHIP.
