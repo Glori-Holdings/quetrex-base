@@ -571,6 +571,136 @@ fi
 rm -rf "$G_ORIGIN" "$G_LOCAL"
 
 # =============================================================================
+# DEFECT H — the post-fetch existence check must not trust `git fetch`'s exit
+# code alone, for EITHER end of the range.
+#
+# THE GAP: `ensure_commit_fetched` in the hook re-checks `cat-file -e` after
+# a fetch, specifically because a fetch that exits 0 is not, by itself, proof
+# the object landed (a wrapper, a partial fetch, an odd remote config). That
+# second check exists in the code, but nothing in the suite forced it to
+# fire -- deleting it left 55/55 green. Proven here with a LYING git: a thin
+# wrapper that passes every command straight through to the real git EXCEPT
+# a `fetch` naming one specific sha, which it "succeeds" at (exit 0) without
+# actually depositing the object. If the hook trusted the exit code, this
+# would be indistinguishable from a real fetch; the second cat-file -e is
+# what catches it.
+# =============================================================================
+REAL_GIT="$(command -v git)"
+LYING_GIT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-lying-git.XXXXXX")"
+cat > "$LYING_GIT_DIR/git" <<LYINGGIT
+#!/bin/sh
+# Passthrough to the real git for everything EXCEPT a "fetch" invocation
+# that names one of the shas in \$LYING_ABOUT (space-separated) among its
+# args -- that one "succeeds" (exit 0) without touching the object store.
+is_fetch=0
+has_target=0
+for a in "\$@"; do
+  [ "\$a" = "fetch" ] && is_fetch=1
+  for want in \$LYING_ABOUT; do
+    [ "\$a" = "\$want" ] && has_target=1
+  done
+done
+if [ "\$is_fetch" = "1" ] && [ "\$has_target" = "1" ]; then
+  exit 0
+fi
+exec "$REAL_GIT" "\$@"
+LYINGGIT
+chmod +x "$LYING_GIT_DIR/git"
+
+# run_hook_lying_fetch <cwd> <head_sha> <base_sha> <lying_about_sha> — same
+# shape as run_hook, but with LYING_GIT_DIR prepended so plain `git` inside
+# the hook resolves to the shim above instead of the real binary.
+run_hook_lying_fetch() {
+  local cwd="$1" head_sha="$2" base_sha="$3" lying="$4" payload
+  payload="$(jq -cn --arg cmd "$GH_MERGE" --arg cwd "$cwd" \
+    '{tool_input:{command:$cmd},cwd:$cwd}')"
+  printf '%s' "$payload" | env PATH="$LYING_GIT_DIR:$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$head_sha" MOCK_GH_PR_BASE_SHA="$base_sha" LYING_ABOUT="$lying" CLAUDE_PROJECT_DIR="$cwd" "$HOOK"
+}
+
+H_ORIGIN="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-h-origin.XXXXXX")"
+git -C "$H_ORIGIN" init -q -b main
+git -C "$H_ORIGIN" config user.email "test@example.com"
+git -C "$H_ORIGIN" config user.name "Fixture"
+echo root > "$H_ORIGIN/root.txt"
+git -C "$H_ORIGIN" add root.txt
+git -C "$H_ORIGIN" commit -q -m "chore: root commit"
+
+H_LOCAL="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-h-local.XXXXXX")"
+git clone -q "$H_ORIGIN" "$H_LOCAL"
+git -C "$H_LOCAL" config user.email "test@example.com"
+git -C "$H_LOCAL" config user.name "Fixture"
+mkdir -p "$H_LOCAL/.quetrex"
+printf '{"verify":["true","echo ok"]}' > "$H_LOCAL/.quetrex/verify.json"
+
+# Origin advances past what $H_LOCAL has: a base commit, then a PR head on a
+# DELIBERATELY DISJOINT (orphan) history -- not a descendant of the base.
+# NEITHER sha exists in $H_LOCAL's object store, so both genuinely require a
+# fetch (like DEFECT G) -- but unlike DEFECT G, the head must NOT be a
+# descendant of the base here: fetching one real commit transitively fetches
+# all of its ancestors, so if head descended from base, fetching head for
+# real (H1's honest half) would silently deposit base as a side effect and
+# H2's "lie about base" would never actually be exercised (base's cat-file
+# would already pass before any fetch is attempted). Both shas still sit at
+# the tip of a real ref in $H_ORIGIN, so both remain independently fetchable.
+echo base >> "$H_ORIGIN/base.txt"
+git -C "$H_ORIGIN" add base.txt
+git -C "$H_ORIGIN" commit -q -m "chore: PR base"
+H_BASE_SHA="$(git -C "$H_ORIGIN" rev-parse HEAD)"
+git -C "$H_ORIGIN" checkout -q --orphan claude/pr-h
+git -C "$H_ORIGIN" rm -rf -q . >/dev/null 2>&1 || true
+echo mine > "$H_ORIGIN/mine.txt"
+git -C "$H_ORIGIN" add mine.txt
+git -C "$H_ORIGIN" commit -q -m "feat: my PR's own change (disjoint history)"
+H_HEAD_SHA="$(git -C "$H_ORIGIN" rev-parse HEAD)"
+git -C "$H_ORIGIN" checkout -q main
+
+mkdir -p "$H_LOCAL/.quetrex/plan"
+jq -cn '{task:"T-1",ownership:{"mine.txt":"ws-a"}}' > "$H_LOCAL/.quetrex/plan/T-1.json"
+jq -cn '{task:"T-1"}' > "$H_LOCAL/.quetrex/state.json"
+: > "$H_LOCAL/.quetrex/verify-ledger.jsonl"
+jq -cn --arg sha "$H_HEAD_SHA" --arg cwd "$H_LOCAL" \
+  '{ts:"2026-01-01T00:00:00Z",cmd:"true",cwd:$cwd,sha:$sha,exit:0,tail:""}' \
+  >> "$H_LOCAL/.quetrex/verify-ledger.jsonl"
+jq -cn --arg sha "$H_HEAD_SHA" --arg cwd "$H_LOCAL" \
+  '{ts:"2026-01-01T00:00:01Z",cmd:"echo ok",cwd:$cwd,sha:$sha,exit:0,tail:"ok"}' \
+  >> "$H_LOCAL/.quetrex/verify-ledger.jsonl"
+jq -cn --arg sha "$H_HEAD_SHA" \
+  '{verdict:"AUTO_MERGE",sha:$sha,confirmed:[],inputs:{nativeSecurityReview:"clean"}}' \
+  > "$H_LOCAL/.quetrex/review-verdict.json"
+
+# H1 -- the fetch of the HEAD sha lies (exits 0, deposits nothing). The
+# first cat-file -e (pre-fetch) correctly fails -- the object really is
+# absent -- so the hook fetches; only the SECOND cat-file -e (post-fetch)
+# can catch that the lie left it still absent.
+OUT="$(run_hook_lying_fetch "$H_LOCAL" "$H_HEAD_SHA" "$H_BASE_SHA" "$H_HEAD_SHA")"; CODE=$?
+if [ "$CODE" -eq 0 ] && is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'still is not present'; then
+  pass "DEFECT H1: a fetch that exits 0 without depositing the HEAD commit is still caught -> DENIED"
+else
+  fail "DEFECT H1: expected a deny decision naming the object as still absent, got exit $CODE stdout: [$OUT]"
+fi
+
+# H2 -- same lie, but about the BASE sha instead. The head fetches for real
+# (it isn't in LYING_ABOUT), so this isolates the base-side guard.
+OUT="$(run_hook_lying_fetch "$H_LOCAL" "$H_HEAD_SHA" "$H_BASE_SHA" "$H_BASE_SHA")"; CODE=$?
+if [ "$CODE" -eq 0 ] && is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'still is not present'; then
+  pass "DEFECT H2: a fetch that exits 0 without depositing the BASE commit is still caught -> DENIED"
+else
+  fail "DEFECT H2: expected a deny decision naming the object as still absent, got exit $CODE stdout: [$OUT]"
+fi
+
+# H3 -- control: with LYING_ABOUT empty (fetch is honest for both), the same
+# fixture ships. Proves H1/H2 are really about the lie, not something else
+# wrong with this fixture.
+OUT="$(run_hook_lying_fetch "$H_LOCAL" "$H_HEAD_SHA" "$H_BASE_SHA" "")"; CODE=$?
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "DEFECT H3 (control): an honest fetch of the same fixture ships normally"
+else
+  fail "DEFECT H3: expected exit 0 + empty stdout with an honest fetch, got exit $CODE stdout: [$OUT]"
+fi
+
+rm -rf "$H_ORIGIN" "$H_LOCAL" "$LYING_GIT_DIR"
+
+# =============================================================================
 # DEFECT A — the gate must fire on MERGES ONLY.
 #
 # It used to test the WHOLE command string for a `push` and, separately, for the
@@ -684,9 +814,26 @@ fi
 # detection.
 OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash -R other-org/other-repo")"
 if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
-  pass "CROSS-REPO: gh pr merge -R <other repo> (short form) is refused, naming the mismatch"
+  pass "CROSS-REPO: gh pr merge -R <other repo> (spaced short form) is refused, naming the mismatch"
 else
-  fail "CROSS-REPO: gh pr merge -R <other repo> should be refused with the mismatch named, got: ${OUT:0:200}"
+  fail "CROSS-REPO: gh pr merge -R <other repo> (spaced) should be refused with the mismatch named, got: ${OUT:0:200}"
+fi
+
+# THE REMAINING GAP (verified against real gh 2.97.0): `-R` also accepts an
+# ATTACHED value (`-Rowner/repo`, no separator) and an `=`-joined value
+# (`-R=owner/repo`) -- a regex requiring whitespace after `-R` catches only
+# the spaced form and lets these two straight through.
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash -Rother-org/other-repo")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  pass "CROSS-REPO: gh pr merge -Rother-org/other-repo (attached short form) is refused, naming the mismatch"
+else
+  fail "CROSS-REPO: gh pr merge -Rother-org/other-repo (attached) should be refused with the mismatch named, got: ${OUT:0:200}"
+fi
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash -R=other-org/other-repo")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  pass "CROSS-REPO: gh pr merge -R=other-org/other-repo (= short form) is refused, naming the mismatch"
+else
+  fail "CROSS-REPO: gh pr merge -R=other-org/other-repo (=) should be refused with the mismatch named, got: ${OUT:0:200}"
 fi
 git -C "$FIXTURE" remote remove origin 2>/dev/null || true
 
