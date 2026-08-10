@@ -77,7 +77,7 @@ expect_deny() {  # expect_deny <label> <command>
   if [ "$v" = "deny" ]; then
     pass "$1 — DENIED: [$2]"
   else
-    fail "$1 — the hook ALLOWED [$2]. Remote ref deletion removes the branch outright; it must not be easier to run than the force-push the same guard already blocks."
+    fail "$1 — the hook ALLOWED [$2]. This command destroys work irreversibly (a remote ref deletion removes the branch outright; reset --hard / clean -f / rm -r discard it locally), and it must not be easier to run than the force-push the same guard already blocks."
   fi
 }
 
@@ -207,6 +207,165 @@ else
   fail "AC5: deny-guard.sh now DENIES shipped engine command(s):$SHIPPED_DENIED
     Every shipped delete must name its disposable namespace LITERALLY at the call site (quetrex-spec/... or ...-gates) — a PreToolUse hook sees the command before the shell expands \$VARS, so \"\$SPEC_BRANCH\" is indistinguishable from \"\$BASE\"."
 fi
+
+# =============================================================================
+# 6 — ABBREVIATED long options: to git, an unambiguous prefix IS the option
+# =============================================================================
+# THE DEFECT (review of 564f997, finding f1). check_git matched the SPELLED-OUT
+# `--delete` only, and every other long option fell through `--*) : ;;`. git's
+# parse-options accepts any UNAMBIGUOUS prefix, and nothing else in `git push`
+# begins with `--de`, so the entire rule above was a three-character bypass.
+#
+# MEASURED against real git 2.54.0 and a real bare remote, before this fix:
+#   git push origin --delete trunk  exit=0  ref deleted   (hook: DENY)
+#   git push origin --delet  trunk  exit=0  ref deleted   (hook: ALLOW)
+#   git push origin --dele   trunk  exit=0  ref deleted   (hook: ALLOW)
+#   git push origin --del    trunk  exit=0  ref deleted   (hook: ALLOW)
+#   git push origin --de     trunk  exit=0  ref deleted   (hook: ALLOW)
+#   git push origin --d      trunk  exit=129 "ambiguous option: d (could be
+#                                             --delete or --dry-run)"
+# so `--de` is the SHORTEST spelling git accepts, and every prefix from there to
+# the full word must be denied. (The sibling force rule was only ACCIDENTALLY
+# safe: `--forc` is ambiguous between --force-with-lease and --force-if-includes,
+# so git refuses it. --delete has no such sibling.)
+expect_deny "AC6-a: the abbreviation that really deletes — git push origin --del <ref>" \
+            'git push origin --del main'
+expect_deny "AC6-b: --de, the shortest spelling git 2.54.0 accepts" \
+            'git push origin --de main'
+expect_deny "AC6-c: --dele" \
+            'git push origin --dele claude/QUE-1'
+expect_deny "AC6-d: --delet" \
+            'git push origin --delet claude/QUE-1'
+expect_deny "AC6-e: an abbreviation survives git's own global options (-C)" \
+            'git -C /tmp/wt push origin --del main'
+expect_deny "AC6-f: an abbreviation before the remote, which is also valid git" \
+            'git push --del origin master'
+expect_deny "AC6-g: an abbreviation does not launder an opaque variable either" \
+            'git push origin --del "$BASE_BRANCH"'
+# ...and the abbreviation must not become a new way to OVER-block, either.
+expect_allow "AC6-h: an abbreviated delete of a disposable ref is still allowed" \
+             'git push origin --del quetrex-spec/QUE-1'
+expect_allow "AC6-i: --dry-run is not a prefix of --delete and must stay allowed" \
+             'git push --dry-run origin main'
+expect_allow "AC6-j: --follow-tags is not a prefix of --force and must stay allowed" \
+             'git push --follow-tags origin main'
+expect_allow "AC6-k: --porcelain is not a prefix of --prune and must stay allowed" \
+             'git push --porcelain origin main'
+expect_allow "AC6-l: --progress is not a prefix of --prune and must stay allowed" \
+             'git push --progress origin claude/QUE-1'
+expect_allow "AC6-m: the abbreviated SAFE force form is still the sanctioned remedy" \
+             'git push --force-with-leas origin claude/QUE-1'
+
+# The same class, audited across the REST of check_git — the review's own
+# instruction was not to assume prefix-abbreviation is unreachable elsewhere.
+# MEASURED against real git 2.54.0:
+#   git reset --hard / --har / --ha / --h   -> all reset the worktree, exit 0
+#   git clean --force / --forc / --for / --fo / --f  -> all remove files, exit 0
+expect_deny "AC6-n: git reset --har is git reset --hard" \
+            'git reset --har'
+expect_deny "AC6-o: git reset --h is git reset --hard (the shortest form git takes)" \
+            'git -C /tmp/wt reset --h HEAD~1'
+expect_deny "AC6-p: git clean --forc is git clean --force" \
+            'git clean --forc -d'
+expect_deny "AC6-q: git clean --f is git clean --force" \
+            'git clean --f -xd'
+expect_allow "AC6-r: git reset --soft is not --hard" \
+             'git reset --soft HEAD~1'
+expect_allow "AC6-s: git reset --help is not a prefix of --hard" \
+             'git reset --help'
+expect_allow "AC6-t: git clean --dry-run is not --force" \
+             'git clean --dry-run -d'
+# rm's long options abbreviate too (GNU getopt_long: `rm --r -f /` is recursive).
+expect_deny "AC6-u: rm --recursiv of / is still a recursive delete of /" \
+            'rm --recursiv --force /'
+expect_allow "AC6-v: a recursive delete of a named subpath is not this guard's business" \
+             'rm --recursiv --force /tmp/wt/build'
+
+# =============================================================================
+# 7 — --mirror and --prune: the broadest ref deletions git offers
+# =============================================================================
+# THE DEFECT (finding f3). Both fell through `--*) : ;;`, so the guard that
+# exists to stop ref deletion allowed the two options that delete the MOST refs.
+# MEASURED against a real bare remote (branch `keepme` deleted locally first):
+#   before: refs/heads/keepme refs/heads/main refs/heads/trunk
+#   git push --mirror origin              exit=0 -> keepme GONE from the remote
+#   git push --mirro  origin              exit=0 -> keepme GONE
+#   git push --m      origin              exit=0 -> keepme GONE
+#   git push --prune  origin refs/heads/* exit=0 -> keepme GONE
+#   git push --pru    origin refs/heads/* exit=0 -> keepme GONE
+# Neither names a ref, so the disposable-namespace carve-out cannot apply to
+# them: --mirror removes EVERY remote ref absent locally. They are denied flat.
+expect_deny "AC7-a: --mirror deletes every remote ref missing locally" \
+            'git push --mirror origin'
+expect_deny "AC7-b: --mirror abbreviated to --mirro" \
+            'git push --mirro origin'
+expect_deny "AC7-c: --mirror abbreviated to --m, which git 2.54.0 accepts" \
+            'git push --m origin'
+expect_deny "AC7-d: --prune deletes remote refs the refspec does not match" \
+            'git push --prune origin refs/heads/*'
+expect_deny "AC7-e: --prune abbreviated to --pru" \
+            'git push --pru origin refs/heads/*'
+expect_deny "AC7-f: --mirror survives git's global options" \
+            'git -C /tmp/wt push --mirror origin'
+expect_allow "AC7-g: fetch --prune deletes nothing on the remote and stays allowed" \
+             'git fetch --prune -q origin'
+
+# =============================================================================
+# 8 — the piped-shell backstop clears the REF, never the command text
+# =============================================================================
+# THE DEFECT (finding f2). The backstop's carve-out arm was tested against the
+# WHOLE flattened command, so ANY occurrence of `quetrex-spec/` or `-gates`
+# anywhere in the text — a trailing comment, a path, a branch name in an
+# unrelated word — switched the entire deletion backstop off:
+#   echo 'git push origin --delete trunk' | bash                          -> DENY
+#   echo 'git push origin --delete trunk # see quetrex-spec/notes' | bash -> ALLOW
+#   echo 'git push origin --delete trunk' | bash # my-gates               -> ALLOW
+#   echo 'git push origin --del trunk' | bash                             -> ALLOW
+# This is the repo's known failure class: matching COMMAND TEXT instead of the
+# actual invocation. The carve-out now runs disposable_ref() over the parsed
+# deletion TARGETS, the same predicate the non-piped path uses.
+expect_deny "AC8-a: a trailing comment naming quetrex-spec/ does not clear the delete" \
+            "echo 'git push origin --delete trunk # see quetrex-spec/notes' | bash"
+expect_deny "AC8-b: a comment naming -gates OUTSIDE the piped text does not clear it either" \
+            "echo 'git push origin --delete trunk' | bash # my-gates"
+expect_deny "AC8-c: the word 'gates' in an unrelated path does not clear the delete" \
+            "echo 'git push origin --delete main' | bash # /tmp/release-gates/out"
+expect_deny "AC8-d: the abbreviated delete is caught by the backstop too" \
+            "echo 'git push origin --del trunk' | bash"
+expect_deny "AC8-e: -d short form, piped" \
+            "echo 'git push origin -d main' | bash"
+expect_deny "AC8-f: the empty-source refspec, piped" \
+            "echo 'git push origin :main' | bash"
+expect_deny "AC8-g: --mirror piped into a shell" \
+            "echo 'git push --mirror origin' | bash"
+expect_deny "AC8-h: a delete naming no ref at all fails CLOSED" \
+            "echo 'git push --delete origin' | bash"
+expect_deny "AC8-i: several refs piped, one of them protected" \
+            "echo 'git push origin --delete quetrex-spec/QUE-1 main' | bash"
+# ...and the ref-scoped carve-out must still clear the pipeline's own deletes,
+# comment or no comment — over-blocking is how a guard gets switched off.
+expect_allow "AC8-j: a disposable delete stays allowed even with a comment attached" \
+             "echo 'git push origin --delete quetrex-spec/QUE-1 # republished every dispatch' | bash"
+expect_allow "AC8-k: a gates-branch delete stays allowed when piped" \
+             "echo 'git push --quiet origin --delete claude/QUE-1-gates' | bash"
+expect_allow "AC8-l: the shipped unexpanded gates spelling stays allowed when piped" \
+             "echo 'git -C /tmp/wt push -q origin --delete \"\$BRANCH_PREFIX\$TASK-gates\"' | bash"
+expect_allow "AC8-m: a redirection is not a deletion target" \
+             "echo 'git push origin --delete quetrex-spec/QUE-1 2>/dev/null' | bash"
+expect_allow "AC8-n: an ordinary piped push is still allowed" \
+             "echo 'git push --quiet origin claude/QUE-1' | bash"
+expect_allow "AC8-o: text mentioning a delete, piped to something that is not a shell" \
+             "echo 'git push origin --delete main' | wc -l"
+# The comment handling that makes AC8-b/c possible must not eat real arguments:
+# only an UNQUOTED, word-initial `#` starts a comment.
+expect_deny  "AC8-p: a # inside a ref name is a literal, not a comment" \
+             'git push origin --delete "issue#42"'
+expect_deny  "AC8-q: a mid-word # does not truncate the command either" \
+             'git push origin --delete rel#1/main'
+expect_allow "AC8-r: a trailing comment on an ordinary push is not mistaken for a refspec" \
+             'git push origin claude/QUE-1 # publish the unit branch'
+expect_allow "AC8-s: a quoted # keeps a mentioning grep a mention" \
+             'grep -rn "# git push origin --delete main" .claude/'
 
 echo
 if [ "$FAIL" -eq 0 ]; then

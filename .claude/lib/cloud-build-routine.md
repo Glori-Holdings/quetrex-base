@@ -37,12 +37,17 @@ build runs. So the prompt now LEADS with `{{TASK}} — {{TITLE}}` on a line of i
 - `{{TITLE}}` is the ONE value here that comes from outside — anyone with write access to
   the board types the task title — and it lands on the first line, above the briefing, in the
   instruction channel of a session that holds Bash and push credentials. So task-build.md
-  sanitizes it **in code** before substituting: CR/LF and every other control character
-  collapse to spaces, backticks and double-brace sequences are dropped, and the result is
-  hard-truncated to 50 characters plus a trailing `…`. A two-line title can therefore never
-  deliver its second line here as its own top-level instruction. This is enforced by
-  `test/placeholder-substitution.test.sh` ASSERTION 5, which executes the shipped sanitizer
-  against a hostile title — it is not a rule the dispatching session is trusted to remember.
+  sanitizes it **in code** before substituting: CR/LF and every other control character —
+  C0, DEL **and the C1 block U+0080–U+009F, which contains the line terminator NEL
+  (U+0085)** — collapse to spaces, backticks are dropped, double-brace sequences are
+  stripped **repeatedly until the value stops changing** (one pass can BUILD a `{{` out of
+  the neighbours of the pair it just removed), and the result is hard-truncated to 50
+  characters plus a trailing `…`. A two-line title can therefore never deliver its second
+  line here as its own top-level instruction, and no title can forge a placeholder. This is
+  enforced by `test/placeholder-substitution.test.sh` ASSERTION 5, which executes the
+  shipped sanitizer against hostile titles and — in 5i — against a deliberately weakened
+  copy of it, so the assertions cannot quietly stop testing anything. It is not a rule the
+  dispatching session is trusted to remember.
 - The zero-context briefing that follows is unchanged and must stay — the session genuinely
   has no context and needs it. This is a prepend, not a rewrite.
 
