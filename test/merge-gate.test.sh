@@ -51,8 +51,31 @@ pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'NOT OK - %s\n' "$1"; FAIL=1; }
 
 FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-fixture.XXXXXX")"
-cleanup() { rm -rf "$FIXTURE"; }
+MOCKBIN="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-mockbin.XXXXXX")"
+cleanup() { rm -rf "$FIXTURE" "$MOCKBIN"; }
 trap cleanup EXIT
+
+# --- mock `gh` -- only implements what merge-gate.sh's PR-head resolution
+# calls: `gh pr view [<id>] [--repo x] --json headRefOid --jq .headRefOid`.
+# Prepended onto PATH for every hook invocation below so the suite never
+# depends on a real `gh` being installed/authenticated, and so the "PR head"
+# a test simulates is fully under the test's control. Set MOCK_GH_PR_VIEW_SHA
+# to the sha the mock should report, or MOCK_GH_PR_VIEW_FAIL=1 to simulate an
+# unresolvable PR (gh missing/unauthenticated/PR not found).
+cat > "$MOCKBIN/gh" <<'MOCKGH'
+#!/bin/sh
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
+  if [ -n "${MOCK_GH_PR_VIEW_FAIL:-}" ]; then
+    echo "mock gh: pr view failed" >&2
+    exit 1
+  fi
+  printf '%s' "${MOCK_GH_PR_VIEW_SHA:-}"
+  exit 0
+fi
+echo "mock gh: unhandled subcommand: $*" >&2
+exit 1
+MOCKGH
+chmod +x "$MOCKBIN/gh"
 
 # --- build a minimal, self-contained fixture repo ---------------------------
 git -C "$FIXTURE" init -q -b main
@@ -110,20 +133,30 @@ GH_MERGE="$(printf 'gh pr mer%s' 'ge') 123 --squash"
 GH_CREATE="$(printf 'gh pr cre%s' 'ate')"
 MAIN="$(printf 'ma%s' 'in')"
 
+# run_hook <cwd> [pr_head_sha_override] [fail: 1 to simulate an unresolvable PR]
+# Without an override, the mock reports the fixture's OWN current git HEAD as
+# the "PR head" — reproducing exactly what the pre-fix hook computed directly
+# (git rev-parse HEAD in $ROOT), so every existing assertion below keeps
+# testing the same scenario it always did. Tests that need to reproduce the
+# real bug (local checkout on main, PR head elsewhere) pass an explicit
+# override.
 run_hook() {
-  local cwd="$1" payload
+  local cwd="$1" pr_sha="${2:-}" failflag="${3:-}" payload
+  [ -z "$pr_sha" ] && pr_sha="$(git -C "$cwd" rev-parse HEAD 2>/dev/null)"
   payload="$(jq -cn --arg cmd "$GH_MERGE" --arg cwd "$cwd" \
     '{tool_input:{command:$cmd},cwd:$cwd}')"
-  printf '%s' "$payload" | CLAUDE_PROJECT_DIR="$cwd" "$HOOK"
+  printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" MOCK_GH_PR_VIEW_FAIL="$failflag" CLAUDE_PROJECT_DIR="$cwd" "$HOOK"
 }
 
-# run_cmd <cwd> <command> — exercise the hook against an ARBITRARY command, to
-# assert what is and is not classified as a merge vector in the first place.
+# run_cmd <cwd> <command> [pr_head_sha_override] — exercise the hook against an
+# ARBITRARY command, to assert what is and is not classified as a merge vector
+# in the first place. Same mock-gh default as run_hook.
 run_cmd() {
-  local cwd="$1" cmd="$2" payload
+  local cwd="$1" cmd="$2" pr_sha="${3:-}" payload
+  [ -z "$pr_sha" ] && pr_sha="$(git -C "$cwd" rev-parse HEAD 2>/dev/null)"
   payload="$(jq -cn --arg cmd "$cmd" --arg cwd "$cwd" \
     '{tool_input:{command:$cmd},cwd:$cwd}')"
-  printf '%s' "$payload" | CLAUDE_PROJECT_DIR="$cwd" "$HOOK" 2>&1
+  printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" CLAUDE_PROJECT_DIR="$cwd" "$HOOK" 2>&1
 }
 
 is_deny() { printf '%s' "$1" | grep -q '"permissionDecision":"deny"\|MERGE GATE'; }
@@ -197,6 +230,83 @@ fi
 # review and still auto-merge — is preserved and sharpened in B7 (plan demands a
 # review) and B9 (the diff itself is sensitive), which are the cases where an
 # independent pass is actually required. See DEFECT B below.
+
+# =============================================================================
+# DEFECT C — gh pr merge must verify against the PR's HEAD COMMIT, not local
+# HEAD.
+#
+# THE BUG: merge-gate.sh compared the verdict's (and ledger's, and security
+# artifact's) sha against `git rev-parse HEAD` in $ROOT -- but for
+# `gh pr merge`, the local checkout is almost always sitting on main, not the
+# PR branch. Reproduced live 2026-08-07: a verdict correctly pinned to the
+# PR's real head (11f84d2) was denied as "stale" because it was compared
+# against local main's tip (b7bf116) -- nothing was actually stale. Fixed by
+# resolving the PR's real head via `gh pr view --json headRefOid` (mocked
+# here -- see MOCKBIN above) and pinning every gate to THAT commit instead.
+#
+# These three assertions FAIL against the pre-fix hook, for the right reason:
+#   C1 fails because the pre-fix hook denies a genuinely clean merge (the bug).
+#   C2 and C3 are the guardrails proving the fix didn't just delete the check:
+#   a genuinely stale verdict, and an unresolvable PR head, must still deny.
+#
+# Runs here, BEFORE the fixture's diff ever grows a sensitive file (see B9
+# below), so the neutral-diff floor stays neutral and doesn't force these
+# assertions to also carry a security artifact just to isolate the sha check.
+# =============================================================================
+
+# Simulate a PR branch: a commit that is NOT checked out locally (local stays
+# on main's tip). This is exactly the shape of the bug -- the operator's repo
+# sits on main while the reviewed commit lives only on the PR branch.
+git -C "$FIXTURE" checkout -q -b claude/pr-c1
+echo "pr work" >> "$FIXTURE/README.md"
+git -C "$FIXTURE" add README.md
+git -C "$FIXTURE" commit -q -m "feat: PR branch commit"
+PR_HEAD_C1="$(git -C "$FIXTURE" rev-parse HEAD)"
+git -C "$FIXTURE" checkout -q main
+LOCAL_HEAD_C1="$(git -C "$FIXTURE" rev-parse HEAD)"
+if [ "$PR_HEAD_C1" = "$LOCAL_HEAD_C1" ]; then
+  fail "DEFECT C setup: PR head and local HEAD must differ to reproduce the bug"
+fi
+
+write_ledger_at "$PR_HEAD_C1"
+write_verdict_at "$PR_HEAD_C1"
+rm -f "$FIXTURE/.quetrex/security-findings.json" "$FIXTURE/.quetrex/ESCALATION"
+
+# C1 -- THE FIX: verdict + ledger pinned to the PR head, local checkout still
+# on main (a DIFFERENT commit) -> must be ALLOWED. This is the exact shape of
+# the live failure: PR head == verdict sha, local HEAD == main's unrelated tip.
+OUT="$(run_hook "$FIXTURE" "$PR_HEAD_C1")"; CODE=$?
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "DEFECT C1 (the fix): PR head pinned + AUTO_MERGE, local HEAD is main -> ALLOWED"
+else
+  fail "DEFECT C1: expected exit 0 + empty stdout (PR head must govern, not local HEAD), got exit $CODE stdout: [$OUT]"
+fi
+
+# C2 -- commits landed on the PR branch AFTER the verdict was recorded: the
+# verdict is genuinely stale and must STILL be denied. Only WHICH commit the
+# gate compares against changed -- the staleness check itself must still fire.
+git -C "$FIXTURE" checkout -q claude/pr-c1
+echo "post-review commit" >> "$FIXTURE/README.md"
+git -C "$FIXTURE" add README.md
+git -C "$FIXTURE" commit -q -m "feat: landed after review"
+PR_HEAD_C2="$(git -C "$FIXTURE" rev-parse HEAD)"
+git -C "$FIXTURE" checkout -q main
+
+OUT="$(run_hook "$FIXTURE" "$PR_HEAD_C2")"
+if is_deny "$OUT"; then
+  pass "DEFECT C2: commits landed on the PR branch after review -> still DENIED (verdict genuinely stale)"
+else
+  fail "DEFECT C2: expected a deny decision (verdict pinned to $PR_HEAD_C1, PR head now $PR_HEAD_C2), got [$OUT]"
+fi
+
+# C3 -- the PR's head commit cannot be resolved at all (gh missing/PR gone/not
+# authenticated). FAIL CLOSED: must deny, never allow an unevaluated merge.
+OUT="$(run_hook "$FIXTURE" "" 1)"; CODE=$?
+if [ "$CODE" -eq 0 ] && is_deny "$OUT"; then
+  pass "DEFECT C3: PR head unresolvable (gh failure) -> DENIED (fail closed)"
+else
+  fail "DEFECT C3: expected a deny decision when the PR head cannot be resolved, got exit $CODE stdout: [$OUT]"
+fi
 
 # =============================================================================
 # DEFECT A — the gate must fire on MERGES ONLY.
