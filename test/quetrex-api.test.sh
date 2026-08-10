@@ -69,6 +69,12 @@ trap cleanup EXIT
 # sent at all — reproducing the lost-response failure mode (curl exit 52,
 # "empty reply from server") where a write can be fully committed server-side
 # even though the client sees a connection-level failure.
+# A sequence entry of "REDIRECT:<url>" logs the request (the "write" happens)
+# and responds 307 with a Location header pointing at <url> — used to prove
+# curl is NOT reading the operator's ~/.curlrc (a `location` line there would
+# make curl silently follow the redirect to an unreachable target, hiding
+# that the ORIGINAL write already landed behind a curl exit 7 on the
+# follow-up hop).
 # --reflect-auth echoes the Authorization header value into the error body,
 # simulating a misbehaving server, to prove the client-side scrub is real and
 # not just "the token never happened to appear."
@@ -104,6 +110,17 @@ const server = http.createServer((req, res) => {
       // socket with zero response bytes sent. curl sees this as "empty
       // reply from server" (exit 52), never as a valid HTTP status.
       req.socket.destroy();
+      return;
+    }
+
+    if (entry.startsWith("REDIRECT:")) {
+      // The write above already happened (logged). Respond with a real 3xx
+      // so a curl that reads ~/.curlrc's `location` setting would follow it;
+      // a curl invoked with -q must NOT follow it and must return this 307
+      // to the caller untouched.
+      res.statusCode = 307;
+      res.setHeader("Location", entry.slice("REDIRECT:".length));
+      res.end();
       return;
     }
 
@@ -347,6 +364,39 @@ if [ "$RETRY_ANNOUNCEMENTS_H" = "2" ]; then
 else
   fail "H: expected exactly 2 retry announcements for a connection-refused POST, got $RETRY_ANNOUNCEMENTS_H: [$OUT]"
 fi
+
+# =============================================================================
+# TEST I — THE .curlrc REDIRECT VECTOR. Without -q as curl's FIRST argument,
+# curl reads the operator's ~/.curlrc. A `location` line there — an ordinary
+# developer setting, "follow redirects" — makes curl silently follow a 3xx
+# response: the ORIGINAL request (and its write) is delivered and committed
+# to the mock server, then curl's own exit code reflects only the REDIRECT
+# TARGET (here, port 1 — always connection-refused, curl exit 7) failing.
+# The 6|7 classification (Test H, correctly) treats curl exit 7 as "never
+# reached the server, safe to retry ANY method" — but here that is exactly
+# backwards, because the ORIGINAL POST already landed before curl ever
+# followed the redirect. Without -q, that misclassification retries the
+# original POST up to the 3-attempt cap: 3 committed server-side writes for
+# 1 logical request, the same shape as the original blocker, through a door
+# the 6|7 arm itself declared safe. Proven by WRITE COUNT, exactly like every
+# other test above.
+# =============================================================================
+start_mock "REDIRECT:http://127.0.0.1:1/blocked,REDIRECT:http://127.0.0.1:1/blocked,REDIRECT:http://127.0.0.1:1/blocked"
+CURLRCHOME="$TMPROOT/curlrchome"
+mk_fake_home "$CURLRCHOME"
+printf 'location\n' > "$CURLRCHOME/.curlrc"
+OUT="$(HOME="$CURLRCHOME" "$API_BIN" POST /api/tasks '{"title":"x"}' 2>&1)"; CODE=$?
+if [ "$CODE" -ne 0 ]; then
+  pass "I: a POST behind a .curlrc-redirected connection failure returns non-zero"
+else
+  fail "I: expected non-zero exit, got 0 (out: [$OUT])"
+fi
+if [ "$(log_line_count)" = "1" ]; then
+  pass "I: exactly 1 server-side write reached the server — -q stopped curl from reading .curlrc and following the redirect into a misclassified retry loop"
+else
+  fail "I: expected exactly 1 server-side write, got $(log_line_count) — curl read .curlrc and the redirect-then-refused vector retried a POST, creating duplicate writes"
+fi
+stop_mock
 
 # =============================================================================
 # TEST E — the retry cap (3 total attempts) is honored: 4 failures are queued

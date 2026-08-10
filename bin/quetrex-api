@@ -139,6 +139,16 @@ resolve_project() {
 #     - injects the bearer via a 0600 temp curl config file (-K), so the token
 #       never appears in argv/stdout/logs; that config file is wiped the instant
 #       curl returns (explicit rm — portable across bash and zsh).
+#     - passes -q FIRST on every curl invocation (curl requires it to be the
+#       first argument to take effect), which disables reading the operator's
+#       ~/.curlrc. Without this, a `location` (follow-redirects) line in that
+#       file — an ordinary developer setting — would make curl silently
+#       follow a redirect: the ORIGINAL request (and its write) is delivered
+#       and possibly committed to the original URL, then curl's exit code and
+#       %{http_code} reflect only the REDIRECT TARGET. That breaks the curl
+#       exit-code classification below: a 6/7 on the redirect target would be
+#       misread as "never reached the server" when the original POST already
+#       had.
 #     - 401      -> "Run /quetrex:login" (stderr), return 1
 #     - 403/404  -> "No access — contact your administrator" (stderr), return 1
 #     - other non-2xx -> "Quetrex API error (HTTP <code>): <server's response
@@ -157,8 +167,11 @@ resolve_project() {
 #   like on the wire — the classic lost-response problem. Only curl exit 6
 #   (couldn't resolve host) and 7 (failed to connect / connection refused)
 #   prove the TCP connection was never established, so the request cannot
-#   have reached application code. Any OTHER curl exit code is unclassified
-#   and FAILS CLOSED (see the case statement in qapi). So:
+#   have reached application code — and that is only true because -q (above)
+#   stops curl from following a .curlrc redirect setting; without it, a 6/7
+#   could be the REDIRECT TARGET failing after the original request already
+#   landed. Any OTHER curl exit code is unclassified and FAILS CLOSED (see
+#   the case statement in qapi). So:
 #     - GET/PUT/DELETE are idempotent by HTTP semantics — repeating the exact
 #       same request converges to the same end state — so any 5xx, and any
 #       connection-level failure regardless of curl_rc, is retried.
@@ -195,13 +208,13 @@ qapi() {
     printf 'header = "Authorization: Bearer %s"\n' "$_QX_TOKEN" > "$cfg"
 
     if [ -n "$body" ]; then
-      code="$(curl -sS -K "$cfg" \
+      code="$(curl -q -sS -K "$cfg" \
         --connect-timeout 10 --max-time 30 \
         -H 'Content-Type: application/json' \
         -X "$method" --data "$body" \
         -o "$bodyf" -w '%{http_code}' "$url")"
     else
-      code="$(curl -sS -K "$cfg" \
+      code="$(curl -q -sS -K "$cfg" \
         --connect-timeout 10 --max-time 30 \
         -X "$method" \
         -o "$bodyf" -w '%{http_code}' "$url")"
@@ -314,7 +327,28 @@ qapi() {
         errbody="$(printf '%s' "$errbody" | head -c 500)... [truncated]"
       fi
       if [ "$code" = "000" ]; then
-        echo "Quetrex API error: could not reach the server (connection failed) after $attempt attempt(s)" >&2
+        case "$method" in
+          POST | PATCH)
+            case "$curl_rc" in
+              6 | 7)
+                # Never reached the server (see classification above) — the
+                # honest "nothing happened" message.
+                echo "Quetrex API error: could not reach the server (connection failed) after $attempt attempt(s)" >&2
+                ;;
+              *)
+                # Lost-response / unclassified: the request may have already
+                # reached the server and been committed before the response
+                # was lost — that is precisely why this was NOT retried. Do
+                # not tell the operator "nothing happened"; that is what
+                # sends him to run it again and create a real duplicate.
+                echo "Quetrex API error: no response after $attempt attempt(s) — the request may have already reached the server. CHECK before retrying manually (repeating a $method here could create a duplicate)." >&2
+                ;;
+            esac
+            ;;
+          *)
+            echo "Quetrex API error: could not reach the server (connection failed) after $attempt attempt(s)" >&2
+            ;;
+        esac
       elif [ -n "$errbody" ]; then
         echo "Quetrex API error (HTTP $code): $errbody" >&2
       else
