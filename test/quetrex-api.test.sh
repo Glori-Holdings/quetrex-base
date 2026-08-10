@@ -58,9 +58,17 @@ trap cleanup EXIT
 # --- mock HTTP server --------------------------------------------------------
 # Pops one status code per request off a sequence file (one per line; once
 # exhausted, keeps returning 500). Logs every request received (method, path,
-# body, Authorization header) as one JSON line per request, so a test can
-# assert exactly how many requests actually reached the server — the only way
-# to prove a retry did or did not fire, independent of the final outcome.
+# body, Authorization header) as one JSON line per request BEFORE acting on
+# it — i.e. logging stands in for "the write was committed" — so a test can
+# assert exactly how many requests actually reached (and were "written" by)
+# the server, independent of what the client ultimately observed. That is the
+# only way to prove a retry did or did not fire, and the only way to prove a
+# retry did or did not create a server-side duplicate.
+# A sequence entry of "DROP" instead of a status code logs the request (the
+# "write" happens) and then destroys the raw socket with NO response bytes
+# sent at all — reproducing the lost-response failure mode (curl exit 52,
+# "empty reply from server") where a write can be fully committed server-side
+# even though the client sees a connection-level failure.
 # --reflect-auth echoes the Authorization header value into the error body,
 # simulating a misbehaving server, to prove the client-side scrub is real and
 # not just "the token never happened to appear."
@@ -78,16 +86,28 @@ const server = http.createServer((req, res) => {
   req.on("end", () => {
     const body = Buffer.concat(chunks).toString("utf8");
     const auth = req.headers["authorization"] || "";
+    // The log write happens BEFORE any response decision below — it stands
+    // in for the server-side write being committed, regardless of whether a
+    // response ever reaches the client.
     fs.appendFileSync(logFile, JSON.stringify({ method: req.method, url: req.url, body, auth }) + "\n");
 
     let seq = [];
     try { seq = fs.readFileSync(seqFile, "utf8").split("\n").filter(Boolean); } catch {}
-    let status = 500;
+    let entry = "500";
     if (seq.length > 0) {
-      status = parseInt(seq[0], 10);
+      entry = seq[0];
       fs.writeFileSync(seqFile, seq.slice(1).join("\n") + (seq.length > 1 ? "\n" : ""));
     }
 
+    if (entry === "DROP") {
+      // Simulate a lost response after a committed write: destroy the raw
+      // socket with zero response bytes sent. curl sees this as "empty
+      // reply from server" (exit 52), never as a valid HTTP status.
+      req.socket.destroy();
+      return;
+    }
+
+    const status = parseInt(entry, 10);
     res.statusCode = status;
     res.setHeader("Content-Type", "application/json");
     if (status >= 200 && status < 300) {
@@ -248,6 +268,85 @@ else
   fail "D: expected exactly 1 request (no retry), got $(log_line_count) — a POST retried on a plain 500"
 fi
 stop_mock
+
+# =============================================================================
+# TEST F — THE BLOCKING DEFECT THIS SUITE ADDS. A lost response after the
+# write was already committed server-side (curl exit 52, "empty reply from
+# server" — code normalizes to "000") must NOT retry a POST, because the
+# request may have already been fully processed. The pre-fix tool retried
+# EVERY code="000" case unconditionally, regardless of method, which turns a
+# single logical write into permanent duplicate tasks (there is no
+# DELETE /api/tasks). Proven by SERVER-SIDE WRITE COUNT, not just the client's
+# exit code — the write is logged before the socket is destroyed, exactly
+# like a Fly.io machine restart or an OOM kill after a commit.
+# =============================================================================
+start_mock "DROP,200"
+run_api POST /api/tasks '{"title":"x"}'
+if [ "$CODE" -ne 0 ]; then
+  pass "F: a lost-response (curl exit 52) POST returns non-zero (does not silently succeed off a phantom retry)"
+else
+  fail "F: expected non-zero exit — a lost response on POST must never retry into a false success (out: [$OUT])"
+fi
+if [ "$(log_line_count)" = "1" ]; then
+  pass "F: exactly 1 write reached the server — no retry was attempted for a POST whose response was lost"
+else
+  fail "F: expected exactly 1 server-side write (no retry), got $(log_line_count) — a POST retried after a lost response, creating a duplicate write"
+fi
+stop_mock
+
+# =============================================================================
+# TEST G — the SAME lost-response failure (curl exit 52) IS safe to retry for
+# an idempotent method (GET), and the retry succeeds. Proves the fix is a
+# method-aware classification, not just "never retry code=000".
+# =============================================================================
+start_mock "DROP,200"
+run_api GET /api/tasks/SMA-1
+if [ "$CODE" -eq 0 ] && printf '%s' "$OUT" | grep -q 'MOCK_SUCCESS_MARKER'; then
+  pass "G: a lost-response (curl exit 52) GET retries and the eventual success reaches the operator"
+else
+  fail "G: expected exit 0 with the success body after retry, got exit $CODE: [$OUT]"
+fi
+if [ "$(log_line_count)" = "2" ]; then
+  pass "G: exactly 2 requests reached the server (1 lost response + 1 retry that succeeded)"
+else
+  fail "G: expected exactly 2 requests, got $(log_line_count)"
+fi
+stop_mock
+
+# =============================================================================
+# TEST H — a connection-level failure that PROVABLY never reached the server
+# (curl exit 7, connection refused — nothing is listening) DOES retry a POST.
+# This is the other half of the classification: not every code="000" is
+# unsafe, only the ones where the request could have been transmitted. No
+# server is running at all here, so this is checked via the client's own
+# retry announcements, not a write count.
+# =============================================================================
+REFUSED_PORT=$((PORT + 1))
+REFUSEDHOME="$TMPROOT/refusedhome"
+mkdir -p "$REFUSEDHOME/.quetrex"
+node -e '
+  const fs = require("fs");
+  const [dir, token, port] = process.argv.slice(1);
+  const auth = {
+    kanbanUrl: "http://127.0.0.1:" + port,
+    token,
+    expiresAt: new Date(Date.now() + 3600_000).toISOString()
+  };
+  fs.writeFileSync(dir + "/.quetrex/auth.json", JSON.stringify(auth));
+' "$REFUSEDHOME" "$FAKE_TOKEN" "$REFUSED_PORT"
+OUT="$(HOME="$REFUSEDHOME" "$API_BIN" POST /api/tasks '{"title":"x"}' 2>&1)"; CODE=$?
+if [ "$CODE" -ne 0 ]; then
+  pass "H: connection-refused POST eventually returns non-zero (nothing is listening — never succeeds)"
+else
+  fail "H: expected non-zero exit against a port nothing is listening on, got 0 (out: [$OUT])"
+fi
+RETRY_ANNOUNCEMENTS_H="$(printf '%s' "$OUT" | grep -ci 'retrying' || true)"
+[ -n "$RETRY_ANNOUNCEMENTS_H" ] || RETRY_ANNOUNCEMENTS_H=0
+if [ "$RETRY_ANNOUNCEMENTS_H" = "2" ]; then
+  pass "H: connection-refused (curl exit 7) DOES retry a POST — proven never to have reached the server, safe for any method"
+else
+  fail "H: expected exactly 2 retry announcements for a connection-refused POST, got $RETRY_ANNOUNCEMENTS_H: [$OUT]"
+fi
 
 # =============================================================================
 # TEST E — the retry cap (3 total attempts) is honored: 4 failures are queued

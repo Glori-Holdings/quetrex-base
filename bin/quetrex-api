@@ -148,21 +148,34 @@ resolve_project() {
 #       actionable.
 #     - 2xx      -> prints the JSON response body to stdout, return 0
 #
-#   RETRY. A connection-level failure (curl never got a response at all — the
-#   request cannot have reached application code, so nothing could have been
-#   written) is retried for EVERY method. Beyond that, retry eligibility is
-#   gated on whether repeating the request can ever create a duplicate:
+#   RETRY. A connection-level failure (curl_rc != 0, normalized to code="000")
+#   is NOT one bucket — curl exit codes 52 (empty reply), 56 (failure
+#   receiving data), 28 (timeout) and 18 (partial file) all mean the request
+#   may have been fully transmitted, and fully processed and committed
+#   server-side, before the response was lost on the wire. This is exactly
+#   what a Fly.io machine restart, an OOM kill, or a post-commit crash looks
+#   like on the wire — the classic lost-response problem. Only curl exit 6
+#   (couldn't resolve host) and 7 (failed to connect / connection refused)
+#   prove the TCP connection was never established, so the request cannot
+#   have reached application code. Any OTHER curl exit code is unclassified
+#   and FAILS CLOSED (see the case statement in qapi). So:
 #     - GET/PUT/DELETE are idempotent by HTTP semantics — repeating the exact
-#       same request converges to the same end state — so any 5xx is retried.
-#     - POST/PATCH are NOT safe to retry on a generic 5xx: the request may have
-#       already been fully processed server-side (write committed) before the
-#       response was lost, and a repeated POST here creates a permanent
-#       duplicate task (there is no DELETE /api/tasks). Retried ONLY on 429
-#       (rate-limited — never dispatched) and 503 (service unavailable — a
-#       gateway/load-balancer rejection that, by definition, occurs before the
-#       request reaches application code). Never 500/502/504 for these methods.
-#   Bounded at 3 total attempts, 1s/2s backoff between them, and every retry is
-#   announced on stderr so a pause is never silent.
+#       same request converges to the same end state — so any 5xx, and any
+#       connection-level failure regardless of curl_rc, is retried.
+#     - POST/PATCH are NOT safe to retry on a generic 5xx or an unclassified/
+#       lost-response connection failure: the request may have already been
+#       fully processed server-side (write committed), and a repeated POST
+#       here creates a permanent duplicate task (there is no DELETE
+#       /api/tasks). Retried ONLY on: curl exit 6/7 (never reached the
+#       server), HTTP 429 (rate-limited — never dispatched), and HTTP 503
+#       (service unavailable — a gateway/load-balancer rejection that, by
+#       definition, occurs before the request reaches application code).
+#       Never 500/502/504, and never an unclassified curl failure, for these
+#       methods.
+#   Bounded at 3 total attempts, 1s/2s backoff between them, each attempt
+#   bounded by --connect-timeout/--max-time so a hung server can't triple an
+#   unbounded wait, and every retry is announced on stderr so a pause is
+#   never silent.
 qapi() {
   # NOTE: do not name a local `path` — zsh ties lowercase `path` to $PATH.
   local method="$1" endpoint="$2" body="${3:-}"
@@ -183,11 +196,13 @@ qapi() {
 
     if [ -n "$body" ]; then
       code="$(curl -sS -K "$cfg" \
+        --connect-timeout 10 --max-time 30 \
         -H 'Content-Type: application/json' \
         -X "$method" --data "$body" \
         -o "$bodyf" -w '%{http_code}' "$url")"
     else
       code="$(curl -sS -K "$cfg" \
+        --connect-timeout 10 --max-time 30 \
         -X "$method" \
         -o "$bodyf" -w '%{http_code}' "$url")"
     fi
@@ -198,12 +213,46 @@ qapi() {
 
     # A curl-level failure (couldn't connect, timed out below the HTTP layer,
     # TLS error, etc.) never produces a valid 3-digit code — normalize so the
-    # case switch below has one unambiguous value to match on.
+    # rest of the function has one unambiguous value to match on for display.
     [ "$curl_rc" -eq 0 ] && [ -n "$code" ] || code="000"
 
     local should_retry=0
     if [ "$curl_rc" -ne 0 ] || [ "$code" = "000" ]; then
-      should_retry=1
+      # Connection-level failure. Whether a repeat can create a duplicate
+      # write depends on whether the request could possibly have reached
+      # application code — that is NOT true of every curl exit code, so it
+      # must be classified rather than treated as one bucket. See the header
+      # comment for the reproduction this guards: a lost response after a
+      # committed write, blindly retried into a permanent duplicate task.
+      case "$curl_rc" in
+        6 | 7)
+          # 6 = couldn't resolve host, 7 = failed to connect (e.g. connection
+          # refused). The TCP connection was never established, so the
+          # request cannot have reached the server. Safe to retry ANY method.
+          should_retry=1
+          ;;
+        18 | 28 | 52 | 56)
+          # 18 = partial file, 28 = operation timeout, 52 = empty reply from
+          # server, 56 = failure receiving network data. In every one of
+          # these the request may already have been fully transmitted — and
+          # fully processed and committed server-side — before the response
+          # was lost. Safe to retry only for idempotent methods; retrying
+          # POST/PATCH here can create a permanent duplicate write.
+          case "$method" in
+            GET | PUT | DELETE) should_retry=1 ;;
+          esac
+          ;;
+        *)
+          # Any other/unclassified curl exit code. FAIL CLOSED: we cannot
+          # positively prove the request never reached application code, so
+          # a non-idempotent method is never retried here. Idempotent
+          # methods converge to the same end state regardless of failure
+          # mode, so they keep retrying as before.
+          case "$method" in
+            GET | PUT | DELETE) should_retry=1 ;;
+          esac
+          ;;
+      esac
     else
       case "$method" in
         GET | PUT | DELETE)
