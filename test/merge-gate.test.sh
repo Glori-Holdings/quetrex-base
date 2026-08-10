@@ -986,6 +986,117 @@ else
   pass "DEFECT I15: -dRacme/fixture-repo (clustered, matches origin) is gated normally"
 fi
 
+# =============================================================================
+# DEFECT J — the leak class moved UP a layer: the SEGMENT SPLITTER feeding
+# the (now-correct) tokenizer a truncated or corrupted string. Four
+# confirmed defects, all verified against the real hook with green
+# artifacts and a fixture whose origin is acme/fixture-repo (same as the
+# CROSS-REPO/DEFECT I state above, reused here before it's torn down).
+# =============================================================================
+GHM_TOK="$(printf 'gh pr mer%s' 'ge')"
+
+# --- J1: backslash-newline CONTINUATION. A real shell removes `\<newline>`
+# entirely before doing anything else; the old splitter read line-by-line
+# and never saw line 2 at all, losing the --repo flag (and, if the PR id
+# were on line 2, the identifier too).
+J1_CMD="${GHM_TOK}"$' 7 \\\n  --repo other-org/other-repo --squash'
+OUT="$(run_cmd "$FIXTURE" "$J1_CMD")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  pass "DEFECT J1: --repo on a backslash-continued line 2 is refused, naming the mismatch"
+else
+  fail "DEFECT J1: expected refusal naming other-org/other-repo, got: ${OUT:0:200}"
+fi
+
+# --- J2-J3: INLINE / env(1)-wrapped GH_REPO=, in the SAME command text.
+# normalize_segment strips a leading VAR=value prefix by design (so a real
+# vector still anchors on the actual invocation); the round-4 fix only
+# checked the hook's OWN inherited environment, never an assignment sitting
+# right there in the command it was already looking at.
+OUT="$(run_cmd "$FIXTURE" "GH_REPO=other-org/other-repo ${GHM_TOK} 7 --squash")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  pass "DEFECT J2: inline GH_REPO=other-org/other-repo is refused, naming the mismatch"
+else
+  fail "DEFECT J2: expected refusal naming other-org/other-repo, got: ${OUT:0:200}"
+fi
+OUT="$(run_cmd "$FIXTURE" "env GH_REPO=other-org/other-repo ${GHM_TOK} 7 --squash")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  pass "DEFECT J3: env GH_REPO=other-org/other-repo is refused, naming the mismatch"
+else
+  fail "DEFECT J3: expected refusal naming other-org/other-repo, got: ${OUT:0:200}"
+fi
+
+# --- J4: THE DOCUMENTED BOUNDARY. `export GH_REPO=x;` on an EARLIER segment
+# of the SAME line needs cross-segment variable tracking this hook does not
+# do (see the boundary comment near the top of the file) -- explicitly OUT
+# OF BOUNDS, not silently missed. This assertion guards the DOCUMENTATION as
+# much as the code: if this ever starts passing, the boundary comment
+# describing it as uncovered needs updating too.
+OUT="$(run_cmd "$FIXTURE" "export GH_REPO=other-org/other-repo; ${GHM_TOK} 7 --squash")"
+if printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  fail "DEFECT J4: export-prefixed GH_REPO is documented as OUT OF BOUNDS but was caught -- update the boundary comment to match, got: ${OUT:0:200}"
+else
+  pass "DEFECT J4 (documents the boundary): export GH_REPO=x; on an earlier segment is NOT caught by this mechanism, as documented"
+fi
+
+# --- J5: the QUOTE-BLIND SPLITTER regression. The awk gsub ran before any
+# quote tracking existed, splitting `-t 'build && test'` mid-quote and
+# corrupting a legitimate command into an unparseable one -- a false
+# refusal, not a leak, but the segment splitter must not corrupt a
+# well-formed command in the first place.
+OUT="$(run_cmd "$FIXTURE" "${GHM_TOK} 7 --squash -t 'build && test'")"
+if printf '%s' "$OUT" | grep -qi 'could not confidently parse'; then
+  fail "DEFECT J5: -t 'build && test' must not be corrupted into an unparseable command, got: ${OUT:0:200}"
+else
+  pass "DEFECT J5: -t 'build && test' -- '&&' inside a quoted value does not split the segment"
+fi
+
+# --- J6: UNEXPANDED \$VAR in the --repo VALUE position -- the shape THIS
+# ENGINE'S OWN /quetrex:merge command emits (.claude/commands/merge.md:138:
+# a `gh pr merge "$PR_NUM" --repo "$SLUG" --squash --delete-branch` line).
+# Decided FAIL OPEN for this narrow case (see looks_like_shell_expr's call
+# site for the full reasoning) -- treated as NO signal from this flag, not
+# a literal repo name, so the engine's own merge command can actually pass
+# its own gate. Proven as a FULL end-to-end ALLOW, not just "not refused as
+# cross-repo" -- the whole point is that this command must be mergeable.
+J6_HEAD="$(git -C "$FIXTURE" rev-parse HEAD)"
+write_ledger_at "$J6_HEAD"
+write_verdict_at "$J6_HEAD"
+rm -f "$FIXTURE/.quetrex/security-findings.json" "$FIXTURE/.quetrex/ESCALATION"
+J6_CMD='PR_NUM=7; SLUG=acme/fixture-repo; '"${GHM_TOK}"' "$PR_NUM" --repo "$SLUG" --squash --delete-branch'
+OUT="$(run_cmd "$FIXTURE" "$J6_CMD" "$J6_HEAD")"
+if [ -z "$OUT" ]; then
+  pass "DEFECT J6 (the engine's own merge command): unexpanded \$SLUG in --repo is treated as unknown, not a foreign repo -- ships"
+else
+  fail "DEFECT J6: expected this engine's own merge.md pattern to ship (empty stdout), got: ${OUT:0:220}"
+fi
+
+# --- J7: a trailing shell COMMENT containing flag-shaped text must not be
+# read as a real flag -- the same over-match class as J5/finding-4, just a
+# `#` instead of a quote.
+OUT="$(run_cmd "$FIXTURE" "${GHM_TOK} 7 --squash # note: see --repo change" "$J6_HEAD")"
+if [ -z "$OUT" ]; then
+  pass "DEFECT J7: a trailing '# ... --repo ...' comment is not read as a real --repo flag -- ships"
+else
+  fail "DEFECT J7: expected the trailing comment to be inert (empty stdout), got: ${OUT:0:220}"
+fi
+
+# --- J8-J9: PIN the short-flag fail-closed branch (gh_merge_short_kind's
+# "unknown" case, walked inside parse_gh_pr_merge's cluster loop). Provably
+# non-vacuous: mutating that branch to a no-op must break these, not just
+# leave it unexercised the way the long-flag branch alone would.
+OUT="$(run_cmd "$FIXTURE" "${GHM_TOK} 7 --squash -Z")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'could not confidently parse'; then
+  pass "DEFECT J8: an unrecognized SHORT flag (-Z) fails closed"
+else
+  fail "DEFECT J8: expected a 'could not confidently parse' refusal, got: ${OUT:0:200}"
+fi
+OUT="$(run_cmd "$FIXTURE" "${GHM_TOK} 7 --squash -dZ")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'could not confidently parse'; then
+  pass "DEFECT J9: an unrecognized SHORT flag inside a cluster (-dZ) fails closed"
+else
+  fail "DEFECT J9: expected a 'could not confidently parse' refusal, got: ${OUT:0:200}"
+fi
+
 git -C "$FIXTURE" remote remove origin 2>/dev/null || true
 
 # =============================================================================
