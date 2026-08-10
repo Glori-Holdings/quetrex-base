@@ -1348,7 +1348,28 @@ L_PR_HEAD="$(git -C "$FIXTURE_L_ORIGIN" rev-parse HEAD)"
 jq -cn --arg sha "$L_PR_HEAD" --arg cwd "$FIXTURE_L_LOCAL" '{ts:"t",cmd:"true",cwd:$cwd,sha:$sha,exit:0,tail:""}' >> "$FIXTURE_L_LOCAL/.quetrex/verify-ledger.jsonl"
 jq -cn --arg sha "$L_PR_HEAD" '{verdict:"AUTO_MERGE",sha:$sha,confirmed:[],inputs:{nativeSecurityReview:"clean"}}' > "$FIXTURE_L_LOCAL/.quetrex/review-verdict.json"
 
-MERGE_CMD_L="$(printf 'gh pr mer%s' 'ge') 91 --repo acme/l-fixture --squash"
+# THE VACUITY THIS FIXES: an earlier version of this command carried
+# `--repo acme/l-fixture`, which does NOT match $FIXTURE_L_LOCAL's actual
+# origin (a local temp path) -- so vector 1 was ALREADY denied on its own
+# cross-repo mismatch, and vector 2 (the push) was never reached either
+# way. That made L4/L5 pass against round 6 too (round 6 evaluates only
+# the FIRST vector, and the first vector already denied for an unrelated
+# reason) -- a vacuous pass, not proof of anything. No --repo flag here:
+# `gh pr view` resolves against $ROOT's own origin, which DOES match, so
+# vector 1 genuinely ships on its own merits and the push vector is what
+# has to be reached and denied.
+MERGE_CMD_L="$(printf 'gh pr mer%s' 'ge') 91 --squash"
+
+# Sanity/positive control: vector 1 ALONE, with no push attached, must
+# genuinely ALLOW -- proves the fixed command is clean on its own, so a
+# DENY in the combined cases below can only be attributed to the push half.
+OUT="$(run_cmd "$FIXTURE_L_LOCAL" "$MERGE_CMD_L" "$L_PR_HEAD")"; CODE=$?
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "DEFECT L4/L5 setup: the gh-pr-merge vector ALONE (no --repo confound) genuinely ships"
+else
+  fail "DEFECT L4/L5 setup: expected the gh-pr-merge vector alone to ship (empty stdout), got exit $CODE stdout: [$OUT]"
+fi
+
 OUT="$(run_cmd "$FIXTURE_L_LOCAL" "$MERGE_CMD_L && git -C $FIXTURE_L_DIRTY push origin $MAIN" "$L_PR_HEAD")"
 if is_deny "$OUT"; then
   pass "DEFECT L4: clean gh-pr-merge && dirty-repo push -- the SECOND (push) vector is still evaluated and denies"
@@ -1364,6 +1385,94 @@ else
 fi
 
 rm -rf "$FIXTURE_L_CLEAN" "$FIXTURE_L_CLEAN2" "$FIXTURE_L_DIRTY" "$FIXTURE_L_ORIGIN" "$FIXTURE_L_LOCAL"
+
+# =============================================================================
+# DEFECT P — DIFF_BASE (unlike every other variable evaluate_vector
+# touches -- see the fix's commit message for the full per-variable audit)
+# was assigned ONLY inside the `gh pr merge` branch, then read via an
+# unset-fallback check (`if [ -z "${DIFF_BASE:-}" ]`) -- so a NON-gh-pr-
+# merge vector (push to main) never assigned it fresh THIS call, and it
+# leaked from whatever a PRIOR vector in the SAME compound command left
+# behind. Two repos, evaluated back to back: repo P (default `main`,
+# genuinely clean) resolves its OWN diff base to the literal ref "main"
+# via the fallback; repo Q (default `master`, a sensitive file introduced
+# on its own feature branch SEVERAL commits back, about to be pushed)
+# never resolves its OWN base -- it inherits P's "main", which does not
+# exist in Q at all, the three-dot diff errors, the HEAD~1..HEAD fallback
+# kicks in and sees only Q's LAST (benign) commit, and the sensitive file
+# several commits back is never inspected.
+#
+# Deliberately built so the sensitive file is NOT in Q's last commit: if
+# it were, the HEAD~1..HEAD fallback alone would still catch it whether or
+# not DIFF_BASE leaked, and the test would prove nothing about the leak
+# specifically -- it would just be re-testing the fallback.
+# =============================================================================
+FIXTURE_P="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-p.XXXXXX")"
+git -C "$FIXTURE_P" init -q -b main
+git -C "$FIXTURE_P" config user.email "test@example.com"
+git -C "$FIXTURE_P" config user.name "Fixture"
+echo root > "$FIXTURE_P/README.md"
+git -C "$FIXTURE_P" add README.md
+git -C "$FIXTURE_P" commit -q -m "chore: P root"
+mkdir -p "$FIXTURE_P/.quetrex"
+printf '{"verify":["true"]}' > "$FIXTURE_P/.quetrex/verify.json"
+P_HEAD="$(git -C "$FIXTURE_P" rev-parse HEAD)"
+: > "$FIXTURE_P/.quetrex/verify-ledger.jsonl"
+jq -cn --arg sha "$P_HEAD" --arg cwd "$FIXTURE_P" '{ts:"t",cmd:"true",cwd:$cwd,sha:$sha,exit:0,tail:""}' >> "$FIXTURE_P/.quetrex/verify-ledger.jsonl"
+jq -cn --arg sha "$P_HEAD" '{verdict:"AUTO_MERGE",sha:$sha,confirmed:[],inputs:{nativeSecurityReview:"clean"}}' > "$FIXTURE_P/.quetrex/review-verdict.json"
+
+FIXTURE_Q="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-q.XXXXXX")"
+git -C "$FIXTURE_Q" init -q -b master
+git -C "$FIXTURE_Q" config user.email "test@example.com"
+git -C "$FIXTURE_Q" config user.name "Fixture"
+echo root > "$FIXTURE_Q/README.md"
+git -C "$FIXTURE_Q" add README.md
+git -C "$FIXTURE_Q" commit -q -m "chore: Q root"
+git -C "$FIXTURE_Q" checkout -q -b claude/q-feature
+mkdir -p "$FIXTURE_Q/src/auth"
+cat > "$FIXTURE_Q/src/auth/login.ts" <<'TS'
+export function getUser(req) { return db.findById(req.params.id); }
+TS
+git -C "$FIXTURE_Q" add src/auth/login.ts
+git -C "$FIXTURE_Q" commit -q -m "feat: add a sensitive auth surface"
+echo "benign tweak" >> "$FIXTURE_Q/README.md"
+git -C "$FIXTURE_Q" add README.md
+git -C "$FIXTURE_Q" commit -q -m "chore: benign follow-up (the LAST commit)"
+mkdir -p "$FIXTURE_Q/.quetrex"
+printf '{"verify":["true"]}' > "$FIXTURE_Q/.quetrex/verify.json"
+Q_HEAD="$(git -C "$FIXTURE_Q" rev-parse HEAD)"
+: > "$FIXTURE_Q/.quetrex/verify-ledger.jsonl"
+jq -cn --arg sha "$Q_HEAD" --arg cwd "$FIXTURE_Q" '{ts:"t",cmd:"true",cwd:$cwd,sha:$sha,exit:0,tail:""}' >> "$FIXTURE_Q/.quetrex/verify-ledger.jsonl"
+jq -cn --arg sha "$Q_HEAD" '{verdict:"AUTO_MERGE",sha:$sha,confirmed:[],inputs:{nativeSecurityReview:"not_available_in_env"}}' > "$FIXTURE_Q/.quetrex/review-verdict.json"
+# Deliberately NO security-findings.json -- if the sensitive file (added
+# several commits back on this feature branch) is correctly detected, GATE
+# 2b/GATE 4 must require an independent security review that doesn't
+# exist, and deny.
+rm -f "$FIXTURE_Q/.quetrex/security-findings.json"
+
+# P-setup -- sanity: repo Q's push ALONE (sensitive file correctly diffed
+# against Q's real "master" base) must DENY on its own -- proves the
+# fixture itself is right before combining it with P.
+OUT="$(run_cmd "$FIXTURE_Q" "git -C $FIXTURE_Q push origin $MAIN")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'security review'; then
+  pass "DEFECT P setup: repo Q's push ALONE correctly detects the sensitive file and denies"
+else
+  fail "DEFECT P setup: expected repo Q alone to deny citing a security review, got: ${OUT:0:220}"
+fi
+
+# THE LEAK: repo P's clean push (which resolves its OWN DIFF_BASE to the
+# literal "main"), THEN repo Q's push, in THAT order. If DIFF_BASE leaked
+# from P into Q's evaluation, Q's sensitive file goes uninspected and this
+# ALLOWS; if DIFF_BASE were correctly reset per vector, Q resolves its own
+# real "master" base and denies exactly as the setup case does alone.
+OUT="$(run_cmd "$FIXTURE_P" "git -C $FIXTURE_P push origin $MAIN && git -C $FIXTURE_Q push origin $MAIN")"
+if is_deny "$OUT"; then
+  pass "DEFECT P (the fix): clean-repo-P push && sensitive-repo-Q push -- Q's own base is still correctly resolved, denies"
+else
+  fail "DEFECT P: expected repo Q's diff-content gate to still deny despite P running first, got: ${OUT:0:220}"
+fi
+
+rm -rf "$FIXTURE_P" "$FIXTURE_Q"
 
 # =============================================================================
 # DEFECT K — split_segments_quote_aware and tokenize_argv must AGREE on
