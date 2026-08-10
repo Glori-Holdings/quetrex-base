@@ -478,25 +478,50 @@ line then lands in the instruction channel as its own top-level instruction, ind
 from something the operator wrote. So this is a **mechanical** step, in code, like `TASK_ID`'s
 `tr -d '[:space:]'` in Step 1 — never a rule stated in prose for the model to remember:
 
+Each rule below is its OWN statement and carries its rule number in a trailing comment.
+That is not decoration: ASSERTION 5i in `test/placeholder-substitution.test.sh` mutates
+this fence by DELETING the `// 3.` and `// 4.` lines and requires the hostile fixture to
+come back carrying those constructs again. A single chained expression could not survive
+that deletion, and an unmarked rule could not be mutated at all — which is how ASSERTION
+5c came to prove nothing.
+
 ```bash
 TASK_TITLE="$(node -e '
   const raw = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).title;
-  let t = String(raw == null ? "" : raw)
-    .replace(/[\r\n]+/g, " ")                  // 1. CR/LF outright: there is never a second line
-    .replace(/[\u0000-\u001F\u007F]/g, " ")      // 2. every other control character
-    .replace(/`/g, "")                         // 3. no backtick: no command substitution, no fence break
-    .replace(/\{\{|\}\}/g, "")                 // 4. a title cannot forge or swallow a placeholder
-    .replace(/\s+/g, " ")                      // 5. collapse the residue to single spaces
-    .trim();
+  let t = String(raw == null ? "" : raw);
+  t = t.replace(/[\r\n]+/g, " ");                      // 1. CR/LF outright: there is never a second line
+  t = t.replace(/[\u0000-\u001F\u007F-\u009F]/g, " ");  // 2. every other control character: C0, DEL and the C1 block (NEL U+0085 is a line terminator too)
+  t = t.replace(/`/g, "");                              // 3. no backtick: no command substitution, no fence break
+  let prev;                                             // 4. a title cannot forge or swallow a placeholder...
+  do { prev = t; t = t.replace(/\{\{|\}\}/g, ""); } while (t !== prev);   // 4. ...and ONE pass would BUILD one: stripping an inner pair joins its neighbours, so A{}}{TASK}{{}B came back as A{{TASK}}B. Loop to a fixed point.
+  t = t.replace(/\s+/g, " ").trim();                    // 5. collapse the residue to single spaces (JS \s already covers U+2028/U+2029)
   if (t.length > 50) t = t.slice(0, 50).trim() + "…";   // 6. HARD 50 chars, enforced here
   process.stdout.write(t);
 ' "$PAYLOAD")" || exit 1
 ```
 
+Rules 2 and 4 are each written the way they are because the obvious form was wrong and
+shipped:
+
+- **Rule 2 covers C1, not only C0.** `[\u0000-\u001F\u007F]` left U+0080–U+009F untouched, and
+  that block contains NEL (U+0085), a Unicode-defined line terminator — so a title could
+  still carry a line break past the rule whose whole job is to remove them.
+- **Rule 4 runs to a FIXED POINT.** A single left-to-right `.replace(/\{\{|\}\}/g, "")` can
+  CONSTRUCT the sequence it strips: deleting an inner `}}` joins the `{` on its left to the
+  `{` on its right, and the scan never returns to look. `A{}}{TASK}{{}B` came out as
+  `A{{TASK}}B` — the sanitizer forging the very placeholder this rule exists to prevent, live
+  in `$TASK_TITLE` when `{{TITLE}}` is substituted, so any placeholder pass that runs after
+  it expands a token a board author wrote.
+
 `test/placeholder-substitution.test.sh` (ASSERTION 5) executes this exact fence against a
-hostile fixture title and asserts the value it produces is one line with no backticks, no
-brace pairs, and no more than 50 characters plus the ellipsis — and that an ordinary title
-still comes back byte-for-byte. Do not replace it with a prose instruction.
+hostile fixture title and asserts the value it produces is one line (5b) with no backticks
+or brace pairs (5c), no control characters at all including the C1 block (5h), and no more
+than 50 characters plus the ellipsis (5d); that a brace-forging title cannot produce a
+brace pair (5g); that an ordinary title still comes back byte-for-byte (5e); and that
+deleting rules 3 and 4 makes those checks FAIL (5i), so they can never go vacuous again.
+Every hostile construct in that fixture sits INSIDE the 50-character cut on purpose — when
+it did not, the truncation was doing all the work and the assertion held against a
+sanitizer with rules 3 and 4 removed. Do not replace any of this with a prose instruction.
 
 The substitution list in the next paragraph is the **single authority** for what gets
 filled, and it is a **checked contract** with the placeholder table at the top of
