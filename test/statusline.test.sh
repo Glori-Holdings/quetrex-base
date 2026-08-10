@@ -348,10 +348,10 @@ else
   fail "AC9: .claude/settings.json has no statusLine.command at all"
 fi
 case "$SL_CMD" in
-  *'${CLAUDE_PROJECT_DIR}'*)
-    pass "AC9: statusLine.command resolves via \${CLAUDE_PROJECT_DIR}, the same variable every hook registration in this file already uses" ;;
+  *CLAUDE_PROJECT_DIR*)
+    pass "AC9: statusLine.command resolves via CLAUDE_PROJECT_DIR, the same variable every hook registration in this file already uses" ;;
   *)
-    fail "AC9: statusLine.command does not resolve via \${CLAUDE_PROJECT_DIR} (command: [$SL_CMD]) — this is a project-scoped setting, so \${CLAUDE_PLUGIN_ROOT} is unset here and would expand to a bare /.claude/... path" ;;
+    fail "AC9: statusLine.command does not reference CLAUDE_PROJECT_DIR (command: [$SL_CMD]) — this is a project-scoped setting, so \${CLAUDE_PLUGIN_ROOT} is unset here and would expand to a bare /.claude/... path" ;;
 esac
 case "$SL_CMD" in
   *'~/.claude/'*)
@@ -364,6 +364,101 @@ case "$SL_CMD" in
     pass "AC9: statusLine.command still targets statusline-command.sh" ;;
   *)
     fail "AC9: statusLine.command no longer targets statusline-command.sh (command: [$SL_CMD])" ;;
+esac
+
+# -----------------------------------------------------------------------------
+# AC10 — the registered string must survive CLAUDE_PROJECT_DIR being UNSET.
+#
+# A bare "${CLAUDE_PROJECT_DIR}/..." expands to "/.claude/statusline-command.sh"
+# when the variable is absent and exits 127 with an error on stderr — an
+# erroring status line, which is the exact thing the LESSONS section of
+# .claude/CLAUDE.md forbids, because the operator reads it as a failed build.
+# All 10 hook commands in this same settings.json already use the guarded
+# "${CLAUDE_PROJECT_DIR:-.}" form for precisely this reason. Pattern-matching
+# the string cannot tell the two apart, so this executes it.
+# -----------------------------------------------------------------------------
+if [ -n "$SL_CMD" ]; then
+  UNSET_BIN="$WORK/bin-unset"
+  make_stub "$UNSET_BIN" 'echo 2.4.0'
+  mkdir -p "$WORK/home-unset"
+  cat > "$WORK/unset.json" <<JSON
+{
+  "workspace": { "current_dir": "$TOOLROOT", "project_dir": "$TOOLROOT" },
+  "model": { "display_name": "Opus 5" },
+  "version": "$CC_VERSION",
+  "context_window": { "used_percentage": 0 }
+}
+JSON
+  # cwd is the repo root, which is what "." resolves to for a project-scoped
+  # command, and CLAUDE_PROJECT_DIR is deliberately absent from the environment.
+  (
+    cd "$TOOLROOT" || exit 1
+    env -i \
+      HOME="$WORK/home-unset" \
+      PATH="$UNSET_BIN:$BASE_PATH" \
+      COLUMNS=100 \
+      LANG=en_US.UTF-8 \
+      TERM=dumb \
+      bash -c "$SL_CMD" < "$WORK/unset.json" > "$WORK/unset.out" 2> "$WORK/unset.err"
+  )
+  U_CODE=$?
+  U_ERR="$(cat "$WORK/unset.err")"
+  U_PLAIN1="$(plain_of "$(head -n 1 "$WORK/unset.out")")"
+
+  if [ "$U_CODE" -eq 0 ]; then
+    pass "AC10: the registered statusLine.command exits 0 with CLAUDE_PROJECT_DIR unset"
+  else
+    fail "AC10: the registered statusLine.command exited $U_CODE with CLAUDE_PROJECT_DIR unset (stderr: [$U_ERR]) — the unguarded \${CLAUDE_PROJECT_DIR} form expands to a bare /.claude/... path and exits 127"
+  fi
+  if [ -z "$U_ERR" ]; then
+    pass "AC10: nothing is written to stderr with CLAUDE_PROJECT_DIR unset"
+  else
+    fail "AC10: the registered command wrote to stderr with CLAUDE_PROJECT_DIR unset [$U_ERR] — an operator reads that as a failed build"
+  fi
+  case "$U_PLAIN1" in
+    *"Quetrex 2.4.0  v${CC_VERSION}")
+      pass "AC10: with CLAUDE_PROJECT_DIR unset the guarded form still renders the full right group" ;;
+    *)
+      fail "AC10: with CLAUDE_PROJECT_DIR unset the right group did not render (plain line 1: [$U_PLAIN1])" ;;
+  esac
+fi
+
+# -----------------------------------------------------------------------------
+# AC11 — a wedged engine must not freeze the status bar.
+#
+# quetrex-version is a third-party process from this script's point of view. It
+# can hang on a stale lock or a dead mount, and unbounded that hang IS the
+# status bar's render time (measured: a 3s stub produced a 3.2s render against
+# this file's own <50ms target). The bound is built from `read -t`, because
+# timeout/gtimeout are coreutils and absent from a stock macOS. A timeout must
+# take the SAME path as a missing engine: drop the segment, exit 0, say nothing.
+# -----------------------------------------------------------------------------
+now_ms() { node -e 'process.stdout.write(String(Date.now()))'; }
+
+HANG_STUB="$WORK/bin-hang"
+make_stub "$HANG_STUB" 'sleep 3; echo 2.4.0'
+T_START="$(now_ms)"
+render hang "$HANG_STUB"
+T_END="$(now_ms)"
+ELAPSED=$(( T_END - T_START ))
+
+if [ "$ELAPSED" -lt 2500 ]; then
+  pass "AC11: a 3s-wedged engine is bounded — the status line rendered in ${ELAPSED}ms instead of blocking for the full 3s"
+else
+  fail "AC11: a 3s-wedged engine blocked the status line for ${ELAPSED}ms — the call to quetrex-version is unbounded"
+fi
+if [ "$R_CODE" -eq 0 ] && [ -z "$R_ERR" ]; then
+  pass "AC11: a wedged engine still exits 0 with empty stderr"
+else
+  fail "AC11: a wedged engine produced exit $R_CODE / stderr [$R_ERR]"
+fi
+case "$R_OUT" in
+  *Quetrex*) fail "AC11: a wedged engine still rendered a Quetrex segment (out: [$R_OUT])" ;;
+  *)         pass "AC11: a wedged engine takes the same fail-closed path as a missing one — the segment is dropped silently" ;;
+esac
+case "$(plain_of "$R_LINE1")" in
+  *"v${CC_VERSION}") pass "AC11: Claude Code's own version still terminates line 1 when the engine is wedged" ;;
+  *)                 fail "AC11: line 1 no longer ends with Claude Code's version when the engine is wedged" ;;
 esac
 
 echo

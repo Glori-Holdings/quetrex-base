@@ -89,9 +89,37 @@ fi
 # Quetrex half is omitted ENTIRELY: a status script must never surface a
 # "command not found", an interpreter error, or a half-rendered placeholder,
 # because the operator reads that as a failed build when nothing failed.
+#
+# The call is BOUNDED. quetrex-version is a third-party process from here: a
+# different release train, possibly a wrapper, possibly wedged on a stale lock
+# or a dead mount. Unbounded, a hung engine freezes the whole status bar for as
+# long as it hangs (a 3s stub measured a 3.2s render against this file's <50ms
+# target). `timeout`/`gtimeout` are coreutils and are NOT present on a stock
+# macOS, so the bound is built from `read -t` on a pipe instead — no extra
+# dependency, and no measurable cost on the fast path.
+#
+# The subshell prints the EXIT STATUS first and the output second, because both
+# matter and a plain pipe would throw the status away: an engine that prints a
+# usable version and then exits non-zero is reporting that the number is not
+# trustworthy, so that case must fail closed exactly like a crash. Reading a
+# single line also gives the "first line only" trim for free — stray banner
+# output can never break line 1.
+#
+# bash 3.2 (stock macOS) rejects a fractional `read -t`, so the bound is one
+# whole second there and a few hundred ms on bash 4+. Either way it is bounded.
+if [ "${BASH_VERSINFO[0]:-3}" -ge 4 ]; then _qx_timeout=0.4; else _qx_timeout=1; fi
 quetrex_v=""
-if _qv="$(quetrex-version --plain 2>/dev/null)"; then
-  _qv="${_qv%%$'\n'*}"   # first line only — never let stray output break line 1
+_qv=""
+_qrc=1
+exec 3< <( _o="$(quetrex-version --plain 2>/dev/null)"; _r=$?; printf '%s\n%s\n' "$_r" "$_o" )
+if IFS= read -t "$_qx_timeout" -r _qrc <&3; then
+  IFS= read -t "$_qx_timeout" -r _qv <&3 || _qv=""
+else
+  _qrc=1   # timed out — treat a wedged engine exactly like a missing one
+fi
+exec 3<&-
+
+if [ "$_qrc" = "0" ]; then
   # Anything that is not a bare 1-, 2- or 3-component numeric version is
   # treated as no answer at all rather than rendered verbatim.
   if [[ "$_qv" =~ ^[0-9]+(\.[0-9]+)?(\.[0-9]+)?$ ]]; then
