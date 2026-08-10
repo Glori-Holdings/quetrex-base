@@ -244,7 +244,15 @@ run_publication() {  # run_publication <n>  -> echoes exit code; leaves state on
   (
     TMP_WT="$wt"
     SPEC_BRANCH="$SPEC_BRANCH_FIXTURE"
-    export TMP_WT SPEC_BRANCH
+    # TASK_ID is the SAME VALUE as the tail of SPEC_BRANCH — Step 6A defines
+    # SPEC_BRANCH="quetrex-spec/$TASK_ID" — and both are exported because the
+    # block deliberately spells `quetrex-spec/$TASK_ID` out at the `--delete`
+    # call site: deny-guard.sh permits a remote ref delete only in the
+    # disposable quetrex-spec/* and *-gates namespaces, and a PreToolUse hook
+    # sees the command before the shell expands "$SPEC_BRANCH". Deriving it
+    # here (rather than hardcoding) keeps the two in lockstep with the fixture.
+    TASK_ID="${SPEC_BRANCH_FIXTURE#quetrex-spec/}"
+    export TMP_WT SPEC_BRANCH TASK_ID
     bash -c "$PUBLISH_BLOCK" >/dev/null 2>&1
   )
   printf '%s' "$?"

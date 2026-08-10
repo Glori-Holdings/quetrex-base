@@ -368,7 +368,7 @@ if [ -z "$MISSING_PERMS" ]; then
   echo "✓ Pipeline permissions granted — this repo's .claude/settings.json allows the terminal git push and gh pr calls."
 else
   echo "✗ Pipeline permissions granted — .claude/settings.json is missing $MISSING_PERMS, so the pipeline runs the whole build and then HANGS at the final push/PR step waiting for a human to approve it."
-  echo "    Fix: run /quetrex:init — step 4e unions the pipeline grants into your own settings (it only ever adds, and never touches permissions.deny/ask)."
+  echo "    Fix: run /quetrex:init — its step 4e unions the FULL pipeline grant set (12 entries) into your own committed .claude/settings.json, not only the ones named above: the git worktree/checkout/merge/diff/rev-parse/add/commit calls, Bash(jq:*), Bash(mkdir:*), and Edit(/**) — the file-write grant, anchored at your project root. It only ever adds, never removes or narrows an existing entry, and never touches permissions.deny/ask. See init.md step 4e for the exact list; every entry lands in your own settings, so it is visible and revocable by you."
 fi
 ```
 
