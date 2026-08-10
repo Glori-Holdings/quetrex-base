@@ -166,35 +166,43 @@ default_base_sha() {
 }
 
 # run_hook <cwd> [pr_head_sha_override] [pr_base_sha_override] [fail: 1 to
-# simulate an unresolvable PR]. Without overrides, the mock reports <cwd>'s
-# own current git HEAD as the "PR head" and its local main as the "PR base"
-# — reproducing exactly what the pre-fix hook computed directly, so every
-# existing assertion below keeps testing the same scenario it always did.
-# Tests reproducing the real bugs (local checkout elsewhere than the PR
-# head/base) pass explicit overrides.
+# simulate an unresolvable PR] [gh_repo_env_override]. Without overrides, the
+# mock reports <cwd>'s own current git HEAD as the "PR head" and its local
+# main as the "PR base" — reproducing exactly what the pre-fix hook computed
+# directly, so every existing assertion below keeps testing the same
+# scenario it always did. Tests reproducing the real bugs (local checkout
+# elsewhere than the PR head/base) pass explicit overrides.
+#
+# GH_REPO is ALWAYS passed explicitly (default ""), never left to whatever
+# the test runner's own shell happens to have exported — gh reads GH_REPO
+# from the environment, and this hook now does too (deliberately, see the
+# hook's own comments), so an ambiently-exported GH_REPO in CI would
+# otherwise make these tests flaky/environment-dependent. Pass the 5th arg
+# to simulate an operator who genuinely has GH_REPO exported.
 run_hook() {
-  local cwd="$1" pr_sha="${2:-}" base_sha="${3:-}" failflag="${4:-}" payload
+  local cwd="$1" pr_sha="${2:-}" base_sha="${3:-}" failflag="${4:-}" gh_repo_env="${5:-}" payload
   [ -z "$pr_sha" ] && pr_sha="$(git -C "$cwd" rev-parse HEAD 2>/dev/null)"
   [ -z "$base_sha" ] && base_sha="$(default_base_sha "$cwd")"
   payload="$(jq -cn --arg cmd "$GH_MERGE" --arg cwd "$cwd" \
     '{tool_input:{command:$cmd},cwd:$cwd}')"
-  printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" MOCK_GH_PR_BASE_SHA="$base_sha" MOCK_GH_PR_VIEW_FAIL="$failflag" CLAUDE_PROJECT_DIR="$cwd" "$HOOK"
+  printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" MOCK_GH_PR_BASE_SHA="$base_sha" MOCK_GH_PR_VIEW_FAIL="$failflag" GH_REPO="$gh_repo_env" CLAUDE_PROJECT_DIR="$cwd" "$HOOK"
 }
 
 # run_cmd <cwd> <command> [pr_head_sha_override] [pr_base_sha_override]
-# [argv_log_file] — exercise the hook against an ARBITRARY command, to assert
-# what is and is not classified as a merge vector in the first place. Same
-# mock-gh defaults as run_hook. The optional 5th arg captures what the hook
-# actually passed to `gh pr view` (see MOCK_GH_ARGV_LOG above) — used to
-# assert the resolved PR identifier directly, not just infer it from
-# allow/deny.
+# [argv_log_file] [gh_repo_env_override] — exercise the hook against an
+# ARBITRARY command, to assert what is and is not classified as a merge
+# vector in the first place. Same mock-gh defaults as run_hook (including
+# GH_REPO always explicit, see above). The optional 5th arg captures what
+# the hook actually passed to `gh pr view` (see MOCK_GH_ARGV_LOG above) —
+# used to assert the resolved PR identifier directly, not just infer it
+# from allow/deny.
 run_cmd() {
-  local cwd="$1" cmd="$2" pr_sha="${3:-}" base_sha="${4:-}" argv_log="${5:-}" payload
+  local cwd="$1" cmd="$2" pr_sha="${3:-}" base_sha="${4:-}" argv_log="${5:-}" gh_repo_env="${6:-}" payload
   [ -z "$pr_sha" ] && pr_sha="$(git -C "$cwd" rev-parse HEAD 2>/dev/null)"
   [ -z "$base_sha" ] && base_sha="$(default_base_sha "$cwd")"
   payload="$(jq -cn --arg cmd "$cmd" --arg cwd "$cwd" \
     '{tool_input:{command:$cmd},cwd:$cwd}')"
-  printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" MOCK_GH_PR_BASE_SHA="$base_sha" MOCK_GH_ARGV_LOG="$argv_log" CLAUDE_PROJECT_DIR="$cwd" "$HOOK" 2>&1
+  printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" MOCK_GH_PR_BASE_SHA="$base_sha" MOCK_GH_ARGV_LOG="$argv_log" GH_REPO="$gh_repo_env" CLAUDE_PROJECT_DIR="$cwd" "$HOOK" 2>&1
 }
 
 is_deny() { printf '%s' "$1" | grep -q '"permissionDecision":"deny"\|MERGE GATE'; }
@@ -672,20 +680,28 @@ jq -cn --arg sha "$H_HEAD_SHA" \
 # first cat-file -e (pre-fetch) correctly fails -- the object really is
 # absent -- so the hook fetches; only the SECOND cat-file -e (post-fetch)
 # can catch that the lie left it still absent.
+#
+# THE VACUITY THIS FIXES: both guards emit a deny containing "still is not
+# present" -- H1/H2 originally asserted only that substring, which BOTH the
+# head-side and base-side guard satisfy regardless of which one actually
+# fired. A mutation that guts ONE guard while leaving the other intact would
+# still pass, because the OTHER guard's identical wording masks it. Assert
+# on "the head commit" / "the base commit" (the $label the deny message
+# names) instead, so each test can only pass if ITS OWN guard fired.
 OUT="$(run_hook_lying_fetch "$H_LOCAL" "$H_HEAD_SHA" "$H_BASE_SHA" "$H_HEAD_SHA")"; CODE=$?
-if [ "$CODE" -eq 0 ] && is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'still is not present'; then
+if [ "$CODE" -eq 0 ] && is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'the head commit'; then
   pass "DEFECT H1: a fetch that exits 0 without depositing the HEAD commit is still caught -> DENIED"
 else
-  fail "DEFECT H1: expected a deny decision naming the object as still absent, got exit $CODE stdout: [$OUT]"
+  fail "DEFECT H1: expected a deny decision naming the HEAD commit as still absent, got exit $CODE stdout: [$OUT]"
 fi
 
 # H2 -- same lie, but about the BASE sha instead. The head fetches for real
 # (it isn't in LYING_ABOUT), so this isolates the base-side guard.
 OUT="$(run_hook_lying_fetch "$H_LOCAL" "$H_HEAD_SHA" "$H_BASE_SHA" "$H_BASE_SHA")"; CODE=$?
-if [ "$CODE" -eq 0 ] && is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'still is not present'; then
+if [ "$CODE" -eq 0 ] && is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'the base commit'; then
   pass "DEFECT H2: a fetch that exits 0 without depositing the BASE commit is still caught -> DENIED"
 else
-  fail "DEFECT H2: expected a deny decision naming the object as still absent, got exit $CODE stdout: [$OUT]"
+  fail "DEFECT H2: expected a deny decision naming the BASE commit as still absent, got exit $CODE stdout: [$OUT]"
 fi
 
 # H3 -- control: with LYING_ABOUT empty (fetch is honest for both), the same
@@ -835,6 +851,141 @@ if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
 else
   fail "CROSS-REPO: gh pr merge -R=other-org/other-repo (=) should be refused with the mismatch named, got: ${OUT:0:200}"
 fi
+
+# =============================================================================
+# DEFECT I — REGEXING gh's argv loses to pflag; TOKENIZE and WALK it instead.
+#
+# Five review rounds found five new spellings of the same hole because every
+# prior version matched a pattern against the whole command STRING. gh's
+# real flag parser (pflag) understands separated/attached/=-joined forms,
+# CLUSTERED short flags, and "last flag wins" for a repeated flag — none of
+# which a regex over the raw string can represent. Fixed by tokenizing the
+# segment (quote-aware, no eval) and walking the tokens like pflag does.
+# Every case below was verified end-to-end against the real hook with a
+# fixture whose origin is acme/fixture-repo — same shape as the CROSS-REPO
+# cases just above, reusing the same fixture/origin state.
+# =============================================================================
+
+# --- I1-I3: short-flag CLUSTERING. `-dR<repo>` is --delete-branch + --repo;
+# a regex requiring a literal "-" immediately before "R" never matches
+# because the preceding character is "d", not "-".
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash -dRother-org/other-repo")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  pass "DEFECT I1: -dRother-org/other-repo (clustered, attached) is refused, naming the mismatch"
+else
+  fail "DEFECT I1: expected refusal naming other-org/other-repo, got: ${OUT:0:200}"
+fi
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash -dR other-org/other-repo")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  pass "DEFECT I2: -dR other-org/other-repo (clustered, spaced) is refused, naming the mismatch"
+else
+  fail "DEFECT I2: expected refusal naming other-org/other-repo, got: ${OUT:0:200}"
+fi
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash -sdRother-org/other-repo")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  pass "DEFECT I3: -sdRother-org/other-repo (triple cluster) is refused, naming the mismatch"
+else
+  fail "DEFECT I3: expected refusal naming other-org/other-repo, got: ${OUT:0:200}"
+fi
+
+# --- I4: REPEATED -R. bash's [[ =~ ]] is leftmost-match, so a naive regex
+# captures the FIRST occurrence; real gh (and this fix) honors the LAST.
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') -R acme/fixture-repo 7 --squash -R other-org/other-repo")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  pass "DEFECT I4: repeated -R (acme/fixture-repo then other-org/other-repo) honors the LAST, refused"
+else
+  fail "DEFECT I4: expected refusal naming other-org/other-repo (the LAST -R), got: ${OUT:0:200}"
+fi
+
+# --- I5-I8: THE ROUND-4 REGRESSION. `-R[[:space:]=]?` matched ANY "-R"
+# substring anywhere in the segment, including inside another flag's quoted
+# VALUE. Fail-closed (a false refusal, not a leak) but still cries wolf with
+# a nonexistent repo name the operator can't act on. Tokenizing fixes this
+# structurally: a flag's value is a single opaque token, never re-scanned
+# for "-R"-shaped substrings.
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash -t 'chore: post-Review cleanup'")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'this command merges a PR in'; then
+  fail "DEFECT I5: -t with 'post-Review' in the value must NOT be read as -R, got: ${OUT:0:220}"
+else
+  pass "DEFECT I5: -t 'chore: post-Review cleanup' -- 'Review' in a quoted value is not mistaken for -R"
+fi
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash -b 'ship pre-Release build'")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'this command merges a PR in'; then
+  fail "DEFECT I6: -b with 'pre-Release' in the value must NOT be read as -R, got: ${OUT:0:220}"
+else
+  pass "DEFECT I6: -b 'ship pre-Release build' -- 'Release' in a quoted value is not mistaken for -R"
+fi
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash -A 'a-Robot@example.com'")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'this command merges a PR in'; then
+  fail "DEFECT I7: -A with 'a-Robot' in the value must NOT be read as -R, got: ${OUT:0:220}"
+else
+  pass "DEFECT I7: -A 'a-Robot@example.com' -- 'Robot' in a quoted value is not mistaken for -R"
+fi
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash -F 'notes-Regarding-the-change.txt'")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'this command merges a PR in'; then
+  fail "DEFECT I8: -F with 'notes-Regarding' in the value must NOT be read as -R, got: ${OUT:0:220}"
+else
+  pass "DEFECT I8: -F 'notes-Regarding-the-change.txt' -- 'Regarding' in a quoted value is not mistaken for -R"
+fi
+
+# --- I9-I10: the PR IDENTIFIER as a URL names a repo too.
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') https://github.com/other-org/other-repo/pull/7 --squash")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  pass "DEFECT I9: a PR URL naming other-org/other-repo is refused, naming the mismatch"
+else
+  fail "DEFECT I9: expected refusal naming other-org/other-repo, got: ${OUT:0:200}"
+fi
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') https://github.com/acme/fixture-repo/pull/7 --squash")"
+if printf '%s' "$OUT" | grep -qi 'other-org\|cannot evaluate this merge\|could not confidently parse'; then
+  fail "DEFECT I10: a PR URL matching this repo's own origin must be gated normally, not refused as foreign, got: ${OUT:0:200}"
+else
+  pass "DEFECT I10: a PR URL matching this repo's own origin is gated normally"
+fi
+
+# --- I11-I12: an INHERITED (exported) GH_REPO -- gh reads this env var
+# itself when no --repo/-R flag is on the command line at all.
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash" "" "" "" "other-org/other-repo")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  pass "DEFECT I11: inherited GH_REPO=other-org/other-repo (no flag on the command) is refused"
+else
+  fail "DEFECT I11: expected refusal naming other-org/other-repo from inherited GH_REPO, got: ${OUT:0:200}"
+fi
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash" "" "" "" "acme/fixture-repo")"
+if printf '%s' "$OUT" | grep -qi 'other-org\|cannot evaluate this merge\|could not confidently parse'; then
+  fail "DEFECT I12: inherited GH_REPO matching this repo's own origin must be gated normally, got: ${OUT:0:200}"
+else
+  pass "DEFECT I12: inherited GH_REPO matching this repo's own origin is gated normally"
+fi
+
+# --- I13: CONFLICTING signals -- a --repo flag and a PR URL naming
+# DIFFERENT repos. Refuse as ambiguous rather than silently picking one;
+# either guess could be the one gh actually honors.
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') https://github.com/other-org/other-repo/pull/7 --repo acme/fixture-repo --squash")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'disagree\|ambiguous'; then
+  pass "DEFECT I13: conflicting repo selectors (flag vs PR URL) refused as ambiguous, not guessed"
+else
+  fail "DEFECT I13: expected an ambiguous-selectors refusal, got: ${OUT:0:200}"
+fi
+
+# --- I14: FAIL CLOSED on anything unparseable -- an unrecognized flag shape
+# denies the WHOLE merge rather than silently ignoring the unknown token.
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash --this-flag-does-not-exist")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'could not confidently parse'; then
+  pass "DEFECT I14: an unrecognized flag denies the merge outright (fail closed), not guessed at"
+else
+  fail "DEFECT I14: expected a 'could not confidently parse' refusal, got: ${OUT:0:200}"
+fi
+
+# --- I15: positive control -- clustering that resolves to THIS repo's own
+# origin must NOT be refused. Proves I1-I3 deny because of the FOREIGN repo,
+# not merely because clustering was used at all.
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash -dRacme/fixture-repo")"
+if printf '%s' "$OUT" | grep -qi 'other-org\|cannot evaluate this merge\|could not confidently parse'; then
+  fail "DEFECT I15: -dRacme/fixture-repo (clustered, matches origin) must be gated normally, got: ${OUT:0:200}"
+else
+  pass "DEFECT I15: -dRacme/fixture-repo (clustered, matches origin) is gated normally"
+fi
+
 git -C "$FIXTURE" remote remove origin 2>/dev/null || true
 
 # =============================================================================
