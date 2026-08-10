@@ -5,9 +5,9 @@
   "description": "Quetrex — the Claude Code plugin engine (agents, skills, commands, hooks). Distributed as a plugin, not an npm package; this package.json exists only to run the repo's dev/verify scripts.",
   "scripts": {
     "check:js": "node --check test/plugin.test.js",
-    "check:sh": "for f in .claude/hooks/*.sh .claude/lib/*.sh .claude/*.sh .claude/skills/*/*.sh .claude/skills/*/scripts/*.sh bin/* test/*.sh; do [ -f \"$f\" ] || continue; bash -n \"$f\" || exit 1; done",
-    "check:json": "node -e \"const fs=require('fs');const files=['package.json','.claude/settings.json','.claude/templates/verify.json','.quetrex/verify.json','.claude-plugin/plugin.json','hooks/hooks.json'];for(const f of files){JSON.parse(fs.readFileSync(f,'utf8'))}console.log('ok - '+files.length+' JSON files parse')\"",
-    "test": "node test/plugin.test.js && for f in test/*.sh; do [ -f \"$f\" ] || continue; echo \"--- $f ---\"; bash \"$f\" || exit 1; done"
+    "check:sh": "bash test/lib/check-sh.sh",
+    "check:json": "bash test/lib/check-json.sh",
+    "test": "bash test/run-all.sh"
   },
   "engines": {
     "node": ">=18"
