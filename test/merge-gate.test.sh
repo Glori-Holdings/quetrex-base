@@ -61,10 +61,19 @@ trap cleanup EXIT
 # depends on a real `gh` being installed/authenticated, and so the "PR head"
 # a test simulates is fully under the test's control. Set MOCK_GH_PR_VIEW_SHA
 # to the sha the mock should report, or MOCK_GH_PR_VIEW_FAIL=1 to simulate an
-# unresolvable PR (gh missing/unauthenticated/PR not found).
+# unresolvable PR (gh missing/unauthenticated/PR not found). When
+# MOCK_GH_ARGV_LOG names a file, every arg the hook actually passed to
+# `gh pr view` (after `pr view`) is written one-per-line — this is what makes
+# the PR_ID-parsing loop's ACTUAL resolved identifier assertable, rather than
+# only inferred from the gate's allow/deny outcome.
 cat > "$MOCKBIN/gh" <<'MOCKGH'
 #!/bin/sh
 if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
+  shift 2
+  if [ -n "${MOCK_GH_ARGV_LOG:-}" ]; then
+    : > "$MOCK_GH_ARGV_LOG"
+    for a in "$@"; do printf '%s\n' "$a" >> "$MOCK_GH_ARGV_LOG"; done
+  fi
   if [ -n "${MOCK_GH_PR_VIEW_FAIL:-}" ]; then
     echo "mock gh: pr view failed" >&2
     exit 1
@@ -111,6 +120,18 @@ write_verdict_at() {  # write_verdict_at <sha> [nativeSecurityReview]
     > "$FIXTURE/.quetrex/review-verdict.json"
 }
 
+# The independent security-reviewer's artifact. write_sec <head_sha> <severity|none> [status]
+write_sec() {
+  if [ "$2" = "none" ]; then
+    jq -cn --arg sha "$1" '{task:"T-1",base:"main",head_sha:$sha,reviewed_files:3,verdict:"PASS",findings:[]}' \
+      > "$FIXTURE/.quetrex/security-findings.json"
+  else
+    jq -cn --arg sha "$1" --arg sev "$2" --arg st "${3:-open}" \
+      '{task:"T-1",base:"main",head_sha:$sha,reviewed_files:3,verdict:"BLOCK",findings:[{id:"SEC-1",severity:$sev,status:$st,category:"bola-idor",file:"src/x.ts",line:1,summary:"test"}]}' \
+      > "$FIXTURE/.quetrex/security-findings.json"
+  fi
+}
+
 # The EXACT shape qa.md's run() ledger writer emitted BEFORE this branch's
 # fix: {ts,cmd,cwd,exit,tail} with no `sha` field at all. Every command still
 # exited 0 -- this is what a fully clean pipeline's ledger looked like
@@ -148,15 +169,18 @@ run_hook() {
   printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" MOCK_GH_PR_VIEW_FAIL="$failflag" CLAUDE_PROJECT_DIR="$cwd" "$HOOK"
 }
 
-# run_cmd <cwd> <command> [pr_head_sha_override] — exercise the hook against an
-# ARBITRARY command, to assert what is and is not classified as a merge vector
-# in the first place. Same mock-gh default as run_hook.
+# run_cmd <cwd> <command> [pr_head_sha_override] [argv_log_file] — exercise the
+# hook against an ARBITRARY command, to assert what is and is not classified
+# as a merge vector in the first place. Same mock-gh default as run_hook. The
+# optional 4th arg captures what the hook actually passed to `gh pr view`
+# (see MOCK_GH_ARGV_LOG above) — used to assert the resolved PR identifier
+# directly, not just infer it from allow/deny.
 run_cmd() {
-  local cwd="$1" cmd="$2" pr_sha="${3:-}" payload
+  local cwd="$1" cmd="$2" pr_sha="${3:-}" argv_log="${4:-}" payload
   [ -z "$pr_sha" ] && pr_sha="$(git -C "$cwd" rev-parse HEAD 2>/dev/null)"
   payload="$(jq -cn --arg cmd "$cmd" --arg cwd "$cwd" \
     '{tool_input:{command:$cmd},cwd:$cwd}')"
-  printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" CLAUDE_PROJECT_DIR="$cwd" "$HOOK" 2>&1
+  printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" MOCK_GH_ARGV_LOG="$argv_log" CLAUDE_PROJECT_DIR="$cwd" "$HOOK" 2>&1
 }
 
 is_deny() { printf '%s' "$1" | grep -q '"permissionDecision":"deny"\|MERGE GATE'; }
@@ -308,6 +332,143 @@ else
   fail "DEFECT C3: expected a deny decision when the PR head cannot be resolved, got exit $CODE stdout: [$OUT]"
 fi
 
+# C4 -- `gh pr view` resolves a real-looking sha, but the commit object is not
+# in this checkout and there is no reachable remote to fetch it from. FAIL
+# CLOSED here too: an unfetchable PR head is exactly as unevaluatable as an
+# unresolvable one, and must never be treated as "diff is empty" by default.
+FAKE_PR_SHA="1234567890abcdef1234567890abcdef12345678"
+OUT="$(run_hook "$FIXTURE" "$FAKE_PR_SHA")"; CODE=$?
+if [ "$CODE" -eq 0 ] && is_deny "$OUT"; then
+  pass "DEFECT C4: PR head commit unfetchable (object missing, no remote) -> DENIED (fail closed)"
+else
+  fail "DEFECT C4: expected a deny decision when the PR head commit cannot be fetched, got exit $CODE stdout: [$OUT]"
+fi
+
+# =============================================================================
+# DEFECT F — the diff-content gates (sensitive-surface preamble, GATE 5
+# ownership) must inspect the PR's OWN diff, not local HEAD's.
+#
+# THE BUG: even with DEFECT C's sha-pin fix alone, $CHANGED/$ADDED were still
+# computed from $ROOT's literal `HEAD` -- local main -- while every sha-based
+# gate above now correctly points at the PR head. For `gh pr merge` those are
+# DIFFERENT commits, so a sensitive PR could merge with NO security review
+# (F1: the sensitive-surface floor reads local main's neutral diff, finds
+# nothing, and NEED_SEC stays false even though the PR itself is sensitive).
+# Fixed by fetching the PR head (see the block above HEAD_SHA is set) and
+# diffing FROM it, not from the literal ref `HEAD`.
+#
+# Local checkout stays on main throughout -- main's own history is neutral
+# and unrelated to the PR's content, so F1 can only DENY if the gate is
+# actually looking at the PR's diff.
+# =============================================================================
+git -C "$FIXTURE" checkout -q -b claude/pr-f-sensitive
+mkdir -p "$FIXTURE/src/auth"
+cat > "$FIXTURE/src/auth/login.ts" <<'TS'
+export function getUser(req) { return db.findById(req.params.id); }
+TS
+git -C "$FIXTURE" add src/auth/login.ts
+git -C "$FIXTURE" commit -q -m "feat: add a sensitive auth surface"
+PR_HEAD_F1="$(git -C "$FIXTURE" rev-parse HEAD)"
+git -C "$FIXTURE" checkout -q main
+
+write_ledger_at "$PR_HEAD_F1"
+write_verdict_at "$PR_HEAD_F1" "not_available_in_env"
+rm -f "$FIXTURE/.quetrex/security-findings.json" "$FIXTURE/.quetrex/ESCALATION"
+
+# F1 -- THE FIX: a sensitive PR diff, no independent security artifact, native
+# pass unavailable -> must DENY, even though local checkout never leaves main.
+OUT="$(run_hook "$FIXTURE" "$PR_HEAD_F1")"
+if is_deny "$OUT"; then
+  pass "DEFECT F1 (the fix): sensitive PR diff detected from the PR's own head (not local main) -> DENIED"
+else
+  fail "DEFECT F1: expected a deny decision (sensitive diff requires a security review), got [$OUT]"
+fi
+
+# F2 -- same sensitive PR, now with an independent security artifact pinned to
+# the PR's real head and clean -> ships. Proves F1 is a real, escapable gate
+# tied to the PR's content, not a blanket deny.
+write_sec "$PR_HEAD_F1" none
+OUT="$(run_hook "$FIXTURE" "$PR_HEAD_F1")"; CODE=$?
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "DEFECT F2: sensitive PR diff + independent pinned clean security artifact (PR head) -> ships"
+else
+  fail "DEFECT F2: expected exit 0 + empty stdout, got exit $CODE stdout: [$OUT]"
+fi
+rm -f "$FIXTURE/.quetrex/security-findings.json"
+
+# F3 -- GATE 5 (ownership). A plan owns exactly the PR's own changed file,
+# src/auth/login.ts. Local main gets a THROWAWAY second commit touching
+# README.md -- a file the plan does NOT own -- so a gate that fell back to
+# diffing local HEAD would see README.md (unowned) instead of the PR's own
+# diff (fully owned) and wrongly deny a clean merge. Reset back to the
+# original tip immediately after so every later test's use of $HEAD_SHA
+# (a fixed sha captured earlier) stays valid.
+git -C "$FIXTURE" checkout -q main
+echo "unrelated main-only work" >> "$FIXTURE/README.md"
+git -C "$FIXTURE" add README.md
+git -C "$FIXTURE" commit -q -m "chore: unrelated later commit on main, not part of the PR"
+
+mkdir -p "$FIXTURE/.quetrex/plan"
+jq -cn '{task:"T-1",ownership:{"src/auth/login.ts":"ws-a"}}' \
+  > "$FIXTURE/.quetrex/plan/T-1.json"
+jq -cn '{task:"T-1"}' > "$FIXTURE/.quetrex/state.json"
+write_sec "$PR_HEAD_F1" none
+OUT="$(run_hook "$FIXTURE" "$PR_HEAD_F1")"; CODE=$?
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "DEFECT F3 (the fix): GATE 5 checks the PR's own diff against its ownership map -> ships (not denied for local main's unrelated commit)"
+else
+  fail "DEFECT F3: expected exit 0 + empty stdout (src/auth/login.ts IS owned), got exit $CODE stdout: [$OUT]"
+fi
+rm -rf "$FIXTURE/.quetrex/plan" "$FIXTURE/.quetrex/state.json" "$FIXTURE/.quetrex/security-findings.json"
+git -C "$FIXTURE" reset -q --hard "$LOCAL_HEAD_C1"
+
+# =============================================================================
+# DEFECT E — gh pr merge's value-taking flags must not be mistaken for the PR
+# identifier.
+#
+# THE GAP: PR_VALUE_FLAGS covered only -R/--repo and the LONG forms of the
+# others (--body, --body-file, --subject, --match-head-commit) -- every SHORT
+# form (-A/--author-email, -b, -F, -t) fell through as an unrecognized flag,
+# so ITS VALUE token was picked up as the bare PR_ID. `gh pr merge -b 91 99
+# --squash` (a merge-commit body that happens to look like a PR number) would
+# resolve the gate against PR 91's artifacts while `gh` itself merges PR 99.
+#
+# The mock's ARGV log makes the resolved identifier directly assertable, not
+# just inferred from allow/deny (which a coincidental sha match could mask).
+# =============================================================================
+write_ledger_at "$HEAD_SHA"
+write_verdict_at "$HEAD_SHA"
+rm -f "$FIXTURE/.quetrex/security-findings.json" "$FIXTURE/.quetrex/ESCALATION"
+
+ARGV_LOG="$(mktemp "${TMPDIR:-/tmp}/merge-gate-argv.XXXXXX")"
+
+assert_resolves_99() {  # assert_resolves_99 <label> <command>
+  local label="$1" cmd="$2" out code resolved
+  : > "$ARGV_LOG"
+  out="$(run_cmd "$FIXTURE" "$cmd" "$HEAD_SHA" "$ARGV_LOG")"; code=$?
+  resolved="$(head -n1 "$ARGV_LOG" 2>/dev/null)"
+  if [ "$resolved" = "99" ] && [ "$code" -eq 0 ] && [ -z "$out" ]; then
+    pass "DEFECT E: $label -> correctly resolved PR 99"
+  else
+    fail "DEFECT E: $label -> expected PR 99 resolved + ALLOW, got resolved='${resolved:-<empty>}' exit=$code out=[$out]"
+  fi
+}
+
+assert_resolves_99 "--author-email value looks like a PR number" \
+  "$(printf 'gh pr mer%s' 'ge') --author-email 91 99 --squash"
+assert_resolves_99 "-A (short author-email) value looks like a PR number" \
+  "$(printf 'gh pr mer%s' 'ge') -A 91 99 --squash"
+assert_resolves_99 "-b (body) value looks like a PR number" \
+  "$(printf 'gh pr mer%s' 'ge') -b 91 99 --squash"
+assert_resolves_99 "-F (body-file) value looks like a PR number" \
+  "$(printf 'gh pr mer%s' 'ge') -F 91 99 --squash"
+assert_resolves_99 "-t (subject) value looks like a PR number" \
+  "$(printf 'gh pr mer%s' 'ge') -t 91 99 --squash"
+assert_resolves_99 "--match-head-commit value is not a PR number" \
+  "$(printf 'gh pr mer%s' 'ge') --match-head-commit deadbeefcafe 99 --squash"
+
+rm -f "$ARGV_LOG"
+
 # =============================================================================
 # DEFECT A — the gate must fire on MERGES ONLY.
 #
@@ -430,17 +591,6 @@ git -C "$FIXTURE" remote remove origin 2>/dev/null || true
 # only variable is how independence is (or is not) established.
 # =============================================================================
 write_ledger_at "$HEAD_SHA"
-
-write_sec() {  # write_sec <head_sha> <severity|none> [status]
-  if [ "$2" = "none" ]; then
-    jq -cn --arg sha "$1" '{task:"T-1",base:"main",head_sha:$sha,reviewed_files:3,verdict:"PASS",findings:[]}' \
-      > "$FIXTURE/.quetrex/security-findings.json"
-  else
-    jq -cn --arg sha "$1" --arg sev "$2" --arg st "${3:-open}" \
-      '{task:"T-1",base:"main",head_sha:$sha,reviewed_files:3,verdict:"BLOCK",findings:[{id:"SEC-1",severity:$sev,status:$st,category:"bola-idor",file:"src/x.ts",line:1,summary:"test"}]}' \
-      > "$FIXTURE/.quetrex/security-findings.json"
-  fi
-}
 
 # B1 — THE FIX: native pass unavailable, but the independent security-reviewer
 #      artifact is pinned to HEAD and clean -> AUTO_MERGE is honored.
