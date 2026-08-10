@@ -139,39 +139,163 @@ resolve_project() {
 #     - injects the bearer via a 0600 temp curl config file (-K), so the token
 #       never appears in argv/stdout/logs; that config file is wiped the instant
 #       curl returns (explicit rm — portable across bash and zsh).
+#     - passes -q FIRST on every curl invocation (curl requires it to be the
+#       first argument to take effect), which disables reading the operator's
+#       ~/.curlrc. Without this, a `location` (follow-redirects) line in that
+#       file — an ordinary developer setting — would make curl silently
+#       follow a redirect: the ORIGINAL request (and its write) is delivered
+#       and possibly committed to the original URL, then curl's exit code and
+#       %{http_code} reflect only the REDIRECT TARGET. That breaks the curl
+#       exit-code classification below: a 6/7 on the redirect target would be
+#       misread as "never reached the server" when the original POST already
+#       had.
 #     - 401      -> "Run /quetrex:login" (stderr), return 1
 #     - 403/404  -> "No access — contact your administrator" (stderr), return 1
-#     - other non-2xx -> "Quetrex API error (HTTP <code>)" (stderr), return 1
+#     - other non-2xx -> "Quetrex API error (HTTP <code>): <server's response
+#       body, truncated, token-scrubbed>" (stderr), return 1. A bare status code
+#       with no diagnostic is what made a genuinely transient 500 indistinguishable
+#       from the tool being broken; the server's own message is what makes it
+#       actionable.
 #     - 2xx      -> prints the JSON response body to stdout, return 0
+#
+#   RETRY. A connection-level failure (curl_rc != 0, normalized to code="000")
+#   is NOT one bucket — curl exit codes 52 (empty reply), 56 (failure
+#   receiving data), 28 (timeout) and 18 (partial file) all mean the request
+#   may have been fully transmitted, and fully processed and committed
+#   server-side, before the response was lost on the wire. This is exactly
+#   what a Fly.io machine restart, an OOM kill, or a post-commit crash looks
+#   like on the wire — the classic lost-response problem. Only curl exit 6
+#   (couldn't resolve host) and 7 (failed to connect / connection refused)
+#   prove the TCP connection was never established, so the request cannot
+#   have reached application code — and that is only true because -q (above)
+#   stops curl from following a .curlrc redirect setting; without it, a 6/7
+#   could be the REDIRECT TARGET failing after the original request already
+#   landed. Any OTHER curl exit code is unclassified and FAILS CLOSED (see
+#   the case statement in qapi). So:
+#     - GET/PUT/DELETE are idempotent by HTTP semantics — repeating the exact
+#       same request converges to the same end state — so any 5xx, and any
+#       connection-level failure regardless of curl_rc, is retried.
+#     - POST/PATCH are NOT safe to retry on a generic 5xx or an unclassified/
+#       lost-response connection failure: the request may have already been
+#       fully processed server-side (write committed), and a repeated POST
+#       here creates a permanent duplicate task (there is no DELETE
+#       /api/tasks). Retried ONLY on: curl exit 6/7 (never reached the
+#       server), HTTP 429 (rate-limited — never dispatched), and HTTP 503
+#       (service unavailable — a gateway/load-balancer rejection that, by
+#       definition, occurs before the request reaches application code).
+#       Never 500/502/504, and never an unclassified curl failure, for these
+#       methods.
+#   Bounded at 3 total attempts, 1s/2s backoff between them, each attempt
+#   bounded by --connect-timeout/--max-time so a hung server can't triple an
+#   unbounded wait, and every retry is announced on stderr so a pause is
+#   never silent.
 qapi() {
   # NOTE: do not name a local `path` — zsh ties lowercase `path` to $PATH.
   local method="$1" endpoint="$2" body="${3:-}"
   local url="${QX_KANBAN_URL}${endpoint}"
-  local cfg bodyf code rc=1
+  local cfg bodyf code="" curl_rc=0 rc=1
+  local attempt max_attempts=3
 
-  cfg="$(mktemp)"   || { echo "Quetrex API error (temp file)" >&2; return 1; }
-  bodyf="$(mktemp)" || { rm -f "$cfg"; echo "Quetrex API error (temp file)" >&2; return 1; }
-  # Both temp files may hold sensitive bytes: cfg the bearer token, bodyf the
-  # response body (which for /secrets/export is the vault map). Lock both to 0600
-  # on creation and rm -f each on every return path below.
-  chmod 600 "$cfg" "$bodyf"
+  for attempt in 1 2 3; do
+    cfg="$(mktemp)"   || { echo "Quetrex API error (temp file)" >&2; return 1; }
+    bodyf="$(mktemp)" || { rm -f "$cfg"; echo "Quetrex API error (temp file)" >&2; return 1; }
+    # Both temp files may hold sensitive bytes: cfg the bearer token, bodyf the
+    # response body (which for /secrets/export is the vault map). Lock both to
+    # 0600 on creation and rm -f each on every path below, every attempt.
+    chmod 600 "$cfg" "$bodyf"
 
-  # The token's only on-disk home: a 0600 curl config (-K), never on argv.
-  printf 'header = "Authorization: Bearer %s"\n' "$_QX_TOKEN" > "$cfg"
+    # The token's only on-disk home: a 0600 curl config (-K), never on argv.
+    printf 'header = "Authorization: Bearer %s"\n' "$_QX_TOKEN" > "$cfg"
 
-  if [ -n "$body" ]; then
-    code="$(curl -sS -K "$cfg" \
-      -H 'Content-Type: application/json' \
-      -X "$method" --data "$body" \
-      -o "$bodyf" -w '%{http_code}' "$url")"
-  else
-    code="$(curl -sS -K "$cfg" \
-      -X "$method" \
-      -o "$bodyf" -w '%{http_code}' "$url")"
-  fi
+    if [ -n "$body" ]; then
+      code="$(curl -q -sS -K "$cfg" \
+        --connect-timeout 10 --max-time 30 \
+        -H 'Content-Type: application/json' \
+        -X "$method" --data "$body" \
+        -o "$bodyf" -w '%{http_code}' "$url")"
+    else
+      code="$(curl -q -sS -K "$cfg" \
+        --connect-timeout 10 --max-time 30 \
+        -X "$method" \
+        -o "$bodyf" -w '%{http_code}' "$url")"
+    fi
+    curl_rc=$?
 
-  # Token's on-disk copy is no longer needed — wipe it before doing anything else.
-  rm -f "$cfg"
+    # Token's on-disk copy is no longer needed — wipe it before doing anything else.
+    rm -f "$cfg"
+
+    # A curl-level failure (couldn't connect, timed out below the HTTP layer,
+    # TLS error, etc.) never produces a valid 3-digit code — normalize so the
+    # rest of the function has one unambiguous value to match on for display.
+    [ "$curl_rc" -eq 0 ] && [ -n "$code" ] || code="000"
+
+    local should_retry=0
+    if [ "$curl_rc" -ne 0 ] || [ "$code" = "000" ]; then
+      # Connection-level failure. Whether a repeat can create a duplicate
+      # write depends on whether the request could possibly have reached
+      # application code — that is NOT true of every curl exit code, so it
+      # must be classified rather than treated as one bucket. See the header
+      # comment for the reproduction this guards: a lost response after a
+      # committed write, blindly retried into a permanent duplicate task.
+      case "$curl_rc" in
+        6 | 7)
+          # 6 = couldn't resolve host, 7 = failed to connect (e.g. connection
+          # refused). The TCP connection was never established, so the
+          # request cannot have reached the server. Safe to retry ANY method.
+          should_retry=1
+          ;;
+        18 | 28 | 52 | 56)
+          # 18 = partial file, 28 = operation timeout, 52 = empty reply from
+          # server, 56 = failure receiving network data. In every one of
+          # these the request may already have been fully transmitted — and
+          # fully processed and committed server-side — before the response
+          # was lost. Safe to retry only for idempotent methods; retrying
+          # POST/PATCH here can create a permanent duplicate write.
+          case "$method" in
+            GET | PUT | DELETE) should_retry=1 ;;
+          esac
+          ;;
+        *)
+          # Any other/unclassified curl exit code. FAIL CLOSED: we cannot
+          # positively prove the request never reached application code, so
+          # a non-idempotent method is never retried here. Idempotent
+          # methods converge to the same end state regardless of failure
+          # mode, so they keep retrying as before.
+          case "$method" in
+            GET | PUT | DELETE) should_retry=1 ;;
+          esac
+          ;;
+      esac
+    else
+      case "$method" in
+        GET | PUT | DELETE)
+          case "$code" in
+            5??) should_retry=1 ;;
+          esac
+          ;;
+        POST | PATCH)
+          case "$code" in
+            429 | 503) should_retry=1 ;;
+          esac
+          ;;
+      esac
+    fi
+
+    if [ "$should_retry" -eq 1 ] && [ "$attempt" -lt "$max_attempts" ]; then
+      local why
+      if [ "$curl_rc" -ne 0 ] || [ "$code" = "000" ]; then
+        why="connection failed"
+      else
+        why="HTTP $code"
+      fi
+      echo "Quetrex API: transient error ($why) on $method $endpoint — retrying ($((attempt + 1))/$max_attempts)..." >&2
+      rm -f "$bodyf"
+      sleep "$attempt"
+      continue
+    fi
+
+    break
+  done
 
   case "$code" in
     2*)
@@ -185,7 +309,51 @@ qapi() {
       echo "No access — contact your administrator" >&2
       ;;
     *)
-      echo "Quetrex API error (HTTP $code)" >&2
+      local errbody
+      errbody="$(cat "$bodyf" 2>/dev/null)"
+      # Defensive scrub: the token should never appear in a response body (it
+      # is the CLIENT's own credential, not something the server echoes), but
+      # this guarantees it cannot leak through this path even if a server ever
+      # reflected the Authorization header back (many debug/error pages do).
+      # Quoting $_QX_TOKEN inside the pattern forces a literal match, never a
+      # glob, so token bytes that happen to look like glob metacharacters are
+      # matched byte-for-byte rather than (mis)interpreted.
+      if [ -n "${_QX_TOKEN:-}" ]; then
+        errbody="${errbody//"$_QX_TOKEN"/[REDACTED]}"
+      fi
+      # Truncate so one enormous HTML error page can't flood the operator's
+      # terminal; a few hundred characters is enough to be actionable.
+      if [ "${#errbody}" -gt 500 ]; then
+        errbody="$(printf '%s' "$errbody" | head -c 500)... [truncated]"
+      fi
+      if [ "$code" = "000" ]; then
+        case "$method" in
+          POST | PATCH)
+            case "$curl_rc" in
+              6 | 7)
+                # Never reached the server (see classification above) — the
+                # honest "nothing happened" message.
+                echo "Quetrex API error: could not reach the server (connection failed) after $attempt attempt(s)" >&2
+                ;;
+              *)
+                # Lost-response / unclassified: the request may have already
+                # reached the server and been committed before the response
+                # was lost — that is precisely why this was NOT retried. Do
+                # not tell the operator "nothing happened"; that is what
+                # sends him to run it again and create a real duplicate.
+                echo "Quetrex API error: no response after $attempt attempt(s) — the request may have already reached the server. CHECK before retrying manually (repeating a $method here could create a duplicate)." >&2
+                ;;
+            esac
+            ;;
+          *)
+            echo "Quetrex API error: could not reach the server (connection failed) after $attempt attempt(s)" >&2
+            ;;
+        esac
+      elif [ -n "$errbody" ]; then
+        echo "Quetrex API error (HTTP $code): $errbody" >&2
+      else
+        echo "Quetrex API error (HTTP $code): <empty response body>" >&2
+      fi
       ;;
   esac
 
