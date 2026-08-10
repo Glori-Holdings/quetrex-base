@@ -78,6 +78,33 @@ else
   indicator=""
 fi
 
+# --- 4.5. Quetrex engine version ---
+# Quetrex pins no version anywhere: a pinned enabledPlugins entry makes the
+# plugin count as DISABLED for dependency resolution and the whole /quetrex:*
+# command layer stops loading. Config therefore carries no version, and this
+# status bar is the ONLY place the running engine is ever named — read at
+# runtime, never hardcoded and never baked in from plugin.json.
+#
+# quetrex-version exits non-zero when no engine is installed. In that case the
+# Quetrex half is omitted ENTIRELY: a status script must never surface a
+# "command not found", an interpreter error, or a half-rendered placeholder,
+# because the operator reads that as a failed build when nothing failed.
+quetrex_v=""
+if _qv="$(quetrex-version --plain 2>/dev/null)"; then
+  _qv="${_qv%%$'\n'*}"   # first line only — never let stray output break line 1
+  # Anything that is not a bare 1-, 2- or 3-component numeric version is
+  # treated as no answer at all rather than rendered verbatim.
+  if [[ "$_qv" =~ ^[0-9]+(\.[0-9]+)?(\.[0-9]+)?$ ]]; then
+    # ALWAYS three components. A bare "2.4" reads as a truncated version,
+    # which is exactly the confusion this segment exists to remove.
+    case "$_qv" in
+      *.*.*) quetrex_v="$_qv"       ;;
+      *.*)   quetrex_v="${_qv}.0"   ;;
+      *)     quetrex_v="${_qv}.0.0" ;;
+    esac
+  fi
+fi
+
 # --- 5. Terminal width ---
 term_width=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
 
@@ -86,6 +113,8 @@ c_path="\033[38;2;217;119;87m"
 c_branch="\033[38;2;77;182;172m"
 c_model="\033[38;2;120;113;108m"
 c_version="\033[38;2;68;64;60m"
+c_quetrex="\033[38;2;212;175;55m"
+c_quetrex_v="\033[38;2;168;162;158m"
 c_reset="\033[0m"
 
 icon_dir="📂"
@@ -109,12 +138,32 @@ colored_left="${c_reset}${icon_dir} ${c_path}${display_path}${c_reset}"
 [ -n "$seg_branch" ] && colored_left="${colored_left}   ${c_branch}${branch}${c_reset}"
 colored_left="${colored_left}   ${c_reset}${icon_model} ${c_model}${model}${c_reset}"
 
+# Right-aligned group: the gold word "Quetrex", its version one shade lighter
+# and subordinate, then Claude Code's OWN version last in the existing dim
+# tone, two spaces after the Quetrex group. Either half may be absent; the gap
+# is measured from plain_right, which carries no escapes, because counting
+# ANSI would shove the whole group ~45 columns left.
+plain_right=""
+colored_right=""
+if [ -n "$quetrex_v" ]; then
+  plain_right="Quetrex ${quetrex_v}"
+  colored_right="${c_quetrex}Quetrex ${c_quetrex_v}${quetrex_v}${c_reset}"
+fi
 if [ -n "$seg_version" ]; then
-  version_len=${#seg_version}
-  gap=$(( term_width - plain_len - version_len ))
+  if [ -n "$plain_right" ]; then
+    plain_right="${plain_right}  ${seg_version}"
+    colored_right="${colored_right}  ${c_version}${seg_version}${c_reset}"
+  else
+    plain_right="${seg_version}"
+    colored_right="${c_version}${seg_version}${c_reset}"
+  fi
+fi
+
+if [ -n "$plain_right" ]; then
+  gap=$(( term_width - plain_len - ${#plain_right} ))
   [ "$gap" -lt 1 ] && gap=1
   padding=$(printf '%*s' "$gap" '')
-  printf "%b%s%b%s%b\n" "$colored_left" "$padding" "$c_version" "$seg_version" "$c_reset"
+  printf "%b%s%b%b\n" "$colored_left" "$padding" "$colored_right" "$c_reset"
 else
   printf "%b\n" "$colored_left"
 fi

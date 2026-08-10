@@ -130,7 +130,7 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "bash ~/.claude/statusline-command.sh"
+    "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/statusline-command.sh\""
   },
   "skipDangerousModePermissionPrompt": true,
   "voiceEnabled": true,
