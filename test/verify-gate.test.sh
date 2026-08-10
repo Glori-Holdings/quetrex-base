@@ -900,7 +900,7 @@ if [ -f "$F_H/.quetrex/verify-gate.log" ] && [ ! -L "$F_H/.quetrex/verify-gate.l
 else
   fail "ADV-H: verify-gate.log is still a symlink (or missing)"
 fi
-LOG_MODE_H="$(stat -f '%Lp' "$F_H/.quetrex/verify-gate.log" 2>/dev/null || stat -c '%a' "$F_H/.quetrex/verify-gate.log" 2>/dev/null)"
+LOG_MODE_H="$(stat -c '%a' "$F_H/.quetrex/verify-gate.log" 2>/dev/null || stat -f '%Lp' "$F_H/.quetrex/verify-gate.log" 2>/dev/null)"
 if [ "$LOG_MODE_H" = "600" ]; then
   pass "ADV-H: verify-gate.log is mode 600"
 else
@@ -1144,7 +1144,18 @@ all_mode_600() {  # all_mode_600 <dir> <pattern> -> "1" iff every match is mode 
   for f in "$d"/$pat; do
     [ -f "$f" ] || continue
     n=$((n + 1))
-    mode="$(stat -f '%Lp' "$f" 2>/dev/null || stat -c '%a' "$f" 2>/dev/null)"
+    # ORDER IS LOAD-BEARING: try GNU `stat -c` FIRST, BSD `stat -f` second.
+    # `-f` is a VALID flag on GNU stat too, but means something else entirely
+    # ("show filesystem status", not "custom format for THIS file") — so on
+    # Linux, `stat -f '%Lp' "$f"` does not error, it silently prints a whole
+    # filesystem-info block and exits 0, which means the `||` fallback to the
+    # correct `stat -c '%a'` never fires and $mode is never a real octal mode
+    # (this masked several AC26/ADV-H assertions on Linux CI entirely, hidden
+    # behind an earlier, now-fixed AC20(ii) failure that halted the test
+    # loop before this file ever ran). `stat -c` has no such trap: it is
+    # GNU-only and fails cleanly ("illegal option") on BSD stat, so leading
+    # with it is portable in both directions.
+    mode="$(stat -c '%a' "$f" 2>/dev/null || stat -f '%Lp' "$f" 2>/dev/null)"
     [ "$mode" = "600" ] || ok=0
   done
   [ "$n" -ge 1 ] && [ "$ok" -eq 1 ] && printf '1' || printf '0'
@@ -1195,7 +1206,7 @@ else
   fail "AC26 RUN1: preserved log [$PRESERVED26_1] missing expected failure content"
 fi
 
-MODE26_1="$(stat -f '%Lp' "$PRESERVED26_1" 2>/dev/null || stat -c '%a' "$PRESERVED26_1" 2>/dev/null)"
+MODE26_1="$(stat -c '%a' "$PRESERVED26_1" 2>/dev/null || stat -f '%Lp' "$PRESERVED26_1" 2>/dev/null)"
 if [ "$MODE26_1" = "600" ]; then
   pass "AC26 RUN1: preserved-failure log is mode 600"
 else
@@ -1221,7 +1232,7 @@ if [ "$(grep -c 'QUICKOK' "$PRESERVED26_1" 2>/dev/null)" = "0" ]; then
 else
   fail "AC26 AFTER-RUN2: the green run's output leaked into the preserved-failure log"
 fi
-MODE26_2="$(stat -f '%Lp' "$PRESERVED26_1" 2>/dev/null || stat -c '%a' "$PRESERVED26_1" 2>/dev/null)"
+MODE26_2="$(stat -c '%a' "$PRESERVED26_1" 2>/dev/null || stat -f '%Lp' "$PRESERVED26_1" 2>/dev/null)"
 if [ "$MODE26_2" = "600" ]; then
   pass "AC26 AFTER-RUN2: preserved-failure log is still mode 600"
 else
@@ -1299,7 +1310,7 @@ if [ -f "$FAILLOG26S" ] && [ ! -L "$FAILLOG26S" ]; then
 else
   fail "AC26 SYMLINK: the preserved-failure path is still a symlink (or missing)"
 fi
-MODE26S="$(stat -f '%Lp' "$FAILLOG26S" 2>/dev/null || stat -c '%a' "$FAILLOG26S" 2>/dev/null)"
+MODE26S="$(stat -c '%a' "$FAILLOG26S" 2>/dev/null || stat -f '%Lp' "$FAILLOG26S" 2>/dev/null)"
 if [ "$MODE26S" = "600" ]; then
   pass "AC26 SYMLINK: the preserved-failure path is mode 600"
 else

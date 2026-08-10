@@ -217,9 +217,21 @@ else
   fail "AC20(i): .quetrex/verify.json changed — propose must never write"
 fi
 
-# --- FIXTURE (ii) — OVER-ATTRIBUTION: tsc/eslint/jest, all genuinely
-# exiting 127. After `propose` with NO human confirmation, the real hook
-# must BLOCK on the first genuine failure — never silently skip. ----------
+# --- FIXTURE (ii) — OVER-ATTRIBUTION: three npm scripts that must all
+# genuinely fail to EXECUTE (exit 127, "command not found"), so the real
+# hook is proven to BLOCK on the first genuine failure with NO human
+# confirmation — never silently skip. -------------------------------------
+#
+# The scripts deliberately do NOT invoke tsc/eslint/jest by name. GitHub's
+# hosted ubuntu-latest runner ships a global `tsc` at /usr/local/bin/tsc
+# (confirmed live: `tsc --noEmit` there runs a real TypeScript 7.0.2 CLI and
+# exits 1 on the unrecognized flag/missing tsconfig, not 127 for "not
+# found") — so a fixture that assumes tsc/eslint/jest are ambiently ABSENT
+# is only true on some machines and false on GitHub Actions, which is
+# exactly the divergence that broke this assertion on main (local green,
+# CI red, same commit). A command name that can never collide with a real
+# preinstalled binary makes "genuinely does not execute" -> exit 127 true
+# in EVERY environment, not just the ones happening to lack dev tooling.
 if ! command -v npm >/dev/null 2>&1; then
   echo "SKIP: AC20(ii)/negative-control require npm on PATH (the chain commands are npm scripts) — skipping those checks only"
 else
@@ -229,9 +241,9 @@ else
   cat > "$F20ii/package.json" <<'EOF'
 {
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "lint": "eslint .",
-    "test": "jest"
+    "typecheck": "quetrex-ac20-nonexistent-binary-8f2c1 --noEmit",
+    "lint": "quetrex-ac20-nonexistent-binary-8f2c1 .",
+    "test": "quetrex-ac20-nonexistent-binary-8f2c1"
   }
 }
 EOF
