@@ -202,6 +202,28 @@ else
   pass "negative control: the template's \`{{…}}\` prose form is not mistaken for a placeholder"
 fi
 
+# =============================================================================
+# ASSERTION 4 — {{TITLE}} is under the contract, by name
+# =============================================================================
+# Assertions 1-2 are set comparisons: they guarantee that WHATEVER the template
+# needs is documented and substituted. They are silent, though, about a
+# placeholder being deleted from all three places at once — which is exactly how
+# {{TITLE}} could regress. {{TITLE}} carries the transport/session name the
+# operator reads on his phone (cloud-build-routine.md's prompt now leads with
+# `{{TASK}} — {{TITLE}}`; before that, every concurrent cloud build showed the
+# identical boilerplate first line and was unidentifiable). Pin it by name so
+# removing it fails HERE, loudly, instead of quietly restoring the defect while
+# the set comparison stays green on a smaller set.
+TITLE_MISSING=""
+grep -qF '{{TITLE}}' "$WORK/template.txt"    || TITLE_MISSING="$TITLE_MISSING template-body"
+grep -qF '{{TITLE}}' "$WORK/table.txt"       || TITLE_MISSING="$TITLE_MISSING placeholder-table"
+grep -qF '{{TITLE}}' "$WORK/substituted.txt" || TITLE_MISSING="$TITLE_MISSING task-build-substitution-list"
+if [ -z "$TITLE_MISSING" ]; then
+  pass "{{TITLE}} is present in all three places the contract covers: the template body, the placeholder table, and task-build.md's substitution list"
+else
+  fail "{{TITLE}} is absent from:$TITLE_MISSING — it is the task's short title in the cloud session's first prompt line, i.e. the ONLY thing that distinguishes one running build from another on the operator's phone"
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "placeholder-substitution.test.sh: all checks passed"

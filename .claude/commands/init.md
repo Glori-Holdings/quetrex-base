@@ -943,36 +943,80 @@ agent files into the repo. The confirmed stale removals from step 4c are already
 `git -C "$REPO_ROOT"` so the enforce-branch hook sees the branch rather than blocking on
 `main`.
 
+Stage the arming artifacts — fail loud, never silently:
+
 ```bash
 # Use the project's own prefix — a cloud routine is only guaranteed to be able to push claude/*.
 BRANCH="${BRANCH_PREFIX}quetrex-init-adopt"
 git -C "$REPO_ROOT" checkout -b "$BRANCH" 2>/dev/null || git -C "$REPO_ROOT" checkout "$BRANCH"
 
-# Stage only what this command added/cleaned: the binding, any CLAUDE.md cleanups
-# (step 4), and the project Verification rules created/appended in step 4b. Each
-# `add` is a no-op if that path has nothing new to stage.
-git -C "$REPO_ROOT" add .quetrex/project.json 2>/dev/null || true
-[ -f "$REPO_ROOT/CLAUDE.md" ]        && git -C "$REPO_ROOT" add CLAUDE.md 2>/dev/null || true
-[ -f "$REPO_ROOT/.claude/CLAUDE.md" ] && git -C "$REPO_ROOT" add .claude/CLAUDE.md 2>/dev/null || true
-[ -f "$REPO_ROOT/.claude/settings.json" ] && git -C "$REPO_ROOT" add .claude/settings.json 2>/dev/null || true
-# F3 (CONFIRMED): unlike the lines above, this one is NOT swallowed on
-# failure. .quetrex/* is commonly gitignored wholesale in a target repo, and
-# a future install-time hardening (SEC-2's own remediation) is expected to
-# assert exactly that — which would silently kill the whole requiredEnv
-# mechanism everywhere unless that same hardening also adds
-# `!.quetrex/verify.json` as an exception. If `git add` here ever fails, the
-# human/model running this step needs to see it, not have it disappear
-# behind `|| true` the way every neighboring line still does.
-[ -f "$REPO_ROOT/.quetrex/verify.json" ]  && git -C "$REPO_ROOT" add .quetrex/verify.json
-[ -f "$REPO_ROOT/.worktreeinclude" ]      && git -C "$REPO_ROOT" add .worktreeinclude 2>/dev/null || true
-# The committed engine pin is read by cloud routines from the repo, so it must be
-# committed. `.mcp.json` uses `add -A` on purpose: step 4h now REMOVES the dead
-# quetrex-kanban broker and may delete the file outright, and a `[ -f ]` guard
-# would skip a vanished file — leaving the repair uncommitted, so every teammate
-# and every cloud routine kept the failing MCP server. `add -A <path>` stages the
-# deletion as readily as a modification.
-git -C "$REPO_ROOT" add -A .mcp.json 2>/dev/null || true
+# F4 (CONFIRMED, QDM-4). Every line below used to end in `2>/dev/null || true`,
+# which threw away the diagnostic AND the exit code — so a `git add` that failed
+# staged NOTHING while init went on to report success. That is how
+# Glori-Holdings/quetrex-demo ended up with no `permissions` key in
+# .claude/settings.json at all: step 4e computed the union correctly, this step
+# failed to stage it, nobody was told, and the next unattended cloud build ran the
+# whole pipeline and then STALLED at `gh pr create`, paging the operator on his
+# phone to approve a step that is supposed to be automatic. The documented trigger
+# is a .gitignore that blanket-ignores a path init must commit (`.quetrex/*` is
+# the common one, and a repo that gitignores local Claude settings is the
+# settings.json one): `git add` exits 1 with "The following paths are ignored by
+# one of your .gitignore files" and the whole failure disappears.
+#
+# A silently unarmed repo has NO gates at all, which is strictly worse than a
+# visible error. So every REQUIRED arming artifact is staged through
+# stage_required(), which stops the command and says what to fix. This does not
+# make init brittle: `git add` on an unchanged, already-tracked path is a no-op
+# that exits 0, so a re-run over an already-adopted repo still succeeds.
+stage_required() {  # stage_required <repo-relative-path>
+  git -C "$REPO_ROOT" add -- "$1" && return 0
+  echo "FATAL: /quetrex:init could not stage the required arming artifact '$1'." >&2
+  echo "  The usual cause is a .gitignore rule that covers it (e.g. a blanket '.quetrex/*')." >&2
+  echo "  Add a negation for it ('!$1'), or drop the rule, then re-run /quetrex:init." >&2
+  echo "  NOT continuing: an unstaged arming artifact means this repo has NO gates," >&2
+  echo "  and an unattended cloud build would stall at 'gh pr create' waiting for a human." >&2
+  return 1
+}
 
+# The binding itself — without it nothing resolves this repo to a project.
+stage_required .quetrex/project.json || exit 1
+# Any CLAUDE.md cleanups from step 4 and the Verification rules from step 4b —
+# QA and verify-gate.sh read the chain from here.
+if [ -f "$REPO_ROOT/CLAUDE.md" ]; then
+  stage_required CLAUDE.md || exit 1
+fi
+if [ -f "$REPO_ROOT/.claude/CLAUDE.md" ]; then
+  stage_required .claude/CLAUDE.md || exit 1
+fi
+# The pipeline permissions union from step 4e. THIS is the QDM-4 artifact: a
+# plugin cannot ship permissions.allow, so if this does not get committed the
+# terminal `git push` / `gh pr create` prompt with nobody there to answer.
+if [ -f "$REPO_ROOT/.claude/settings.json" ]; then
+  stage_required .claude/settings.json || exit 1
+fi
+# F3 (CONFIRMED): .quetrex/* is commonly gitignored wholesale in a target repo,
+# and a future install-time hardening (SEC-2's own remediation) is expected to
+# assert exactly that — which would silently kill the whole requiredEnv mechanism
+# everywhere unless that same hardening also adds `!.quetrex/verify.json` as an
+# exception.
+if [ -f "$REPO_ROOT/.quetrex/verify.json" ]; then
+  stage_required .quetrex/verify.json || exit 1
+fi
+# Without this every pipeline developer lands in a worktree with no deps and no
+# env and burns its self-heal budget "fixing" code that was never broken.
+if [ -f "$REPO_ROOT/.worktreeinclude" ]; then
+  stage_required .worktreeinclude || exit 1
+fi
+# NOT required-arming, and deliberately still tolerant: `.mcp.json` may not exist
+# at all, and `add -A` on an absent, never-tracked path is an error rather than a
+# no-op. `add -A` (not a `[ -f ]` guard) is on purpose: step 4h now REMOVES the
+# dead quetrex-kanban broker and may delete the file outright, and a `[ -f ]`
+# guard would skip a vanished file — leaving the repair uncommitted, so every
+# teammate and every cloud routine kept the failing MCP server.
+git -C "$REPO_ROOT" add -A .mcp.json 2>/dev/null || true
+```
+
+```bash
 if git -C "$REPO_ROOT" diff --cached --quiet; then
   echo "Nothing to commit — repo already adopted."
 else
