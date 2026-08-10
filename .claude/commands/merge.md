@@ -168,8 +168,12 @@ git -C "$REPO_ROOT" worktree prune
 
 # d. Delete the unit branch locally, and the gates branch everywhere — its evidence is now
 #    committed history on the base branch, so keeping it just clutters the ref list.
+#    The remote delete spells the branch out (`$BRANCH_PREFIX$TASK-gates`, the
+#    same value as $GATES_BRANCH) because deny-guard.sh only permits a remote
+#    ref delete in the disposable quetrex-spec/* and *-gates namespaces, and a
+#    PreToolUse hook sees the command before the shell expands "$GATES_BRANCH".
 git -C "$REPO_ROOT" branch -D "$PR_HEAD" 2>/dev/null || true
-git -C "$REPO_ROOT" push -q origin --delete "$GATES_BRANCH" 2>/dev/null || true
+git -C "$REPO_ROOT" push -q origin --delete "$BRANCH_PREFIX$TASK-gates" 2>/dev/null || true
 git -C "$REPO_ROOT" branch -D "$GATES_BRANCH" 2>/dev/null || true
 
 # e. The fetched artifacts described a branch that no longer exists. Leaving them behind is

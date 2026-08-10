@@ -493,6 +493,25 @@ if [ -n "$CHECK8_SCRIPT" ]; then
   else
     fail "AC-D4: a repo with no .claude/settings.json produced no actionable ✗ (out: [$OUT_D4])"
   fi
+
+  # --- AC-D5: the fix line must not understate what running init commits ----
+  # Check 8 diagnoses exactly two grants, but the remediation it prints sends
+  # the operator to /quetrex:init, whose step 4e unions TWELVE entries into the
+  # repo's own committed settings — including Edit(/**), Bash(git commit:*),
+  # Bash(jq:*) and Bash(mkdir:*). Describing that as "it only ever adds" and
+  # nothing more understates the delta the operator is accepting on a check
+  # whose whole job is to be read and acted on. State the scope.
+  #
+  # NOTE the deliberate omission: the fix line must NOT re-list the diagnosed
+  # pair by name, because AC-D3 above requires the ✗ output to name only the
+  # grants genuinely missing. Broader scope, not a longer list.
+  if printf '%s' "$OUT_D1" | grep -qF 'Edit(/**)' \
+     && printf '%s' "$OUT_D1" | grep -qF '4e' \
+     && printf '%s' "$OUT_D1" | grep -qiE 'full|all|12|twelve'; then
+    pass "AC-D5: the Check 8 fix line discloses that /quetrex:init writes the FULL pipeline grant set (naming Edit(/**) and pointing at step 4e), not just the two grants it diagnosed"
+  else
+    fail "AC-D5: the Check 8 fix line understates /quetrex:init — it diagnoses two grants and then sends the operator to a step that commits twelve, including Edit(/**), Bash(git commit:*), Bash(jq:*) and Bash(mkdir:*). Out: [$OUT_D1]"
+  fi
 fi
 
 echo

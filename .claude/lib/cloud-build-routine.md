@@ -15,7 +15,7 @@ it.
 | Placeholder | Filled with |
 |---|---|
 | `{{TASK}}` | the kanban task id (`SMA-1`) |
-| `{{TITLE}}` | the task's short title, truncated to ~50 chars + `…` if longer |
+| `{{TITLE}}` | the task's short title, mechanically sanitized by task-build.md — one line, no control characters, no backticks, no double-brace sequences, hard-truncated to 50 chars + `…` |
 | `{{REPO_URL}}` | the repo's `https://` clone URL |
 | `{{SPEC_BRANCH}}` | the helper branch carrying the approved spec, `quetrex-spec/{{TASK}}` |
 | `{{BASE_BRANCH}}` | the branch the resulting PR targets (`main`, or an epic's integration branch) |
@@ -34,8 +34,15 @@ build runs. So the prompt now LEADS with `{{TASK}} — {{TITLE}}` on a line of i
 
 - `{{TASK}}` is the **first token** of the whole prompt. It is never truncated and never
   dropped — it is the one token the operator keys off.
-- `{{TITLE}}` is truncated to ~50 characters plus a trailing `…` if longer, the same rule
-  `.claude/commands/task-build.md` already applies to the routine's `name` field.
+- `{{TITLE}}` is the ONE value here that comes from outside — anyone with write access to
+  the board types the task title — and it lands on the first line, above the briefing, in the
+  instruction channel of a session that holds Bash and push credentials. So task-build.md
+  sanitizes it **in code** before substituting: CR/LF and every other control character
+  collapse to spaces, backticks and double-brace sequences are dropped, and the result is
+  hard-truncated to 50 characters plus a trailing `…`. A two-line title can therefore never
+  deliver its second line here as its own top-level instruction. This is enforced by
+  `test/placeholder-substitution.test.sh` ASSERTION 5, which executes the shipped sanitizer
+  against a hostile title — it is not a rule the dispatching session is trusted to remember.
 - The zero-context briefing that follows is unchanged and must stay — the session genuinely
   has no context and needs it. This is a prepend, not a rewrite.
 
@@ -176,8 +183,14 @@ Push it to a dedicated branch, the same way the spec branch delivered the plan h
     # `push -f` here dies the moment a task is built twice and the gates branch
     # already exists. Delete-then-push needs no remote-tracking ref (this branch
     # was just created locally, so `--force-with-lease` would fail "stale info").
+    # The delete SPELLS THE BRANCH NAME OUT rather than passing the variable:
+    # that same deny-guard.sh treats a remote ref delete as catastrophic and
+    # permits it only in the disposable quetrex-spec/* and *-gates namespaces.
+    # A PreToolUse hook is handed the command BEFORE the shell expands it, so a
+    # bare variable is opaque to that rule and the delete is denied. Same value,
+    # written where the guard can read the namespace.
     if git ls-remote --exit-code --heads origin "$GATES_BRANCH" >/dev/null 2>&1; then
-      git push --quiet origin --delete "$GATES_BRANCH" || exit 1
+      git push --quiet origin --delete "{{BRANCH_PREFIX}}{{TASK}}-gates" || exit 1
     fi
     git push --quiet origin "$GATES_BRANCH" || exit 1
 
