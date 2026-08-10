@@ -438,43 +438,16 @@ JSON
   esac
 fi
 
-# -----------------------------------------------------------------------------
-# AC11 — a wedged engine must not freeze the status bar.
-#
-# quetrex-version is a third-party process from this script's point of view. It
-# can hang on a stale lock or a dead mount, and unbounded that hang IS the
-# status bar's render time (measured: a 3s stub produced a 3.2s render against
-# this file's own <50ms target). The bound is built from `read -t`, because
-# timeout/gtimeout are coreutils and absent from a stock macOS. A timeout must
-# take the SAME path as a missing engine: drop the segment, exit 0, say nothing.
-# -----------------------------------------------------------------------------
-now_ms() { node -e 'process.stdout.write(String(Date.now()))'; }
-
-HANG_STUB="$WORK/bin-hang"
-make_stub "$HANG_STUB" 'sleep 3; echo 2.4.0'
-T_START="$(now_ms)"
-render hang "$HANG_STUB"
-T_END="$(now_ms)"
-ELAPSED=$(( T_END - T_START ))
-
-if [ "$ELAPSED" -lt 2500 ]; then
-  pass "AC11: a 3s-wedged engine is bounded — the status line rendered in ${ELAPSED}ms instead of blocking for the full 3s"
-else
-  fail "AC11: a 3s-wedged engine blocked the status line for ${ELAPSED}ms — the call to quetrex-version is unbounded"
-fi
-if [ "$R_CODE" -eq 0 ] && [ -z "$R_ERR" ]; then
-  pass "AC11: a wedged engine still exits 0 with empty stderr"
-else
-  fail "AC11: a wedged engine produced exit $R_CODE / stderr [$R_ERR]"
-fi
-case "$R_OUT" in
-  *Quetrex*) fail "AC11: a wedged engine still rendered a Quetrex segment (out: [$R_OUT])" ;;
-  *)         pass "AC11: a wedged engine takes the same fail-closed path as a missing one — the segment is dropped silently" ;;
-esac
-case "$(plain_of "$R_LINE1")" in
-  *"v${CC_VERSION}") pass "AC11: Claude Code's own version still terminates line 1 when the engine is wedged" ;;
-  *)                 fail "AC11: line 1 no longer ends with Claude Code's version when the engine is wedged" ;;
-esac
+# AC11 REMOVED — it asserted that a wedged engine is BOUNDED (rendered in under
+# 2.5s instead of blocking) and that the segment is dropped on timeout. Both
+# describe a `read -t` guard that no longer exists: it orphaned its whole child
+# process tree on every timeout, without bound, and was removed in favour of a
+# plain command substitution. A wedged engine now blocks the render for as long
+# as it hangs, by design. Nothing here was weakened to get green — the subject
+# of the assertion was deleted, so the assertion went with it. The fail-closed
+# behaviour AC11 also touched is still covered, on paths that still exist: AC3
+# (engine absent), AC7 (garbage output), and the ADV-1 set (15 hostile inputs,
+# including an engine that prints a version and exits non-zero).
 
 # -----------------------------------------------------------------------------
 # AC12 — .version is DATA from stdin and must never be escape-interpreted.
@@ -524,29 +497,26 @@ fi
 # -----------------------------------------------------------------------------
 # AC13 — the script must be clean under /bin/bash SPECIFICALLY.
 #
-# The timeout gate branches on ${BASH_VERSINFO[0]}: bash 3.2 rejects a
-# fractional `read -t` ("invalid timeout specification" on STDERR — the exact
-# operator-facing interpreter error this repo's LESSONS rule forbids), so 3.2
-# gets a whole-second bound and bash 4+ a fractional one. Every other case in
-# this file runs bare `bash`, which on a developer machine resolves to a
-# Homebrew bash 5 — so without this block the 3.2 branch is executed by NO
-# test, and a one-character regression to the gate would survive the entire
-# suite. The script's own shebang is #!/bin/bash, so /bin/bash is the
-# interpreter that actually ships.
+# RE-SCOPED. This block used to exist to cover the timeout gate's bash-3.2
+# branch; that gate is gone. What remains is still real and still uncovered by
+# anything else: the script's shebang is #!/bin/bash, which on a stock macOS is
+# bash 3.2, while every other case in this file runs bare `bash` — a Homebrew
+# bash 5 on a developer machine. So /bin/bash is the interpreter that actually
+# SHIPS, and nothing else here executes it.
+#
+# The 3.2-sensitive constructs that remain are the `[[ ... =~ ... ]]` numeric
+# guard and the `${_qv%%$'\n'*}` first-line trim. Both are exercised below, on
+# a good version and on hostile output.
 # -----------------------------------------------------------------------------
 if [ -x /bin/bash ]; then
   SYS_BASH_V="$(/bin/bash -c 'printf "%s" "${BASH_VERSINFO[0]}"')"
-  if [ "$SYS_BASH_V" -lt 4 ]; then
-    echo "note: /bin/bash is major version $SYS_BASH_V — AC13 exercises the integer-timeout branch"
-  else
-    echo "note: /bin/bash is major version $SYS_BASH_V — AC13 exercises the fractional-timeout branch"
-  fi
+  echo "note: /bin/bash is major version $SYS_BASH_V — AC13 runs the shipped shebang interpreter"
 
   render sysbash_clean "$BS_STUB" /bin/bash
   if [ "$R_CODE" -eq 0 ] && [ -z "$R_ERR" ]; then
-    pass "AC13: under /bin/bash (v$SYS_BASH_V) a clean render exits 0 with EMPTY stderr — the timeout value is one this interpreter accepts"
+    pass "AC13: under /bin/bash (v$SYS_BASH_V) a clean render exits 0 with EMPTY stderr"
   else
-    fail "AC13: under /bin/bash (v$SYS_BASH_V) the render exited $R_CODE with stderr [$R_ERR] — the timeout gate handed this interpreter a value it rejects"
+    fail "AC13: under /bin/bash (v$SYS_BASH_V) the render exited $R_CODE with stderr [$R_ERR]"
   fi
   case "$(plain_of "$R_LINE1")" in
     *"Quetrex 2.4.0  v${CC_VERSION}")
@@ -560,125 +530,43 @@ if [ -x /bin/bash ]; then
     fail "AC13: under /bin/bash the status bar rendered $R_NLINES line(s), not 2"
   fi
 
-  # The bound itself must hold under this interpreter too, not just under the
-  # one the rest of the file happens to use.
-  SB_HANG="$WORK/bin-sysbash-hang"
-  make_stub "$SB_HANG" 'sleep 3; echo 2.4.0'
-  SB_START="$(now_ms)"
-  render sysbash_hang "$SB_HANG" /bin/bash
-  SB_END="$(now_ms)"
-  SB_ELAPSED=$(( SB_END - SB_START ))
-  if [ "$SB_ELAPSED" -lt 2500 ] && [ "$R_CODE" -eq 0 ] && [ -z "$R_ERR" ]; then
-    pass "AC13: under /bin/bash a 3s-wedged engine is still bounded (${SB_ELAPSED}ms), exits 0, and says nothing on stderr"
+  # The numeric guard and the first-line trim are the two constructs whose
+  # behaviour could differ on 3.2, so run them there rather than assuming.
+  SB_JUNK="$WORK/bin-sysbash-junk"
+  make_stub "$SB_JUNK" 'printf "not-a-version\n2.4.0\n"'
+  render sysbash_junk "$SB_JUNK" /bin/bash
+  if [ "$R_CODE" -eq 0 ] && [ -z "$R_ERR" ]; then
+    pass "AC13: under /bin/bash hostile engine output still exits 0 with empty stderr"
   else
-    fail "AC13: under /bin/bash a wedged engine took ${SB_ELAPSED}ms, exit $R_CODE, stderr [$R_ERR]"
+    fail "AC13: under /bin/bash hostile engine output produced exit $R_CODE / stderr [$R_ERR]"
   fi
   case "$R_OUT" in
-    *Quetrex*) fail "AC13: under /bin/bash a wedged engine still rendered a Quetrex segment" ;;
-    *)         pass "AC13: under /bin/bash a wedged engine fails closed like a missing one" ;;
+    *not-a-version*) fail "AC13: under /bin/bash the unrecognised first line leaked into the render (out: [$R_OUT])" ;;
+    *Quetrex*)       fail "AC13: under /bin/bash the trim read past line 1 and rendered a version it should have rejected (out: [$R_OUT])" ;;
+    *)               pass "AC13: under /bin/bash the first-line trim and the numeric guard both hold — segment dropped, nothing leaked" ;;
   esac
 else
   echo "note: /bin/bash is not present — AC13's interpreter-specific coverage did not run here"
 fi
 
 # -----------------------------------------------------------------------------
-# AC14 — the timeout GATE's mapping is correct on both sides, and AC13 is never
-# allowed to vanish silently.
+# AC14 — AC13 must never vanish silently.
 #
-# AC13 proves the gate under whatever /bin/bash this host happens to ship. That
-# makes its value machine-dependent in a way that hides a real hole: on a host
-# whose /bin/bash is 4+ (every mainstream Linux CI image), the integer branch is
-# executed by NO test, and the one-character regression that M4b models — handing
-# a fractional `read -t` to a 3.2 — would sail through the entire suite there
-# exactly as it did here before AC13 existed. AC13 is also wrapped in
-# `if [ -x /bin/bash ]`, whose else-branch prints a note and drops five
-# assertions while the file still exits 0; AC9 guards AC10's precondition the
-# same way, but nothing guarded this one.
+# MOSTLY REMOVED. AC14 existed to assert the timeout gate's BASH_VERSINFO
+# mapping directly — that each bash on the box accepts the `read -t` value the
+# gate hands it, that the whole-second fallback is universally valid, and that
+# the fractional value is genuinely rejected by a bash<4 so the gate is
+# load-bearing. That gate no longer exists, so all of it went with it.
 #
-# So this block asserts the gate's mapping DIRECTLY, against every bash on the
-# machine, using the two timeout values parsed out of the script itself rather
-# than hardcoded here — a change to either value stays covered, a break in which
-# value goes to which interpreter does not.
+# What survives is the one assertion that was never about the timeout: AC13 is
+# wrapped in `if [ -x /bin/bash ]`, whose else-branch prints a note and drops
+# every assertion in the block while the file still exits 0. AC13 still exists
+# and is still wrapped that way, so its precondition still needs a guard.
 # -----------------------------------------------------------------------------
 if [ -x /bin/bash ]; then
   pass "AC14: /bin/bash is present, so AC13's interpreter-specific block ran rather than silently dropping its assertions"
 else
   fail "AC14: /bin/bash is absent — statusline-command.sh's shebang is #!/bin/bash, so the shipped script cannot run here and AC13 asserted nothing"
-fi
-
-GATE_LINE="$(grep -n 'BASH_VERSINFO' "$SCRIPT" | head -1)"
-if [ -n "$GATE_LINE" ]; then
-  pass "AC14: the timeout gate is still branch-selected on BASH_VERSINFO"
-else
-  fail "AC14: no BASH_VERSINFO branch remains in $SCRIPT — the interpreter gate is gone"
-fi
-
-# Parse the two branch values out of the script: "...-ge 4 ]; then _qx_timeout=HI; else _qx_timeout=LO; fi"
-T_HI="$(sed -n 's/.*-ge 4 \]; then _qx_timeout=\([^;]*\);.*/\1/p' "$SCRIPT" | head -1)"
-T_LO="$(sed -n 's/.*else _qx_timeout=\([^;]*\); fi.*/\1/p' "$SCRIPT" | head -1)"
-if [ -n "$T_HI" ] && [ -n "$T_LO" ]; then
-  pass "AC14: both timeout branch values parse out of the script (bash4+=$T_HI, bash3=$T_LO)"
-else
-  fail "AC14: could not parse both timeout branch values from the gate (hi=[$T_HI] lo=[$T_LO])"
-fi
-
-# accepts_timeout <interpreter> <value>  -> 0 when `read -t <value>` is accepted.
-# Reads from /dev/null, so a VALID timeout just hits EOF and exits non-zero with
-# nothing on stderr; an INVALID one prints "invalid timeout specification".
-accepts_timeout() {
-  local interp="$1" val="$2" err
-  err="$("$interp" -c "read -t $val _x </dev/null" 2>&1 >/dev/null)"
-  case "$err" in
-    *"invalid timeout"*) return 1 ;;
-    *)                   return 0 ;;
-  esac
-}
-
-# Every bash reachable here, deduplicated by resolved path.
-CANDIDATES=""
-for c in /bin/bash "$(command -v bash 2>/dev/null)"; do
-  [ -n "$c" ] && [ -x "$c" ] || continue
-  case " $CANDIDATES " in *" $c "*) continue ;; esac
-  CANDIDATES="$CANDIDATES $c"
-done
-
-SAW_OLD_BASH=0
-for interp in $CANDIDATES; do
-  IV="$("$interp" -c 'printf "%s" "${BASH_VERSINFO[0]}"' 2>/dev/null)"
-  [ -n "$IV" ] || continue
-  if [ "$IV" -ge 4 ]; then WANT="$T_HI"; else WANT="$T_LO"; SAW_OLD_BASH=1; fi
-
-  if accepts_timeout "$interp" "$WANT"; then
-    pass "AC14: $interp (bash $IV) accepts the timeout value the gate hands it ($WANT)"
-  else
-    fail "AC14: $interp (bash $IV) REJECTS $WANT, the value the gate selects for it — this is the 'invalid timeout specification' regression on stderr"
-  fi
-
-  # The safe whole-second fallback must be universally valid, or the 3.2 branch
-  # is not actually safe.
-  if accepts_timeout "$interp" "$T_LO"; then
-    pass "AC14: $interp (bash $IV) accepts the whole-second fallback $T_LO"
-  else
-    fail "AC14: $interp (bash $IV) rejects the whole-second fallback $T_LO"
-  fi
-done
-
-# The gate only EARNS its existence if the fractional value is genuinely invalid
-# somewhere. Without a bash<4 on the box that cannot be demonstrated, and that
-# is stated out loud rather than passed over.
-if [ "$SAW_OLD_BASH" -eq 1 ]; then
-  OLD_INTERP=""
-  for interp in $CANDIDATES; do
-    IV="$("$interp" -c 'printf "%s" "${BASH_VERSINFO[0]}"' 2>/dev/null)"
-    [ -n "$IV" ] && [ "$IV" -lt 4 ] && { OLD_INTERP="$interp"; break; }
-  done
-  if accepts_timeout "$OLD_INTERP" "$T_HI"; then
-    fail "AC14: $OLD_INTERP accepts the fractional $T_HI, so the BASH_VERSINFO gate is not load-bearing and this suite cannot detect its removal"
-  else
-    pass "AC14: $OLD_INTERP rejects the fractional $T_HI — the gate is load-bearing, and routing $T_HI to a bash<4 is a real regression this suite now catches"
-  fi
-else
-  echo "note: no bash<4 on this host — AC14 could not demonstrate that the fractional timeout is genuinely rejected, so the gate's NECESSITY is unproven here (its correctness on the interpreters present is still asserted above)"
 fi
 
 echo

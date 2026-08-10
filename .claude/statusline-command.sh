@@ -90,36 +90,30 @@ fi
 # "command not found", an interpreter error, or a half-rendered placeholder,
 # because the operator reads that as a failed build when nothing failed.
 #
-# The call is BOUNDED. quetrex-version is a third-party process from here: a
-# different release train, possibly a wrapper, possibly wedged on a stale lock
-# or a dead mount. Unbounded, a hung engine freezes the whole status bar for as
-# long as it hangs (a 3s stub measured a 3.2s render against this file's <50ms
-# target). `timeout`/`gtimeout` are coreutils and are NOT present on a stock
-# macOS, so the bound is built from `read -t` on a pipe instead — no extra
-# dependency, and no measurable cost on the fast path.
+# The call is a PLAIN command substitution, deliberately UNBOUNDED. A wedged
+# engine therefore blocks the render for as long as it hangs. That is a known,
+# accepted tradeoff, and it is the lesser of two evils:
 #
-# The subshell prints the EXIT STATUS first and the output second, because both
-# matter and a plain pipe would throw the status away: an engine that prints a
-# usable version and then exits non-zero is reporting that the number is not
-# trustworthy, so that case must fail closed exactly like a crash. Reading a
-# single line also gives the "first line only" trim for free — stray banner
-# output can never break line 1.
+# A `read -t` bound was tried and reverted. `timeout`/`gtimeout` are coreutils
+# and absent from a stock macOS, so the bound had to be built from a process
+# substitution plus a timed read — and `exec 3<&-` closes only the READ end.
+# The writer is never signalled, so every timed-out render orphaned its whole
+# child tree (the substitution subshell, the engine, and the engine's own
+# child). Measured against a permanently hung engine: 10 renders left 30 live
+# processes that never drained, growing without bound on every prompt until the
+# uid could no longer fork. Reaping them properly is not a one-liner either —
+# process substitution does not set `$!` on bash 3.2 (this file's shebang is
+# #!/bin/bash, which IS 3.2 on stock macOS), and killing the subshell alone
+# leaves the engine and its child alive, so it needs process-group handling.
+# That is far too much machinery for a status bar, and a status bar that can
+# exhaust the process table is strictly worse than one that renders slowly.
 #
-# bash 3.2 (stock macOS) rejects a fractional `read -t`, so the bound is one
-# whole second there and a few hundred ms on bash 4+. Either way it is bounded.
-if [ "${BASH_VERSINFO[0]:-3}" -ge 4 ]; then _qx_timeout=0.4; else _qx_timeout=1; fi
+# So: a slow render under a wedged engine is accepted, and the fast path (the
+# only path that happens in practice) stays a single fork.
 quetrex_v=""
 _qv=""
-_qrc=1
-exec 3< <( _o="$(quetrex-version --plain 2>/dev/null)"; _r=$?; printf '%s\n%s\n' "$_r" "$_o" )
-if IFS= read -t "$_qx_timeout" -r _qrc <&3; then
-  IFS= read -t "$_qx_timeout" -r _qv <&3 || _qv=""
-else
-  _qrc=1   # timed out — treat a wedged engine exactly like a missing one
-fi
-exec 3<&-
-
-if [ "$_qrc" = "0" ]; then
+if _qv="$(quetrex-version --plain 2>/dev/null)"; then
+  _qv="${_qv%%$'\n'*}"   # first line only — never let stray output break line 1
   # Anything that is not a bare 1-, 2- or 3-component numeric version is
   # treated as no answer at all rather than rendered verbatim.
   if [[ "$_qv" =~ ^[0-9]+(\.[0-9]+)?(\.[0-9]+)?$ ]]; then

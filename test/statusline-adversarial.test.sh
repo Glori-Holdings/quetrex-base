@@ -367,10 +367,16 @@ if grep -qE '(^|[^0-9])[0-9]+\.[0-9]+\.[0-9]+([^0-9]|$)' "$SCRIPT"; then
 else
   pass "ADV-8: statusline-command.sh contains no literal x.y.z version — nothing is pinned"
 fi
-if grep -qE 'quetrex-version[[:space:]]+--plain' "$SCRIPT"; then
-  pass "ADV-8: the version is obtained at runtime from \`quetrex-version --plain\`"
+# Comments stripped BEFORE searching, same as the plugin.json check below. This
+# assertion used to grep the raw file, so it reported ok even when the entire
+# engine invocation was commented out — the prose describing the call satisfied
+# the assertion about the call. A SAYS assertion must never be allowed to stand
+# in for a DOES one; behaviour kills that mutant, but this should not have been
+# the thing that failed to.
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE 'quetrex-version[[:space:]]+--plain'; then
+  pass "ADV-8: the version is obtained at runtime from \`quetrex-version --plain\` (comment lines excluded before searching)"
 else
-  fail "ADV-8: statusline-command.sh no longer reads the version from \`quetrex-version --plain\`"
+  fail "ADV-8: statusline-command.sh no longer reads the version from \`quetrex-version --plain\` in executable code"
 fi
 # STRIP COMMENTS FIRST, then search — never `grep -q ... | grep`. `grep -q` is
 # quiet by definition: it writes zero bytes, so a downstream grep reads an empty
