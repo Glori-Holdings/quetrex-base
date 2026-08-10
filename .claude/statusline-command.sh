@@ -78,6 +78,55 @@ else
   indicator=""
 fi
 
+# --- 4.5. Quetrex engine version ---
+# Quetrex pins no version anywhere: a pinned enabledPlugins entry makes the
+# plugin count as DISABLED for dependency resolution and the whole /quetrex:*
+# command layer stops loading. Config therefore carries no version, and this
+# status bar is the ONLY place the running engine is ever named — read at
+# runtime, never hardcoded and never baked in from plugin.json.
+#
+# quetrex-version exits non-zero when no engine is installed. In that case the
+# Quetrex half is omitted ENTIRELY: a status script must never surface a
+# "command not found", an interpreter error, or a half-rendered placeholder,
+# because the operator reads that as a failed build when nothing failed.
+#
+# The call is a PLAIN command substitution, deliberately UNBOUNDED. A wedged
+# engine therefore blocks the render for as long as it hangs. That is a known,
+# accepted tradeoff, and it is the lesser of two evils:
+#
+# A `read -t` bound was tried and reverted. `timeout`/`gtimeout` are coreutils
+# and absent from a stock macOS, so the bound had to be built from a process
+# substitution plus a timed read — and `exec 3<&-` closes only the READ end.
+# The writer is never signalled, so every timed-out render orphaned its whole
+# child tree (the substitution subshell, the engine, and the engine's own
+# child). Measured against a permanently hung engine: 10 renders left 30 live
+# processes that never drained, growing without bound on every prompt until the
+# uid could no longer fork. Reaping them properly is not a one-liner either —
+# process substitution does not set `$!` on bash 3.2 (this file's shebang is
+# #!/bin/bash, which IS 3.2 on stock macOS), and killing the subshell alone
+# leaves the engine and its child alive, so it needs process-group handling.
+# That is far too much machinery for a status bar, and a status bar that can
+# exhaust the process table is strictly worse than one that renders slowly.
+#
+# So: a slow render under a wedged engine is accepted, and the fast path (the
+# only path that happens in practice) stays a single fork.
+quetrex_v=""
+_qv=""
+if _qv="$(quetrex-version --plain 2>/dev/null)"; then
+  _qv="${_qv%%$'\n'*}"   # first line only — never let stray output break line 1
+  # Anything that is not a bare 1-, 2- or 3-component numeric version is
+  # treated as no answer at all rather than rendered verbatim.
+  if [[ "$_qv" =~ ^[0-9]+(\.[0-9]+)?(\.[0-9]+)?$ ]]; then
+    # ALWAYS three components. A bare "2.4" reads as a truncated version,
+    # which is exactly the confusion this segment exists to remove.
+    case "$_qv" in
+      *.*.*) quetrex_v="$_qv"       ;;
+      *.*)   quetrex_v="${_qv}.0"   ;;
+      *)     quetrex_v="${_qv}.0.0" ;;
+    esac
+  fi
+fi
+
 # --- 5. Terminal width ---
 term_width=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
 
@@ -86,6 +135,8 @@ c_path="\033[38;2;217;119;87m"
 c_branch="\033[38;2;77;182;172m"
 c_model="\033[38;2;120;113;108m"
 c_version="\033[38;2;68;64;60m"
+c_quetrex="\033[38;2;212;175;55m"
+c_quetrex_v="\033[38;2;168;162;158m"
 c_reset="\033[0m"
 
 icon_dir="📂"
@@ -109,12 +160,41 @@ colored_left="${c_reset}${icon_dir} ${c_path}${display_path}${c_reset}"
 [ -n "$seg_branch" ] && colored_left="${colored_left}   ${c_branch}${branch}${c_reset}"
 colored_left="${colored_left}   ${c_reset}${icon_model} ${c_model}${model}${c_reset}"
 
+# Right-aligned group: the gold word "Quetrex", its version one shade lighter
+# and subordinate, then Claude Code's OWN version last in the existing dim
+# tone, two spaces after the Quetrex group. Either half may be absent; the gap
+# is measured from plain_right, which carries no escapes, because counting
+# ANSI would shove the whole group ~45 columns left.
+#
+# seg_version is STDIN-SUPPLIED (the .version field of the status JSON) and so
+# is kept out of every %b argument and passed on its own %s, exactly as it was
+# before the Quetrex group existed. %b interprets backslash escapes, and a
+# `\c` in a %b argument terminates printf's output outright — it would swallow
+# line 1's newline and weld the context bar onto line 1, breaking the two-line
+# invariant this file guarantees. right_prefix therefore carries only our OWN
+# colour literals plus quetrex_v, which the numeric guard above has already
+# proven contains nothing but digits and dots.
+plain_right=""
+right_prefix=""
+if [ -n "$quetrex_v" ]; then
+  plain_right="Quetrex ${quetrex_v}"
+  right_prefix="${c_quetrex}Quetrex ${c_quetrex_v}${quetrex_v}${c_reset}"
+fi
 if [ -n "$seg_version" ]; then
-  version_len=${#seg_version}
-  gap=$(( term_width - plain_len - version_len ))
+  if [ -n "$plain_right" ]; then
+    plain_right="${plain_right}  ${seg_version}"
+    right_prefix="${right_prefix}  ${c_version}"
+  else
+    plain_right="${seg_version}"
+    right_prefix="${c_version}"
+  fi
+fi
+
+if [ -n "$plain_right" ]; then
+  gap=$(( term_width - plain_len - ${#plain_right} ))
   [ "$gap" -lt 1 ] && gap=1
   padding=$(printf '%*s' "$gap" '')
-  printf "%b%s%b%s%b\n" "$colored_left" "$padding" "$c_version" "$seg_version" "$c_reset"
+  printf "%b%s%b%s%b\n" "$colored_left" "$padding" "$right_prefix" "$seg_version" "$c_reset"
 else
   printf "%b\n" "$colored_left"
 fi
