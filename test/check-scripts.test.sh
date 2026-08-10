@@ -151,6 +151,27 @@ else
   fail "check-json.sh: expected a clean green pass after fixing both files, got exit $J_GREEN_CODE (out: [$J_GREEN_OUT])"
 fi
 
+# =============================================================================
+# A bad [root] must fail loudly, never silently fall back to `cd`'s failure
+# leaving the process in the CURRENT directory — which would then lint/
+# parse the REAL repo tree and report "ok", having validated the wrong
+# thing entirely while claiming to have checked the fixture.
+# =============================================================================
+BADROOT="$TMPROOT/this-root-does-not-exist-xyz"
+SH_BADROOT_OUT="$(bash "$CHECK_SH" "$BADROOT" 2>&1)"; SH_BADROOT_CODE=$?
+if [ "$SH_BADROOT_CODE" -eq 1 ] && printf '%s' "$SH_BADROOT_OUT" | grep -qF 'NOT OK - check:sh: cannot cd to root'; then
+  pass "check-sh.sh: a nonexistent root fails loudly instead of silently linting the current directory"
+else
+  fail "check-sh.sh: expected exit 1 naming the bad root, got exit $SH_BADROOT_CODE (out: [$SH_BADROOT_OUT])"
+fi
+
+J_BADROOT_OUT="$(bash "$CHECK_JSON" "$BADROOT" 2>&1)"; J_BADROOT_CODE=$?
+if [ "$J_BADROOT_CODE" -eq 1 ] && printf '%s' "$J_BADROOT_OUT" | grep -qF 'NOT OK - check:json: cannot cd to root'; then
+  pass "check-json.sh: a nonexistent root fails loudly instead of silently checking the current directory"
+else
+  fail "check-json.sh: expected exit 1 naming the bad root, got exit $J_BADROOT_CODE (out: [$J_BADROOT_OUT])"
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "check-scripts.test.sh: all checks passed"

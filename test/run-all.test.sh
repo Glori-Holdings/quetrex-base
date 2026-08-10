@@ -44,6 +44,7 @@ mkdir -p "$DIR"
 cat > "$DIR/unitA.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "ok - A1 marker-unitA"
+echo "unitA.sh: all checks passed"
 exit 0
 EOF
 
@@ -103,6 +104,7 @@ EOF
 cat > "$DIR/z_unit_after_failures.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "ok - Z1 marker-zunit-still-ran"
+echo "z_unit_after_failures.sh: all checks passed"
 exit 0
 EOF
 
@@ -116,6 +118,16 @@ chmod +x "$DIR"/*.sh
 # checks by accident of fixture ordering.
 # =============================================================================
 OLD_OUT="$(cd "$DIR" && { for f in *.sh; do [ -f "$f" ] || continue; bash "$f" || exit 1; done; } 2>&1)"
+# POSITIVE ANCHOR FIRST: prove the old-pattern subshell actually executed
+# something (unitB's marker, the file it stops on) before trusting z_unit's
+# ABSENCE as meaningful. Without this, the absence check alone would also
+# pass against a subshell that ran nothing at all (e.g. a typo'd $DIR, or
+# the fixture files failing to get created) — a vacuous negative control.
+if printf '%s' "$OLD_OUT" | grep -q 'marker-unitB'; then
+  pass "NEGATIVE CONTROL: the OLD pattern's subshell genuinely ran unitB (positive anchor — the absence check below is not vacuous)"
+else
+  fail "NEGATIVE CONTROL: the OLD pattern's subshell never even reached unitB — the fixture isn't exercising anything, so the absence check below would be meaningless (out: [$OLD_OUT])"
+fi
 if ! printf '%s' "$OLD_OUT" | grep -q 'marker-zunit-still-ran'; then
   pass "NEGATIVE CONTROL: the OLD for-loop pattern (npm test's prior shape) never reaches z_unit_after_failures.sh — reproduces the real masking bug on this fixture"
 else
@@ -210,6 +222,7 @@ mkdir -p "$DIR_GREEN"
 cat > "$DIR_GREEN/onlyunit.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "ok - only assertion"
+echo "onlyunit.sh: all checks passed"
 exit 0
 EOF
 chmod +x "$DIR_GREEN/onlyunit.sh"
@@ -249,6 +262,7 @@ EOF
 cat > "$DIR_JS/shellunit.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "ok - marker-shellunit-ran-despite-js-crash"
+echo "shellunit.sh: all checks passed"
 exit 0
 EOF
 chmod +x "$DIR_JS/shellunit.sh"
@@ -269,6 +283,149 @@ else
   else
     fail "expected exit 1 when plugin.test.js crashes, got $JS_CODE"
   fi
+fi
+
+# =============================================================================
+# ZERO UNITS MUST NEVER BE GREEN. Without this guard, an empty/missing/
+# renamed test directory silently tallies 0/0/0 and exits 0 — a suite that
+# checked nothing, reported as passing, on the exact check ("verify chain")
+# that's a REQUIRED status check under branch protection. Mirrors
+# test/lib/check-sh.sh's own "matched 0 shell files" guard and CI's own
+# "An empty chain is not a green chain" (verify.yml). Checked against BOTH
+# an empty existing directory and a directory that doesn't exist, AND
+# specifically against bash 3.2 (stock macOS /bin/bash — the very
+# compatibility this file's header claims): on 3.2, `"${SUMMARY[@]}"` on an
+# EMPTY array under `set -u` is a hard crash, not just a false green, if
+# the guard isn't hit first.
+# =============================================================================
+EMPTY_DIR="$TMPROOT/empty-fixture"
+mkdir -p "$EMPTY_DIR"
+EMPTY_OUT="$(bash "$RUNNER" "$EMPTY_DIR" 2>&1)"; EMPTY_CODE=$?
+if [ "$EMPTY_CODE" -eq 1 ]; then
+  pass "ZERO UNITS: an empty existing directory exits 1, not 0"
+else
+  fail "ZERO UNITS: expected exit 1 for an empty directory, got $EMPTY_CODE (out: [$EMPTY_OUT])"
+fi
+if printf '%s' "$EMPTY_OUT" | grep -qF 'NOT OK'; then
+  pass "ZERO UNITS: an empty directory's failure is reported as NOT OK, not silently"
+else
+  fail "ZERO UNITS: an empty directory produced no NOT OK line (out: [$EMPTY_OUT])"
+fi
+
+MISSING_DIR="$TMPROOT/does-not-exist-at-all-xyz"
+MISSING_OUT="$(bash "$RUNNER" "$MISSING_DIR" 2>&1)"; MISSING_CODE=$?
+if [ "$MISSING_CODE" -eq 1 ]; then
+  pass "ZERO UNITS: a nonexistent directory exits 1, not 0"
+else
+  fail "ZERO UNITS: expected exit 1 for a nonexistent directory, got $MISSING_CODE (out: [$MISSING_OUT])"
+fi
+
+if [ -x /bin/bash ] && /bin/bash --version 2>/dev/null | grep -q 'version 3\.'; then
+  BASH32_OUT="$(/bin/bash "$RUNNER" "$EMPTY_DIR" 2>&1)"; BASH32_CODE=$?
+  if [ "$BASH32_CODE" -eq 1 ]; then
+    pass "ZERO UNITS (bash 3.2 /bin/bash): exits 1 cleanly — not a crash, not a false green"
+  else
+    fail "ZERO UNITS (bash 3.2 /bin/bash): expected exit 1, got $BASH32_CODE (out: [$BASH32_OUT])"
+  fi
+  if printf '%s' "$BASH32_OUT" | grep -qi 'unbound variable'; then
+    fail "ZERO UNITS (bash 3.2 /bin/bash): crashed with an unbound-variable error instead of a clean guard (out: [$BASH32_OUT])"
+  else
+    pass "ZERO UNITS (bash 3.2 /bin/bash): no unbound-variable crash"
+  fi
+else
+  echo "SKIP: /bin/bash on this machine is not bash 3.2 — the 3.2-specific empty-array-crash check is skipped (the exit-code guard above still ran under whatever \`bash\` is on PATH)"
+fi
+
+# =============================================================================
+# SKIP must be the EXACT stated convention (`SKIP: <non-empty reason>`),
+# never any line merely starting with the letters SKIP. An empty reason
+# (`SKIP:`) or an unrelated word (`SKIPPING ...`) must NOT be treated as a
+# legitimate skip — both are VACUOUS (0 assertions, no real stated reason).
+# =============================================================================
+SKIPFIX="$TMPROOT/skip-fixture"
+mkdir -p "$SKIPFIX"
+cat > "$SKIPFIX/empty_reason.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "SKIP:"
+exit 0
+EOF
+cat > "$SKIPFIX/unanchored.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "SKIPPING the slow path for speed"
+exit 0
+EOF
+cat > "$SKIPFIX/real_skip.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "SKIP: optional tool not installed, nothing to test"
+exit 0
+EOF
+chmod +x "$SKIPFIX"/*.sh
+SKIP_OUT="$(bash "$RUNNER" "$SKIPFIX" 2>&1)"; SKIP_CODE=$?
+
+if printf '%s' "$SKIP_OUT" | grep -qF 'FAIL  test/empty_reason.sh'; then
+  pass "SKIP ANCHOR: 'SKIP:' with an empty reason is NOT accepted as a skip"
+else
+  fail "SKIP ANCHOR: 'SKIP:' with an empty reason was wrongly accepted (out: [$SKIP_OUT])"
+fi
+if printf '%s' "$SKIP_OUT" | grep -qF 'FAIL  test/unanchored.sh'; then
+  pass "SKIP ANCHOR: 'SKIPPING ...' (not the declared convention) is NOT accepted as a skip"
+else
+  fail "SKIP ANCHOR: 'SKIPPING ...' was wrongly accepted as a skip (out: [$SKIP_OUT])"
+fi
+# The old bug (`${skip_line#SKIP}` chewing into "SKIPPING...") only ever
+# manifested as a mangled "SKIP  <label> — PING the slow path..." SUMMARY
+# line for a unit that got (wrongly) classified as a skip. unanchored.sh is
+# now correctly classified FAIL/VACUOUS instead (checked above), so no SKIP
+# summary line for it can exist at all — check the SUMMARY-line prefix
+# specifically, not a blind substring search: unanchored.sh's own raw
+# dumped output legitimately contains the literal text "SKIPPING the slow
+# path", which itself contains "PING the slow path" as a substring, so a
+# plain `grep -qF 'PING the slow path'` over the whole output would
+# false-positive on the fixture's own wording, not the bug.
+if printf '%s' "$SKIP_OUT" | grep -qF 'SKIP  test/unanchored.sh'; then
+  fail "SKIP ANCHOR: the old chewed-prefix bug produced a SKIP summary line for unanchored.sh (out: [$SKIP_OUT])"
+else
+  pass "SKIP ANCHOR: no SKIP summary line exists for unanchored.sh — the chewed-prefix bug's output shape is gone"
+fi
+if printf '%s' "$SKIP_OUT" | grep -qF 'SKIP  test/real_skip.sh — optional tool not installed'; then
+  pass "SKIP ANCHOR: a genuine 'SKIP: <reason>' line is still correctly accepted, with the reason intact"
+else
+  fail "SKIP ANCHOR: a genuine skip was wrongly rejected or its reason mangled (out: [$SKIP_OUT])"
+fi
+if [ "$SKIP_CODE" -eq 1 ]; then
+  pass "SKIP ANCHOR: overall exit is 1 (the 2 fake skips are real failures, despite 1 genuine skip alongside them)"
+else
+  fail "SKIP ANCHOR: expected exit 1, got $SKIP_CODE"
+fi
+
+# =============================================================================
+# ASSERTION COUNT MUST NOT INFLATE FROM ECHOED/CATTED TEXT. A unit with
+# ZERO real test logic that merely dumps content shaped like "ok - ..."
+# must not be credited with a genuine pass just because the raw line count
+# is non-zero — that is the VACUOUS hole reached by inflation instead of
+# by staying at zero, and it defeats the whole point of the VACUOUS rule.
+# =============================================================================
+FAKEFIX="$TMPROOT/fake-fixture"
+mkdir -p "$FAKEFIX"
+cat > "$FAKEFIX/fakepass.sh" <<'EOF'
+#!/usr/bin/env bash
+cat <<'INNER'
+ok - fake assertion 1
+ok - fake assertion 2
+INNER
+exit 0
+EOF
+chmod +x "$FAKEFIX/fakepass.sh"
+FAKE_OUT="$(bash "$RUNNER" "$FAKEFIX" 2>&1)"; FAKE_CODE=$?
+if printf '%s' "$FAKE_OUT" | grep -qF 'FAIL  test/fakepass.sh — UNCORROBORATED'; then
+  pass "ASSERTION INFLATION: a unit that only cats fake 'ok - ' lines is rejected as UNCORROBORATED, never counted as a real pass"
+else
+  fail "ASSERTION INFLATION: the fake pass was accepted as real (out: [$FAKE_OUT])"
+fi
+if [ "$FAKE_CODE" -eq 1 ]; then
+  pass "ASSERTION INFLATION: overall exit is 1"
+else
+  fail "ASSERTION INFLATION: expected exit 1, got $FAKE_CODE"
 fi
 
 echo

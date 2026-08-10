@@ -21,7 +21,9 @@
 #   test/check-scripts.test.sh.
 set -u
 ROOT="${1:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"}"
-cd "$ROOT"
+# See check-sh.sh's identical guard: an unguarded cd on a bad root would
+# silently validate the CURRENT directory's files instead of the fixture's.
+cd "$ROOT" || { echo "NOT OK - check:json: cannot cd to root: $ROOT" >&2; exit 1; }
 
 node -e '
 const fs = require("fs");

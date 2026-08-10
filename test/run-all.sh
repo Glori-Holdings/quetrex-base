@@ -63,6 +63,10 @@
 set -u
 
 DIR="${1:-"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"}"
+if [ ! -d "$DIR" ]; then
+  echo "NOT OK - run-all.sh: directory not found: $DIR" >&2
+  exit 1
+fi
 
 TOTAL=0
 PASSED=0
@@ -75,18 +79,23 @@ run_unit() {  # run_unit <label> <command...>
   local label="$1"; shift
   TOTAL=$((TOTAL + 1))
 
-  local out code ok_n notok_n total_n skip_line
+  local out code ok_n notok_n total_n skip_line base sentinel_ok
   out="$("$@" 2>&1)"
   code=$?
   ok_n=$(printf '%s\n' "$out" | grep -c '^[[:space:]]*ok - ')
   notok_n=$(printf '%s\n' "$out" | grep -c '^[[:space:]]*NOT OK - ')
   total_n=$((ok_n + notok_n))
-  skip_line=$(printf '%s\n' "$out" | grep -m1 '^SKIP')
+  # ANCHORED, NON-EMPTY ONLY. `^SKIP` alone matched `SKIP:` (empty reason,
+  # accepted) and `SKIPPING the slow path...` (not the declared convention
+  # at all — and `${skip_line#SKIP}` then chewed into the following word,
+  # producing "PING the slow path..."). The stated convention every test
+  # file in this repo actually uses is `SKIP: <reason>` — require exactly
+  # that, with at least one character of reason, or it isn't a skip.
+  skip_line=$(printf '%s\n' "$out" | grep -m1 -E '^SKIP: .+')
 
   if [ "$total_n" -eq 0 ] && [ "$code" -eq 0 ] && [ -n "$skip_line" ]; then
     SKIPPED=$((SKIPPED + 1))
-    skip_line="${skip_line#SKIP}"; skip_line="${skip_line#:}"; skip_line="${skip_line# }"
-    SUMMARY+=("SKIP  $label — $skip_line")
+    SUMMARY+=("SKIP  $label — ${skip_line#SKIP: }")
     return
   fi
 
@@ -120,12 +129,46 @@ run_unit() {  # run_unit <label> <command...>
     return
   fi
 
+  # SENTINEL CORROBORATION. grep-counting "ok - " lines across the unit's
+  # ENTIRE captured stdout+stderr cannot tell a real pass() call apart from
+  # a unit that merely echoes/cats unrelated content which happens to
+  # contain lines shaped like "ok - ...": a unit with ZERO real logic that
+  # just `cat`s a fixture full of "ok - " text would otherwise be reported
+  # as a genuine pass with a populated assertion count — the exact hole the
+  # VACUOUS rule exists to close, just reached by inflating the count
+  # instead of leaving it at zero. Every real test file in this suite
+  # (100% of them, by convention, not by accident) ends its run by echoing
+  # its OWN basename followed by ": " (`"$b: all checks passed"` /
+  # `"$b: FAILURES above"`), and plugin.test.js ends with a `console.log`
+  # of `${passed} passed`. Require that corroborating signal before
+  # trusting an all-"ok" count as a genuine pass; a unit that never says
+  # who it is doesn't get credited with having run for real.
+  base="$(basename "$label")"
+  case "$base" in
+    *.js) sentinel_ok=$(printf '%s\n' "$out" | grep -c -E '^[0-9]+ passed$') ;;
+    *)    sentinel_ok=$(printf '%s\n' "$out" | grep -c -F "${base}: ") ;;
+  esac
+  if [ "$sentinel_ok" -eq 0 ]; then
+    FAILED=$((FAILED + 1))
+    SUMMARY+=("FAIL  $label — UNCORROBORATED ($ok_n \"ok -\" line(s) printed, but no self-referential completion sentinel — cannot trust the count)")
+    printf '\n=== %s (UNCORROBORATED — %d \"ok -\" line(s), no completion sentinel) ===\n%s\n' "$label" "$ok_n" "$out"
+    return
+  fi
+
   PASSED=$((PASSED + 1))
   SUMMARY+=("ok    $label — $ok_n/$total_n assertion(s) passed")
 }
 
 PLUGIN_JS="$DIR/plugin.test.js"
-[ -f "$PLUGIN_JS" ] && run_unit "test/$(basename "$PLUGIN_JS")" node "$PLUGIN_JS"
+if [ -f "$PLUGIN_JS" ]; then
+  run_unit "test/$(basename "$PLUGIN_JS")" node "$PLUGIN_JS"
+else
+  # Not fatal — most fixture directories legitimately have no plugin.test.js
+  # — but it must never be silent: a real repo whose plugin.test.js went
+  # missing (wrong path, bad rebase, accidental delete) should be visible,
+  # not just quietly absent from the summary with nothing to explain why.
+  echo "note: no plugin.test.js found in $DIR — that unit is not part of this run" >&2
+fi
 
 for f in "$DIR"/*.sh; do
   [ -f "$f" ] || continue
@@ -137,6 +180,23 @@ for f in "$DIR"/*.sh; do
 done
 
 ELAPSED=$(( $(date +%s) - START_TS ))
+
+# ZERO UNITS IS NEVER A GREEN RUN. Without this, an empty/missing/renamed
+# test directory silently tallies 0/0/0 and exits 0 — a suite that checked
+# nothing, reported as passing, on the exact same "verify chain" that's a
+# REQUIRED status check under branch protection. This mirrors the guard
+# test/lib/check-sh.sh already has ("matched 0 shell files") and the one
+# verify.yml's CI workflow already has ("An empty chain is not a green
+# chain") — apply it here too, and apply it BEFORE the `${SUMMARY[@]}`
+# expansion below: on bash 3.2 (stock macOS /bin/bash — the very
+# compatibility this suite claims), expanding an EMPTY array under `set -u`
+# is itself a hard crash ("SUMMARY[@]: unbound variable"), so this guard
+# also has to fire first to avoid that, not just to avoid a false green.
+if [ "$TOTAL" -eq 0 ]; then
+  echo
+  echo "NOT OK - run-all.sh: 0 test files found under $DIR — the directory is missing, renamed, or empty. An empty suite is not a passing suite."
+  exit 1
+fi
 
 echo
 echo "=========================== TEST SUMMARY ($((ELAPSED))s) ==========================="

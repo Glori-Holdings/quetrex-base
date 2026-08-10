@@ -22,7 +22,12 @@
 #   without ever touching real repo files — see test/check-scripts.test.sh.
 set -u
 ROOT="${1:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"}"
-cd "$ROOT"
+# Unguarded `cd` on a bad root would print the error to stderr and then
+# silently lint the CURRENT directory instead — reporting "ok" for having
+# checked the wrong tree entirely. Production never hits this (npm run
+# passes no arg), but [root] exists for the fixture harness, so a mistyped
+# path must fail loudly, not validate the real repo by accident.
+cd "$ROOT" || { echo "NOT OK - check:sh: cannot cd to root: $ROOT" >&2; exit 1; }
 
 N=0
 BAD=0
