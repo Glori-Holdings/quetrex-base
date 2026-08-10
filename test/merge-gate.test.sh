@@ -1258,6 +1258,262 @@ assert_denied  "merging a remote feature ref into main"      "git -C $FIXTURE me
 assert_denied  "merging a bare sha into main"                "git -C $FIXTURE merge 1234abcd"
 assert_denied  "merge --no-ff of a feature branch into main" "git -C $FIXTURE merge --no-ff claude/some-feature"
 
+# =============================================================================
+# DEFECT L — EVERY vector a compound command names must be independently
+# evaluated, not just the first. The previous detection loop `break`s the
+# instant it finds ONE vector; a compound command naming a SECOND rode
+# through on the strength of the first's clean artifacts, regardless of
+# vector kind or order. Uses two SEPARATE local git repos (real local HEAD,
+# no PR-head fetch/mocking needed) so "clean" and "dirty" are unambiguous
+# and don't depend on gh being mocked correctly.
+# =============================================================================
+build_l_fixture() {  # build_l_fixture <dir> <label> <clean:0|1>
+  local dir="$1" label="$2" clean="$3" head
+  git -C "$dir" init -q -b main
+  git -C "$dir" config user.email "test@example.com"
+  git -C "$dir" config user.name "Fixture"
+  echo "$label" > "$dir/README.md"
+  git -C "$dir" add README.md
+  git -C "$dir" commit -q -m "chore: $label fixture"
+  mkdir -p "$dir/.quetrex"
+  if [ "$clean" -eq 1 ]; then
+    printf '{"verify":["true","echo ok"]}' > "$dir/.quetrex/verify.json"
+    head="$(git -C "$dir" rev-parse HEAD)"
+    : > "$dir/.quetrex/verify-ledger.jsonl"
+    jq -cn --arg sha "$head" --arg cwd "$dir" '{ts:"t",cmd:"true",cwd:$cwd,sha:$sha,exit:0,tail:""}' >> "$dir/.quetrex/verify-ledger.jsonl"
+    jq -cn --arg sha "$head" --arg cwd "$dir" '{ts:"t",cmd:"echo ok",cwd:$cwd,sha:$sha,exit:0,tail:"ok"}' >> "$dir/.quetrex/verify-ledger.jsonl"
+    jq -cn --arg sha "$head" '{verdict:"AUTO_MERGE",sha:$sha,confirmed:[],inputs:{nativeSecurityReview:"clean"}}' > "$dir/.quetrex/review-verdict.json"
+  else
+    printf '{"verify":["true"]}' > "$dir/.quetrex/verify.json"
+    # Deliberately NO review-verdict.json at all -- genuinely dirty; GATE 2
+    # must deny this repo's own vector on its own merits.
+  fi
+}
+
+FIXTURE_L_CLEAN="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-l-clean.XXXXXX")"
+FIXTURE_L_CLEAN2="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-l-clean2.XXXXXX")"
+FIXTURE_L_DIRTY="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-l-dirty.XXXXXX")"
+build_l_fixture "$FIXTURE_L_CLEAN" "clean" 1
+build_l_fixture "$FIXTURE_L_CLEAN2" "clean2" 1
+build_l_fixture "$FIXTURE_L_DIRTY" "dirty" 0
+
+OUT="$(run_cmd "$FIXTURE_L_CLEAN" "git -C $FIXTURE_L_CLEAN push origin $MAIN && git -C $FIXTURE_L_DIRTY push origin $MAIN")"
+if is_deny "$OUT"; then
+  pass "DEFECT L1: clean-repo push && dirty-repo push -- the SECOND vector is still evaluated and denies"
+else
+  fail "DEFECT L1: expected the dirty second vector to deny, got: ${OUT:0:220}"
+fi
+
+OUT="$(run_cmd "$FIXTURE_L_CLEAN" "git -C $FIXTURE_L_DIRTY push origin $MAIN && git -C $FIXTURE_L_CLEAN push origin $MAIN")"
+if is_deny "$OUT"; then
+  pass "DEFECT L2: dirty-repo push && clean-repo push -- the FIRST vector is still evaluated and denies"
+else
+  fail "DEFECT L2: expected the dirty first vector to deny, got: ${OUT:0:220}"
+fi
+
+# L3 -- positive control: BOTH clean -> the WHOLE command ships. Proves L1/L2
+# aren't just "any two-vector command denies" -- only a genuinely dirty one does.
+OUT="$(run_cmd "$FIXTURE_L_CLEAN" "git -C $FIXTURE_L_CLEAN push origin $MAIN && git -C $FIXTURE_L_CLEAN2 push origin $MAIN")"; CODE=$?
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "DEFECT L3 (positive control): two genuinely clean vectors -- the WHOLE command ships"
+else
+  fail "DEFECT L3: expected exit 0 + empty stdout (both clean), got exit $CODE stdout: [$OUT]"
+fi
+
+# L4-L5 -- cross-KIND: a `gh pr merge` vector combined with a direct push to
+# main, in both orders. Reuses the same mocked gh-pr-merge machinery as
+# DEFECT G/H (a real origin/local clone pair) for the merge half, and the
+# same dirty local repo above for the push half.
+FIXTURE_L_ORIGIN="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-l-origin.XXXXXX")"
+git -C "$FIXTURE_L_ORIGIN" init -q -b main
+git -C "$FIXTURE_L_ORIGIN" config user.email "test@example.com"
+git -C "$FIXTURE_L_ORIGIN" config user.name "Fixture"
+echo root > "$FIXTURE_L_ORIGIN/root.txt"
+git -C "$FIXTURE_L_ORIGIN" add root.txt
+git -C "$FIXTURE_L_ORIGIN" commit -q -m "chore: root"
+
+FIXTURE_L_LOCAL="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-l-local.XXXXXX")"
+git clone -q "$FIXTURE_L_ORIGIN" "$FIXTURE_L_LOCAL"
+git -C "$FIXTURE_L_LOCAL" config user.email "test@example.com"
+git -C "$FIXTURE_L_LOCAL" config user.name "Fixture"
+mkdir -p "$FIXTURE_L_LOCAL/.quetrex"
+printf '{"verify":["true"]}' > "$FIXTURE_L_LOCAL/.quetrex/verify.json"
+
+echo mine > "$FIXTURE_L_ORIGIN/mine.txt"
+git -C "$FIXTURE_L_ORIGIN" add mine.txt
+git -C "$FIXTURE_L_ORIGIN" commit -q -m "feat: PR head"
+L_PR_HEAD="$(git -C "$FIXTURE_L_ORIGIN" rev-parse HEAD)"
+
+: > "$FIXTURE_L_LOCAL/.quetrex/verify-ledger.jsonl"
+jq -cn --arg sha "$L_PR_HEAD" --arg cwd "$FIXTURE_L_LOCAL" '{ts:"t",cmd:"true",cwd:$cwd,sha:$sha,exit:0,tail:""}' >> "$FIXTURE_L_LOCAL/.quetrex/verify-ledger.jsonl"
+jq -cn --arg sha "$L_PR_HEAD" '{verdict:"AUTO_MERGE",sha:$sha,confirmed:[],inputs:{nativeSecurityReview:"clean"}}' > "$FIXTURE_L_LOCAL/.quetrex/review-verdict.json"
+
+MERGE_CMD_L="$(printf 'gh pr mer%s' 'ge') 91 --repo acme/l-fixture --squash"
+OUT="$(run_cmd "$FIXTURE_L_LOCAL" "$MERGE_CMD_L && git -C $FIXTURE_L_DIRTY push origin $MAIN" "$L_PR_HEAD")"
+if is_deny "$OUT"; then
+  pass "DEFECT L4: clean gh-pr-merge && dirty-repo push -- the SECOND (push) vector is still evaluated and denies"
+else
+  fail "DEFECT L4: expected the dirty push vector to deny, got: ${OUT:0:220}"
+fi
+
+OUT="$(run_cmd "$FIXTURE_L_LOCAL" "git -C $FIXTURE_L_DIRTY push origin $MAIN && $MERGE_CMD_L" "$L_PR_HEAD")"
+if is_deny "$OUT"; then
+  pass "DEFECT L5: dirty-repo push && clean gh-pr-merge -- the FIRST (push) vector is still evaluated and denies"
+else
+  fail "DEFECT L5: expected the dirty push vector to deny, got: ${OUT:0:220}"
+fi
+
+rm -rf "$FIXTURE_L_CLEAN" "$FIXTURE_L_CLEAN2" "$FIXTURE_L_DIRTY" "$FIXTURE_L_ORIGIN" "$FIXTURE_L_LOCAL"
+
+# =============================================================================
+# DEFECT K — split_segments_quote_aware and tokenize_argv must AGREE on
+# where a `#` shell comment starts. They are deliberately two SEPARATE
+# state machines (see the comment at split_segments_quote_aware's
+# definition for why one isn't literally shared code) — nothing stops them
+# drifting the moment either is touched, proven once already:
+# `${out: -1}`-based comment detection could not distinguish an ESCAPED
+# separator from a real one, while tokenize_argv's `have` flag could, and
+# disagreed on `a\ #x` / `a\<TAB>#x`. This differential test feeds a corpus
+# of fragments to BOTH functions — extracted from the hook file UNDER TEST,
+# not re-implemented here, so it exercises the real thing — and fails on
+# ANY disagreement about whether a `#` starts a comment, not just the two
+# cases already found.
+# =============================================================================
+EXTRACTED_FUNCS="$(mktemp "${TMPDIR:-/tmp}/merge-gate-funcs.XXXXXX")"
+extract_func() {  # extract_func <name> -> appends the function's source
+  awk -v fn="$1" '
+    $0 ~ "^[[:space:]]*"fn"\\(\\)[[:space:]]*\\{" { grab=1 }
+    grab { print }
+    grab && /^[[:space:]]*\}[[:space:]]*$/ { grab=0; exit }
+  ' "$HOOK" >> "$EXTRACTED_FUNCS"
+  printf '\n' >> "$EXTRACTED_FUNCS"
+}
+: > "$EXTRACTED_FUNCS"
+extract_func split_segments_quote_aware
+extract_func tokenize_argv
+# shellcheck disable=SC1090
+source "$EXTRACTED_FUNCS"
+
+# comment_starts_in_split <fragment> -- true (0) iff split_segments_quote_
+# aware treated the candidate `#` as starting a comment, OBSERVED via
+# whether the "&&" placed after it still produced a segment split: if the
+# comment were recognized, that operator is inert and the output stays one
+# line.
+comment_starts_in_split() {
+  local out lines
+  out="$(split_segments_quote_aware "$1")"
+  lines=$(printf '%s\n' "$out" | wc -l | tr -d ' ')
+  [ "$lines" -eq 1 ]
+}
+# comment_starts_in_tokenize <fragment> -- true (0) iff tokenize_argv
+# treated the candidate `#` as starting a comment, OBSERVED via whether the
+# unique marker text placed after it shows up in ANY produced token: if
+# comment-mode correctly triggered, tokenize_argv `break`s before ever
+# reaching it.
+comment_starts_in_tokenize() {
+  tokenize_argv "$1"
+  local t
+  for t in "${TOKENS[@]:-}"; do
+    case "$t" in *ZZZMARKERZZZ*) return 1 ;; esac
+  done
+  return 0
+}
+
+DIFF_CORPUS=(
+  'a\ #ZZZMARKERZZZ && b'
+  "$(printf 'a\\\t#ZZZMARKERZZZ && b')"
+  'a #ZZZMARKERZZZ && b'
+  'a#ZZZMARKERZZZ && b'
+  '#ZZZMARKERZZZ && b'
+  "a'x'#ZZZMARKERZZZ && b"
+  'a\\ #ZZZMARKERZZZ && b'
+  'a\;#ZZZMARKERZZZ && b'
+  '  #ZZZMARKERZZZ && b'
+  'a b\ c #ZZZMARKERZZZ && b'
+)
+DIFF_LABELS=(
+  "escaped space before #"
+  "escaped tab before #"
+  "real (unescaped) space before #"
+  "attached # (no separator)"
+  "# at absolute start"
+  "# immediately after a closing quote"
+  "escaped-backslash-then-real-space before #"
+  "escaped semicolon before #"
+  "leading real spaces before #"
+  "escaped space mid-fragment, then a real space before #"
+)
+
+kk=0
+while [ "$kk" -lt "${#DIFF_CORPUS[@]}" ]; do
+  frag="${DIFF_CORPUS[$kk]}"
+  label="${DIFF_LABELS[$kk]}"
+  if comment_starts_in_split "$frag"; then split_says="comment"; else split_says="not-comment"; fi
+  if comment_starts_in_tokenize "$frag"; then tok_says="comment"; else tok_says="not-comment"; fi
+  if [ "$split_says" = "$tok_says" ]; then
+    pass "DEFECT K: $label -- split_segments_quote_aware and tokenize_argv agree ($split_says)"
+  else
+    fail "DEFECT K: $label -- DISAGREE: splitter says '$split_says', tokenizer says '$tok_says' (fragment: [$frag])"
+  fi
+  kk=$((kk + 1))
+done
+
+rm -f "$EXTRACTED_FUNCS"
+
+# DEFECT N/O below need $FIXTURE's origin configured again (removed at the
+# end of the CROSS-REPO/DEFECT I section above) to compare against.
+git -C "$FIXTURE" remote add origin "https://github.com/acme/fixture-repo.git" 2>/dev/null || true
+
+# =============================================================================
+# DEFECT N — two residuals declared OUT OF BOUNDS in this round's boundary
+# text, pinned the same way DEFECT J4 pins the export-prefix residual: an
+# assertion that they are NOT caught, so the test suite itself flags any
+# future drift between the boundary comment and the code.
+# =============================================================================
+OUT="$(run_cmd "$FIXTURE" "/opt/homebrew/bin/gh pr merge 7 --squash --repo other-org/other-repo")"
+if printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  fail "DEFECT N1: a path-qualified gh binary is documented as OUT OF BOUNDS but was caught -- update the boundary comment to match, got: ${OUT:0:200}"
+else
+  pass "DEFECT N1 (documents the boundary): a path-qualified gh binary (/opt/homebrew/bin/gh) is NOT anchored on, as documented"
+fi
+
+OUT="$(run_cmd "$FIXTURE" "RESULT=\$($(printf 'gh pr mer%s' 'ge') 7 --squash --repo other-org/other-repo)")"
+if printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  fail "DEFECT N2: a command-substitution-wrapped merge is documented as OUT OF BOUNDS but was caught -- update the boundary comment to match, got: ${OUT:0:200}"
+else
+  pass "DEFECT N2 (documents the boundary): RESULT=\$(gh pr merge ...) is NOT anchored on, as documented"
+fi
+
+# =============================================================================
+# DEFECT O — an unexpanded shell expression's KNOWN LITERAL PREFIX is still
+# checked. Fail-open (DEFECT J6/the boundary text) means "cannot verify",
+# not "assume it happens to resolve to this repo" -- when the FIXED, un-
+# expandable portion of a --repo value already contradicts this checkout's
+# origin, that is proof, not an unknown, and must still deny.
+# =============================================================================
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash --repo 'other-org/\$VAR'")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'literal prefix'; then
+  pass "DEFECT O1: --repo 'other-org/\$VAR' -- the literal prefix 'other-org/' already contradicts origin, denied"
+else
+  fail "DEFECT O1: expected a literal-prefix-contradiction denial, got: ${OUT:0:220}"
+fi
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash --repo 'other-org/other-repo\${EMPTY}'")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -qi 'literal prefix'; then
+  pass "DEFECT O2: --repo 'other-org/other-repo\${EMPTY}' -- literal prefix contradicts origin, denied"
+else
+  fail "DEFECT O2: expected a literal-prefix-contradiction denial, got: ${OUT:0:220}"
+fi
+# O3 -- positive control: a value with NO literal prefix at all (pure "$SLUG",
+# the engine's own merge.md shape, per DEFECT J6) must NOT be caught by this
+# refinement -- there is no fixed text to contradict origin with.
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash --repo \"\$SLUG\"")"
+if printf '%s' "$OUT" | grep -qi 'literal prefix'; then
+  fail "DEFECT O3: a bare \$SLUG (no literal prefix) must not trigger the literal-prefix check, got: ${OUT:0:220}"
+else
+  pass "DEFECT O3 (positive control): a bare \$SLUG (no literal prefix) is not affected by the literal-prefix refinement"
+fi
+git -C "$FIXTURE" remote remove origin 2>/dev/null || true
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "merge-gate.test.sh: all checks passed"
