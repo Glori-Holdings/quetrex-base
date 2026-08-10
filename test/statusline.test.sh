@@ -581,6 +581,106 @@ else
   echo "note: /bin/bash is not present — AC13's interpreter-specific coverage did not run here"
 fi
 
+# -----------------------------------------------------------------------------
+# AC14 — the timeout GATE's mapping is correct on both sides, and AC13 is never
+# allowed to vanish silently.
+#
+# AC13 proves the gate under whatever /bin/bash this host happens to ship. That
+# makes its value machine-dependent in a way that hides a real hole: on a host
+# whose /bin/bash is 4+ (every mainstream Linux CI image), the integer branch is
+# executed by NO test, and the one-character regression that M4b models — handing
+# a fractional `read -t` to a 3.2 — would sail through the entire suite there
+# exactly as it did here before AC13 existed. AC13 is also wrapped in
+# `if [ -x /bin/bash ]`, whose else-branch prints a note and drops five
+# assertions while the file still exits 0; AC9 guards AC10's precondition the
+# same way, but nothing guarded this one.
+#
+# So this block asserts the gate's mapping DIRECTLY, against every bash on the
+# machine, using the two timeout values parsed out of the script itself rather
+# than hardcoded here — a change to either value stays covered, a break in which
+# value goes to which interpreter does not.
+# -----------------------------------------------------------------------------
+if [ -x /bin/bash ]; then
+  pass "AC14: /bin/bash is present, so AC13's interpreter-specific block ran rather than silently dropping its assertions"
+else
+  fail "AC14: /bin/bash is absent — statusline-command.sh's shebang is #!/bin/bash, so the shipped script cannot run here and AC13 asserted nothing"
+fi
+
+GATE_LINE="$(grep -n 'BASH_VERSINFO' "$SCRIPT" | head -1)"
+if [ -n "$GATE_LINE" ]; then
+  pass "AC14: the timeout gate is still branch-selected on BASH_VERSINFO"
+else
+  fail "AC14: no BASH_VERSINFO branch remains in $SCRIPT — the interpreter gate is gone"
+fi
+
+# Parse the two branch values out of the script: "...-ge 4 ]; then _qx_timeout=HI; else _qx_timeout=LO; fi"
+T_HI="$(sed -n 's/.*-ge 4 \]; then _qx_timeout=\([^;]*\);.*/\1/p' "$SCRIPT" | head -1)"
+T_LO="$(sed -n 's/.*else _qx_timeout=\([^;]*\); fi.*/\1/p' "$SCRIPT" | head -1)"
+if [ -n "$T_HI" ] && [ -n "$T_LO" ]; then
+  pass "AC14: both timeout branch values parse out of the script (bash4+=$T_HI, bash3=$T_LO)"
+else
+  fail "AC14: could not parse both timeout branch values from the gate (hi=[$T_HI] lo=[$T_LO])"
+fi
+
+# accepts_timeout <interpreter> <value>  -> 0 when `read -t <value>` is accepted.
+# Reads from /dev/null, so a VALID timeout just hits EOF and exits non-zero with
+# nothing on stderr; an INVALID one prints "invalid timeout specification".
+accepts_timeout() {
+  local interp="$1" val="$2" err
+  err="$("$interp" -c "read -t $val _x </dev/null" 2>&1 >/dev/null)"
+  case "$err" in
+    *"invalid timeout"*) return 1 ;;
+    *)                   return 0 ;;
+  esac
+}
+
+# Every bash reachable here, deduplicated by resolved path.
+CANDIDATES=""
+for c in /bin/bash "$(command -v bash 2>/dev/null)"; do
+  [ -n "$c" ] && [ -x "$c" ] || continue
+  case " $CANDIDATES " in *" $c "*) continue ;; esac
+  CANDIDATES="$CANDIDATES $c"
+done
+
+SAW_OLD_BASH=0
+for interp in $CANDIDATES; do
+  IV="$("$interp" -c 'printf "%s" "${BASH_VERSINFO[0]}"' 2>/dev/null)"
+  [ -n "$IV" ] || continue
+  if [ "$IV" -ge 4 ]; then WANT="$T_HI"; else WANT="$T_LO"; SAW_OLD_BASH=1; fi
+
+  if accepts_timeout "$interp" "$WANT"; then
+    pass "AC14: $interp (bash $IV) accepts the timeout value the gate hands it ($WANT)"
+  else
+    fail "AC14: $interp (bash $IV) REJECTS $WANT, the value the gate selects for it — this is the 'invalid timeout specification' regression on stderr"
+  fi
+
+  # The safe whole-second fallback must be universally valid, or the 3.2 branch
+  # is not actually safe.
+  if accepts_timeout "$interp" "$T_LO"; then
+    pass "AC14: $interp (bash $IV) accepts the whole-second fallback $T_LO"
+  else
+    fail "AC14: $interp (bash $IV) rejects the whole-second fallback $T_LO"
+  fi
+done
+
+# The gate only EARNS its existence if the fractional value is genuinely invalid
+# somewhere. Without a bash<4 on the box that cannot be demonstrated, and that
+# is stated out loud rather than passed over.
+if [ "$SAW_OLD_BASH" -eq 1 ]; then
+  OLD_INTERP=""
+  for interp in $CANDIDATES; do
+    IV="$("$interp" -c 'printf "%s" "${BASH_VERSINFO[0]}"' 2>/dev/null)"
+    [ -n "$IV" ] && [ "$IV" -lt 4 ] && { OLD_INTERP="$interp"; break; }
+  done
+  if accepts_timeout "$OLD_INTERP" "$T_HI"; then
+    fail "AC14: $OLD_INTERP accepts the fractional $T_HI, so the BASH_VERSINFO gate is not load-bearing and this suite cannot detect its removal"
+  else
+    pass "AC14: $OLD_INTERP rejects the fractional $T_HI — the gate is load-bearing, and routing $T_HI to a bash<4 is a real regression this suite now catches"
+  fi
+else
+  echo "note: no bash<4 on this host — AC14 could not demonstrate that the fractional timeout is genuinely rejected, so the gate's NECESSITY is unproven here (its correctness on the interpreters present is still asserted above)"
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "statusline.test.sh: all checks passed"
