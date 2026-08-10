@@ -171,19 +171,28 @@ colored_left="${colored_left}   ${c_reset}${icon_model} ${c_model}${model}${c_re
 # tone, two spaces after the Quetrex group. Either half may be absent; the gap
 # is measured from plain_right, which carries no escapes, because counting
 # ANSI would shove the whole group ~45 columns left.
+#
+# seg_version is STDIN-SUPPLIED (the .version field of the status JSON) and so
+# is kept out of every %b argument and passed on its own %s, exactly as it was
+# before the Quetrex group existed. %b interprets backslash escapes, and a
+# `\c` in a %b argument terminates printf's output outright — it would swallow
+# line 1's newline and weld the context bar onto line 1, breaking the two-line
+# invariant this file guarantees. right_prefix therefore carries only our OWN
+# colour literals plus quetrex_v, which the numeric guard above has already
+# proven contains nothing but digits and dots.
 plain_right=""
-colored_right=""
+right_prefix=""
 if [ -n "$quetrex_v" ]; then
   plain_right="Quetrex ${quetrex_v}"
-  colored_right="${c_quetrex}Quetrex ${c_quetrex_v}${quetrex_v}${c_reset}"
+  right_prefix="${c_quetrex}Quetrex ${c_quetrex_v}${quetrex_v}${c_reset}"
 fi
 if [ -n "$seg_version" ]; then
   if [ -n "$plain_right" ]; then
     plain_right="${plain_right}  ${seg_version}"
-    colored_right="${colored_right}  ${c_version}${seg_version}${c_reset}"
+    right_prefix="${right_prefix}  ${c_version}"
   else
     plain_right="${seg_version}"
-    colored_right="${c_version}${seg_version}${c_reset}"
+    right_prefix="${c_version}"
   fi
 fi
 
@@ -191,7 +200,7 @@ if [ -n "$plain_right" ]; then
   gap=$(( term_width - plain_len - ${#plain_right} ))
   [ "$gap" -lt 1 ] && gap=1
   padding=$(printf '%*s' "$gap" '')
-  printf "%b%s%b%b\n" "$colored_left" "$padding" "$colored_right" "$c_reset"
+  printf "%b%s%b%s%b\n" "$colored_left" "$padding" "$right_prefix" "$seg_version" "$c_reset"
 else
   printf "%b\n" "$colored_left"
 fi

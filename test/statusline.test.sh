@@ -142,18 +142,28 @@ make_stub() {
   fi
 }
 
-# render <case-name> <stub-dir>
+# render <case-name> <stub-dir> [interpreter] [json-version]
 #   Runs the REAL committed status line under a scrubbed environment and sets
-#   R_OUT / R_ERR / R_CODE / R_LINE1 / R_LINE2.
+#   R_OUT / R_ERR / R_CODE / R_LINE1 / R_LINE2 / R_NLINES.
+#
+#   [interpreter] defaults to bare `bash` (whatever the PATH resolves, which on
+#   a developer machine is usually a Homebrew bash 5). AC13 passes /bin/bash
+#   explicitly, because the script's own shebang is #!/bin/bash and the stock
+#   macOS /bin/bash is 3.2 — a different code path in the timeout gate that
+#   bare `bash` never reaches.
+#
+#   [json-version] is inserted RAW into the JSON, so a caller can supply an
+#   escaped value like '2.1\\c226' to prove that .version is never
+#   escape-interpreted. It defaults to the plain fixture version.
 render() {
-  local name="$1" stub="$2"
+  local name="$1" stub="$2" interp="${3:-bash}" jver="${4:-$CC_VERSION}"
   local proj="$WORK/proj-$name" out="$WORK/$name.out" err="$WORK/$name.err" input="$WORK/$name.json"
   mkdir -p "$proj" "$WORK/home-$name"
   cat > "$input" <<JSON
 {
   "workspace": { "current_dir": "$proj", "project_dir": "$proj" },
   "model": { "display_name": "Opus 5" },
-  "version": "$CC_VERSION",
+  "version": "$jver",
   "context_window": { "used_percentage": 0 }
 }
 JSON
@@ -163,7 +173,7 @@ JSON
     COLUMNS="$TERM_COLS" \
     LANG=en_US.UTF-8 \
     TERM=dumb \
-    bash "$SCRIPT" < "$input" > "$out" 2> "$err"
+    "$interp" "$SCRIPT" < "$input" > "$out" 2> "$err"
   R_CODE=$?
   R_OUT="$(cat "$out")"
   R_ERR="$(cat "$err")"
@@ -406,7 +416,12 @@ JSON
   U_PLAIN1="$(plain_of "$(head -n 1 "$WORK/unset.out")")"
 
   if [ "$U_CODE" -eq 0 ]; then
-    pass "AC10: the registered statusLine.command exits 0 with CLAUDE_PROJECT_DIR unset"
+    # Deliberately narrow wording: this proves the guarded form survives an
+    # unset variable WHEN cwd is the project root, which is the case Claude
+    # Code actually invokes (it spawns the status line with cwd at the project
+    # root). It does NOT prove the registration is robust to an unset variable
+    # from an arbitrary cwd — `.` cannot be, by construction.
+    pass "AC10: the registered statusLine.command exits 0 with CLAUDE_PROJECT_DIR unset and cwd at the project root"
   else
     fail "AC10: the registered statusLine.command exited $U_CODE with CLAUDE_PROJECT_DIR unset (stderr: [$U_ERR]) — the unguarded \${CLAUDE_PROJECT_DIR} form expands to a bare /.claude/... path and exits 127"
   fi
@@ -460,6 +475,111 @@ case "$(plain_of "$R_LINE1")" in
   *"v${CC_VERSION}") pass "AC11: Claude Code's own version still terminates line 1 when the engine is wedged" ;;
   *)                 fail "AC11: line 1 no longer ends with Claude Code's version when the engine is wedged" ;;
 esac
+
+# -----------------------------------------------------------------------------
+# AC12 — .version is DATA from stdin and must never be escape-interpreted.
+#
+# Claude Code supplies .version, so a semver is what arrives in practice and
+# this is not an exploit. It is still the one field that must stay literal:
+# printf's %b interprets backslash escapes, and a `\c` in a %b argument
+# TERMINATES printf's output entirely — swallowing line 1's newline and welding
+# the context bar onto line 1, which silently breaks the two-line invariant that
+# AC8 and the whole adversarial suite depend on. Keeping .version on its own %s
+# argument is what makes that unreachable, so it needs an assertion that would
+# notice if it were ever folded back into a %b.
+# -----------------------------------------------------------------------------
+BS_STUB="$WORK/bin-backslash"
+make_stub "$BS_STUB" 'echo 2.4.0'
+
+# JSON "2.1\\c226" decodes to the 9 characters  2.1\c226
+render vbackslash "$BS_STUB" bash '2.1\\c226'
+if [ "$R_NLINES" -eq 2 ]; then
+  pass "AC12: a \\c in .version does not collapse the status bar — still exactly two lines"
+else
+  fail "AC12: a \\c in .version collapsed the status bar to $R_NLINES line(s) — .version is being interpreted by printf %b, which terminates output at \\c"
+fi
+case "$(plain_of "$R_LINE1")" in
+  *'v2.1\c226') pass "AC12: a backslash in .version is rendered literally" ;;
+  *)            fail "AC12: a backslash in .version was not rendered literally (plain line 1: [$(plain_of "$R_LINE1")])" ;;
+esac
+case "$R_LINE2" in
+  *"▰"*|*"▱"*) pass "AC12: line 2 is still its own line — the context bar was not welded onto line 1" ;;
+  *)           fail "AC12: line 2 is no longer the context bar (line 2: [$R_LINE2])" ;;
+esac
+
+# JSON "2.1\\033[31mX" decodes to  2.1\033[31mX  — four literal characters
+# \033, not an escape. If %b interpreted it, a live red SGR would be injected
+# into the render straight from stdin data.
+render vansi "$BS_STUB" bash '2.1\\033[31mX'
+case "$R_LINE1" in
+  *"${ESC}[31m"*) fail "AC12: a \\033 sequence in .version was interpreted and injected a live ANSI colour into the render" ;;
+  *)              pass "AC12: a \\033 sequence in .version is not interpreted — no ANSI is injected from stdin data" ;;
+esac
+if [ "$R_NLINES" -eq 2 ]; then
+  pass "AC12: an ANSI-looking .version still renders exactly two lines"
+else
+  fail "AC12: an ANSI-looking .version produced $R_NLINES line(s)"
+fi
+
+# -----------------------------------------------------------------------------
+# AC13 — the script must be clean under /bin/bash SPECIFICALLY.
+#
+# The timeout gate branches on ${BASH_VERSINFO[0]}: bash 3.2 rejects a
+# fractional `read -t` ("invalid timeout specification" on STDERR — the exact
+# operator-facing interpreter error this repo's LESSONS rule forbids), so 3.2
+# gets a whole-second bound and bash 4+ a fractional one. Every other case in
+# this file runs bare `bash`, which on a developer machine resolves to a
+# Homebrew bash 5 — so without this block the 3.2 branch is executed by NO
+# test, and a one-character regression to the gate would survive the entire
+# suite. The script's own shebang is #!/bin/bash, so /bin/bash is the
+# interpreter that actually ships.
+# -----------------------------------------------------------------------------
+if [ -x /bin/bash ]; then
+  SYS_BASH_V="$(/bin/bash -c 'printf "%s" "${BASH_VERSINFO[0]}"')"
+  if [ "$SYS_BASH_V" -lt 4 ]; then
+    echo "note: /bin/bash is major version $SYS_BASH_V — AC13 exercises the integer-timeout branch"
+  else
+    echo "note: /bin/bash is major version $SYS_BASH_V — AC13 exercises the fractional-timeout branch"
+  fi
+
+  render sysbash_clean "$BS_STUB" /bin/bash
+  if [ "$R_CODE" -eq 0 ] && [ -z "$R_ERR" ]; then
+    pass "AC13: under /bin/bash (v$SYS_BASH_V) a clean render exits 0 with EMPTY stderr — the timeout value is one this interpreter accepts"
+  else
+    fail "AC13: under /bin/bash (v$SYS_BASH_V) the render exited $R_CODE with stderr [$R_ERR] — the timeout gate handed this interpreter a value it rejects"
+  fi
+  case "$(plain_of "$R_LINE1")" in
+    *"Quetrex 2.4.0  v${CC_VERSION}")
+      pass "AC13: under /bin/bash the full right group still renders correctly" ;;
+    *)
+      fail "AC13: under /bin/bash the right group did not render (plain line 1: [$(plain_of "$R_LINE1")])" ;;
+  esac
+  if [ "$R_NLINES" -eq 2 ]; then
+    pass "AC13: under /bin/bash the status bar is still exactly two lines"
+  else
+    fail "AC13: under /bin/bash the status bar rendered $R_NLINES line(s), not 2"
+  fi
+
+  # The bound itself must hold under this interpreter too, not just under the
+  # one the rest of the file happens to use.
+  SB_HANG="$WORK/bin-sysbash-hang"
+  make_stub "$SB_HANG" 'sleep 3; echo 2.4.0'
+  SB_START="$(now_ms)"
+  render sysbash_hang "$SB_HANG" /bin/bash
+  SB_END="$(now_ms)"
+  SB_ELAPSED=$(( SB_END - SB_START ))
+  if [ "$SB_ELAPSED" -lt 2500 ] && [ "$R_CODE" -eq 0 ] && [ -z "$R_ERR" ]; then
+    pass "AC13: under /bin/bash a 3s-wedged engine is still bounded (${SB_ELAPSED}ms), exits 0, and says nothing on stderr"
+  else
+    fail "AC13: under /bin/bash a wedged engine took ${SB_ELAPSED}ms, exit $R_CODE, stderr [$R_ERR]"
+  fi
+  case "$R_OUT" in
+    *Quetrex*) fail "AC13: under /bin/bash a wedged engine still rendered a Quetrex segment" ;;
+    *)         pass "AC13: under /bin/bash a wedged engine fails closed like a missing one" ;;
+  esac
+else
+  echo "note: /bin/bash is not present — AC13's interpreter-specific coverage did not run here"
+fi
 
 echo
 if [ "$FAIL" -eq 0 ]; then

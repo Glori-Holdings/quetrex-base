@@ -372,10 +372,17 @@ if grep -qE 'quetrex-version[[:space:]]+--plain' "$SCRIPT"; then
 else
   fail "ADV-8: statusline-command.sh no longer reads the version from \`quetrex-version --plain\`"
 fi
-if grep -qE '(plugin|package)\.json' "$SCRIPT" | grep -qv '^#'; then
-  fail "ADV-8: statusline-command.sh reads a version out of plugin.json/package.json instead of the running engine"
+# STRIP COMMENTS FIRST, then search — never `grep -q ... | grep`. `grep -q` is
+# quiet by definition: it writes zero bytes, so a downstream grep reads an empty
+# stream, matches nothing and always exits 1, making the whole `if` unfailable.
+# That is not theoretical: a real `_pinned_v=$(cat .../.claude-plugin/plugin.json)`
+# injected into the script — precisely the hardcoded pin this assertion exists to
+# catch, against a LOCKED repo rule — was reported `ok` with the suite exiting 0.
+# The filter has to come first and carry the data, with only the LAST grep quiet.
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE '(plugin|package)\.json'; then
+  fail "ADV-8: statusline-command.sh reads a version out of plugin.json/package.json instead of the running engine ($(grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -nE '(plugin|package)\.json' | head -3))"
 else
-  pass "ADV-8: statusline-command.sh does not read a version out of plugin.json/package.json"
+  pass "ADV-8: statusline-command.sh does not read a version out of plugin.json/package.json (comment lines excluded before searching)"
 fi
 
 echo
