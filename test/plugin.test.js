@@ -1,7 +1,8 @@
 'use strict';
 
 // Framework-free structure test for the `quetrex` Claude Code plugin.
-// Run: `npm test` (this file, then bash test/merge-gate.test.sh).
+// Run: `npm test` (test/run-all.sh runs this file, then every test/*.sh
+// file, unconditionally — see that script's header for why).
 //
 // This replaced test/install.test.js, which validated the retired npm
 // installer (install.js). Quetrex is no longer an npm package that seeds
