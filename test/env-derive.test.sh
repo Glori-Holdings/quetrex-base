@@ -1160,53 +1160,104 @@ MULTISEL_F2="$(grep -c 'multi-select' "$INIT_MD")"
   || fail "F2 INIT.MD: expected a multi-select mention, got $MULTISEL_F2"
 
 # =============================================================================
-# F3 (CONFIRMED, reviewer) — init.md's verify.json staging line must surface
-# a genuine git-add failure instead of swallowing it with 2>/dev/null || true.
+# F3 (CONFIRMED, reviewer) — init.md's verify.json staging must surface a
+# genuine git-add failure instead of swallowing it with 2>/dev/null || true.
+#
+# RE-ANCHORED (QDM-4 / DEFECT 4). Every PROPERTY F3 asserted is unchanged and
+# still asserted below: the verify.json staging must not swallow, a real
+# git-add failure must exit non-zero, git's own error text must be visible,
+# and restoring the swallow must demonstrably re-hide it. What changed is the
+# SHAPE of the shipped text F3 reads. init.md step 6 no longer stages each
+# artifact with a bare one-liner; QDM-4 showed the same swallow on the
+# NEIGHBORING lines silently dropped the step-4e permissions grant on
+# quetrex-demo (its .claude/settings.json ended up with no `permissions` key
+# at all), so the unattended cloud build ran the whole pipeline and then
+# stalled at `gh pr create` waiting for a human. All required arming artifacts
+# now go through one `stage_required()` helper in a single fenced block, so F3
+# reads that block instead of a single grep-matched line.
+#
+# THE ONE ASSERTION THAT CHANGED, STATED PLAINLY: the old "F3 CONTROL" pinned
+# the neighboring `.worktreeinclude` line to STILL carry `2>/dev/null || true`.
+# Its intent was scope ("this was not a blanket rewrite"), but as written it
+# encoded the swallow-on-a-required-artifact behavior that DEFECT 4 exists to
+# remove — .worktreeinclude is an arming artifact (without it every pipeline
+# worktree lands with no deps and no env). The control is therefore re-pointed
+# at `.mcp.json`, which is deliberately NOT a required arming artifact and is
+# deliberately still tolerant: it may legitimately not exist, and `add -A` on
+# an absent, never-tracked path errors rather than no-oping. That keeps a real
+# scope control — proving the change is a considered set, not a sweep — without
+# codifying a defect. See test/init-staging.test.sh for the full behavioural
+# coverage of the block.
 # =============================================================================
-F3_LINE="$(grep -F '[ -f "$REPO_ROOT/.quetrex/verify.json" ]  && git -C "$REPO_ROOT" add .quetrex/verify.json' "$INIT_MD")"
-[ -n "$F3_LINE" ] && pass "F3: extracted the verify.json staging line verbatim from init.md" \
-  || fail "F3: could not find the verify.json staging line in init.md"
+F3_BLOCK="$(awk -v anchor='Stage the arming artifacts — fail loud, never silently' '
+  !found && index($0, anchor) { found = 1; next }
+  found && !infence && /^```bash/ { infence = 1; next }
+  found && infence && /^```/ { exit }
+  found && infence { print }
+' "$INIT_MD")"
+F3_LINE="$(printf '%s\n' "$F3_BLOCK" | grep -F 'stage_required .quetrex/verify.json')"
+[ -n "$F3_LINE" ] && pass "F3: extracted the verify.json staging call verbatim from init.md's staging block" \
+  || fail "F3: could not find the verify.json staging call in init.md's staging block"
 
-SWALLOW_F3="$(printf '%s\n' "$F3_LINE" | grep -c '2>/dev/null')"
-[ "$SWALLOW_F3" = "0" ] && pass "F3: the verify.json staging line no longer swallows its exit code" \
-  || fail "F3: expected 0 occurrences of '2>/dev/null' on this line, got $SWALLOW_F3 (line: [$F3_LINE])"
+SWALLOW_F3="$(printf '%s\n' "$F3_BLOCK" | grep -F 'stage_required' | grep -c '2>/dev/null')"
+[ "$SWALLOW_F3" = "0" ] && pass "F3: no stage_required call swallows its exit code" \
+  || fail "F3: expected 0 occurrences of '2>/dev/null' on the stage_required calls, got $SWALLOW_F3"
 
-# --- CONTROL: a neighboring, un-fixed line still swallows (proves this was
-# a scoped fix, not a blanket rewrite of every add line). -------------------
-NEIGHBOR_F3="$(grep -F '[ -f "$REPO_ROOT/.worktreeinclude" ]      && git -C "$REPO_ROOT" add .worktreeinclude' "$INIT_MD")"
+# --- CONTROL: a deliberately NON-required line is still tolerant (proves this
+# is a considered set of required artifacts, not a blanket rewrite). --------
+NEIGHBOR_F3="$(printf '%s\n' "$F3_BLOCK" | grep -F 'git -C "$REPO_ROOT" add -A .mcp.json')"
 NEIGHBOR_SWALLOW_F3="$(printf '%s\n' "$NEIGHBOR_F3" | grep -c '2>/dev/null || true')"
-[ "$NEIGHBOR_SWALLOW_F3" = "1" ] && pass "F3 CONTROL: the neighboring .worktreeinclude line is untouched and still swallows — this was a scoped fix" \
-  || fail "F3 CONTROL: expected the neighboring line to still swallow, got $NEIGHBOR_SWALLOW_F3"
+[ "$NEIGHBOR_SWALLOW_F3" = "1" ] && pass "F3 CONTROL: the non-required .mcp.json line is deliberately still tolerant — the fail-loud change is a scoped set, not a sweep" \
+  || fail "F3 CONTROL: expected the non-required .mcp.json line to stay tolerant, got $NEIGHBOR_SWALLOW_F3"
 
-# --- BEHAVIORAL: run the extracted line for real against a fixture where
+# --- BEHAVIORAL: run the extracted block for real against a fixture where
 # .quetrex/verify.json is gitignored — git add genuinely fails, and that
-# failure must now be visible (nonzero exit, real stderr), not swallowed. ---
+# failure must now be visible (nonzero exit, real stderr), not swallowed.
+# Only verify.json is ignored, so the block reaches it (project.json stages
+# cleanly first) and the observed failure is unambiguously verify.json's. ---
 F3FIX="$TMPROOT/f3-fixture"
 git_init_repo "$F3FIX"
 mkdir -p "$F3FIX/.quetrex"
-printf '.quetrex/*\n' > "$F3FIX/.gitignore"
+printf '.quetrex/verify.json\n' > "$F3FIX/.gitignore"
+jq -cn '{projectCode:"F3",branchPrefix:"claude/"}' > "$F3FIX/.quetrex/project.json"
 jq -cn '{verify:["npm test"]}' > "$F3FIX/.quetrex/verify.json"
 git -C "$F3FIX" add .gitignore
-git -C "$F3FIX" commit -q -m "chore: F3 fixture — .quetrex/* is gitignored"
+git -C "$F3FIX" commit -q -m "chore: F3 fixture — .quetrex/verify.json is gitignored"
 
-run_f3_line() {  # run_f3_line <repo-root> <line>
-  local repo="$1" line="$2"
-  REPO_ROOT="$repo" bash -c "$line" 2>&1
+run_f3_block() {  # run_f3_block <repo-root> <block>
+  local repo="$1" block="$2"
+  REPO_ROOT="$repo" BRANCH_PREFIX="claude/" bash -c "$block" 2>&1
 }
 
-OUT_F3="$(run_f3_line "$F3FIX" "$F3_LINE")"; CODE_F3=$?
+OUT_F3="$(run_f3_block "$F3FIX" "$F3_BLOCK")"; CODE_F3=$?
 [ "$CODE_F3" -ne 0 ] && pass "F3 BEHAVIORAL: a genuine git-add failure now exits non-zero" \
-  || fail "F3 BEHAVIORAL: expected non-zero exit on a real git-add failure, got 0"
+  || fail "F3 BEHAVIORAL: expected non-zero exit on a real git-add failure, got 0 (out: [$OUT_F3])"
 printf '%s' "$OUT_F3" | grep -qi 'ignored' && pass "F3 BEHAVIORAL: git's real error text (mentions 'ignored') is visible, not swallowed" \
   || fail "F3 BEHAVIORAL: expected git's error text to be visible, got: [$OUT_F3]"
 
-# --- NEGATIVE CONTROL: restoring the swallow suffix makes the exact same
-# failure disappear — exit 0, no output — proving the assertions are real. --
-OUT_F3NEG="$(run_f3_line "$F3FIX" "$F3_LINE 2>/dev/null || true")"; CODE_F3NEG=$?
+# --- NEGATIVE CONTROL: put the swallow back inside stage_required() and the
+# exact same failure disappears — exit 0, no output — proving the assertions
+# above are load-bearing and not passing for some incidental reason. A fresh
+# fixture is used because the positive run above already created the adopt
+# branch, and the checkout fallback would otherwise print on stderr. --------
+F3FIXNEG="$TMPROOT/f3-fixture-neg"
+git_init_repo "$F3FIXNEG"
+mkdir -p "$F3FIXNEG/.quetrex"
+printf '.quetrex/verify.json\n' > "$F3FIXNEG/.gitignore"
+jq -cn '{projectCode:"F3",branchPrefix:"claude/"}' > "$F3FIXNEG/.quetrex/project.json"
+jq -cn '{verify:["npm test"]}' > "$F3FIXNEG/.quetrex/verify.json"
+git -C "$F3FIXNEG" add .gitignore
+git -C "$F3FIXNEG" commit -q -m "chore: F3 negative-control fixture"
+
+F3_BLOCK_NEG="$(printf '%s\n' "$F3_BLOCK" | sed 's|git -C "$REPO_ROOT" add -- "$1" && return 0|git -C "$REPO_ROOT" add -- "$1" 2>/dev/null; return 0|')"
+if [ "$F3_BLOCK_NEG" = "$F3_BLOCK" ]; then
+  fail "F3 NEGATIVE CONTROL: could not re-introduce the swallow into stage_required() — the mutation did not apply, so this control proves nothing"
+fi
+OUT_F3NEG="$(run_f3_block "$F3FIXNEG" "$F3_BLOCK_NEG")"; CODE_F3NEG=$?
 if [ "$CODE_F3NEG" -eq 0 ] && [ -z "$OUT_F3NEG" ]; then
-  pass "F3 NEGATIVE CONTROL: restoring '2>/dev/null || true' makes the same real failure silently exit 0 with no output — proving the fix is load-bearing"
+  pass "F3 NEGATIVE CONTROL: putting '2>/dev/null' back inside stage_required() makes the same real failure silently exit 0 with no output — proving the fix is load-bearing"
 else
-  fail "F3 NEGATIVE CONTROL: expected exit 0 and no output with the swallow suffix restored, got exit=$CODE_F3NEG out=[$OUT_F3NEG]"
+  fail "F3 NEGATIVE CONTROL: expected exit 0 and no output with the swallow restored, got exit=$CODE_F3NEG out=[$OUT_F3NEG]"
 fi
 
 if [ "$FAIL" -eq 0 ]; then

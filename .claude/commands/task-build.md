@@ -401,11 +401,39 @@ quetrex-plan-stamp "$TMP_WT/.quetrex/plan/$TASK_ID.json" "$REPO_ROOT" "$BASE_BRA
 # patched the published spec branch mid-run to rescue it. Union-only: it never
 # removes an architect-authored entry, only adds names the architect missed.
 quetrex-env-derive plan "$TMP_WT/.quetrex/plan/$TASK_ID.json" "$REPO_ROOT" || exit 1
-git -C "$TMP_WT" checkout -q -b "$SPEC_BRANCH"
+git -C "$TMP_WT" checkout -q -B "$SPEC_BRANCH"
 git -C "$TMP_WT" add -f ".quetrex/plan/$TASK_ID.json"
 git -C "$TMP_WT" -c user.name='quetrex-bot' -c user.email='quetrex-bot@users.noreply.github.com' \
   commit -q -m "chore(spec): $TASK_ID build payload for cloud routine"
-git -C "$TMP_WT" push -f origin "$SPEC_BRANCH"
+```
+
+Publish it — idempotently, and never with a force-push:
+
+```bash
+# WHY NOT AN UNCONDITIONAL FORCE-PUSH. This repo's own PreToolUse guard
+# (.claude/hooks/deny-guard.sh, check_git -> push) DENIES the unconditional
+# force flags outright. This step used to publish the spec branch that way, and
+# it only ever survived because the spec branch was BRAND NEW on that run and
+# the dispatching session happened to hand-retry without the flag. Any
+# RE-dispatch of a task whose spec branch already exists hits the deny and the
+# dispatch dies with the plan unpublished — the cloud session then has nothing
+# to fetch in its step 2.
+#
+# WHY DELETE-THEN-PUSH AND NOT `--force-with-lease`. `--force-with-lease` IS
+# permitted by the guard, but it compares against the remote-TRACKING ref, and
+# $TMP_WT is a freshly-detached worktree that has never fetched
+# refs/remotes/origin/$SPEC_BRANCH — so the lease has no basis and git refuses
+# with "stale info" on exactly the re-dispatch this is meant to fix. Deleting
+# first needs no lease and no tracking ref. The spec branch is disposable by
+# construction (it carries only the plan JSON for one dispatch), so replacing it
+# wholesale is the correct semantic, not a workaround.
+if git -C "$TMP_WT" ls-remote --exit-code --heads origin "$SPEC_BRANCH" >/dev/null 2>&1; then
+  git -C "$TMP_WT" push --quiet origin --delete "$SPEC_BRANCH" || exit 1
+fi
+git -C "$TMP_WT" push --quiet origin "$SPEC_BRANCH" || exit 1
+```
+
+```bash
 git -C "$REPO_ROOT" worktree remove "$TMP_WT" --force
 ```
 
@@ -426,26 +454,37 @@ REPO_URL="$(git -C "$REPO_ROOT" remote get-url origin | sed -E 's#^git@([^:]+):#
 TASK_TITLE="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).title)' "$PAYLOAD")"
 ```
 
-The five-name substitution list in the next paragraph is the **single authority** for what
-gets filled, and it is a **checked contract** with the placeholder table at the top of
-`.claude/lib/cloud-build-routine.md` (:13-22), not documentation: `test/placeholder-substitution.test.sh`
+The substitution list in the next paragraph is the **single authority** for what gets
+filled, and it is a **checked contract** with the placeholder table at the top of
+`.claude/lib/cloud-build-routine.md`, not documentation: `test/placeholder-substitution.test.sh`
 asserts every placeholder appearing anywhere in that template is named here, and that the
 table names exactly this set — because a template placeholder this list forgot once shipped
 to the cloud unfilled, the run pushed its gate evidence to a branch named after the literal
 unsubstituted text, and `/quetrex:merge` found nothing on every single run.
 
-Load `.claude/lib/cloud-build-routine.md`, substitute its `{{TASK}}`, `{{REPO_URL}}`,
-`{{SPEC_BRANCH}}`, `{{BASE_BRANCH}}`, `{{BRANCH_PREFIX}}` placeholders with `$TASK_ID`,
-`$REPO_URL`, `$SPEC_BRANCH`, `$BASE_BRANCH_FOR_SPEC`, and the payload's `branchPrefix`, and
-use the filled text verbatim as the event's `message.content`. Then call the tool,
-`action:"create"` then `action:"run"`, with a body of this exact shape:
+Load `.claude/lib/cloud-build-routine.md`, substitute its `{{TASK}}`, `{{TITLE}}`,
+`{{REPO_URL}}`, `{{SPEC_BRANCH}}`, `{{BASE_BRANCH}}`, `{{BRANCH_PREFIX}}` placeholders with
+`$TASK_ID`, `$TASK_TITLE`, `$REPO_URL`, `$SPEC_BRANCH`, `$BASE_BRANCH_FOR_SPEC`, and the
+payload's `branchPrefix`, and use the filled text verbatim as the event's `message.content`.
 
-`name` is what the operator sees in the routine list on claude.ai and on the phone — the ONLY
-place this run is identified there, so it must be scannable at a glance: `<TASK_ID> <title>`,
-plain space, no `·` separator, no `(cloud build)` suffix (a wall of characters nobody recognizes
-is worse than useless on a phone-width list). If `<title>` alone would push `name` past ~60
-characters, truncate `<title>` to fit (cut to ~50 chars plus a trailing `…`) — never truncate or
-drop `<TASK_ID>`, since that is the one token the operator actually keys off.
+**Two different names, both derived from `$TASK_ID` + `$TASK_TITLE`, and both mandatory.**
+
+- `name` is what the operator sees in the routine LIST on claude.ai and on the phone, so it
+  must be scannable at a glance: `<TASK_ID> <title>`, plain space, no `·` separator, no
+  `(cloud build)` suffix (a wall of characters nobody recognizes is worse than useless on a
+  phone-width list).
+- The **session/transport** name is derived by the platform from the FIRST LINE of
+  `message.content`, which is why the template now opens with `{{TASK}} — {{TITLE}}` on its
+  own line. Before that, every dispatched build's first line was the identical
+  "You are a fresh Claude Code cloud session…" boilerplate, so two builds running at once
+  were indistinguishable on the phone — measured on QDM-4. Substituting `{{TITLE}}` is what
+  makes that line real; leaving it unfilled ships the literal text `{{TITLE}}` to the cloud.
+
+In both places: if `<title>` alone would push the name past ~60 characters, truncate
+`<title>` to fit (cut to ~50 chars plus a trailing `…`) — **never** truncate or drop
+`<TASK_ID>`, since that is the one token the operator actually keys off.
+
+Then call the tool with a body of this exact shape:
 
 ```json
 {
@@ -478,6 +517,34 @@ drop `<TASK_ID>`, since that is the one token the operator actually keys off.
 place a bearer token or any other secret in `name`, `message.content`, or anywhere else in
 this body: the CCR authenticates to GitHub with its own credentials, never one this session
 hands it.
+
+**Dispatch call order — exactly ONE run armed, and the disarm is part of dispatch.**
+
+`create` + `run` is NOT the dispatch sequence; it is two runs. `action:"run"` fires the
+routine immediately but does **not** consume the `run_once_at` schedule, so `next_run_at`
+stays armed and the platform fires the routine a SECOND time. Measured on QDM-4 (trigger
+`trig_01TdwkWbT6PradXbyFYDxovX`): the manual run fired at `20:59:16Z` while `next_run_at`
+still read `21:00:09Z` — a second, concurrent cloud build of the same task, on the same
+branch, 53 seconds later. Two sessions racing to push the same unit branch and open the same
+PR is a corrupt build, not a redundant one, and on QDM-4 it was only caught because a human
+happened to look at the trigger record and disable it by hand. Disarming is a dispatch step,
+never an afterthought. Make exactly these three calls, in exactly this order:
+
+1. `action:"create"` with the body above (`enabled: true`, `run_once_at: "<RUN_AT>"`).
+   It must be created enabled — a disabled routine has nothing for step 2 to run.
+2. `action:"run"` on the returned routine id. **This is the build.** Keep the id; it is the
+   monitor URL you report in step 3 below.
+3. `action:"update"` on that same id with `{"enabled": false}` — **immediately**, before you
+   report anything to the user. This is what cancels the still-pending `run_once_at`.
+
+Then **confirm the disarm from the tool's own response**: `next_run_at` must come back null
+or absent. If it still carries a timestamp, repeat step 3 — a second build is already
+scheduled and every second you spend reporting instead of disarming is a second closer to it
+firing. Never report a dispatch as successful while `next_run_at` is set.
+
+Disabling the routine does not touch the run already in flight; it only prevents the
+schedule from firing again. There is nothing to re-enable afterwards — a routine is fired
+once per dispatch, and a rebuild is a fresh `/quetrex:task-build`.
 
 **3. Return immediately.** Take the routine id the tool returns and report the **monitor
 URL** — `https://claude.ai/code/routines/{id}` — to the user, along with the spec branch and

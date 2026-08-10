@@ -57,6 +57,27 @@
 #          under BOTH bash and zsh.
 #   AC-C2: a quetrex-*.md file IS present -> the "npm-era commands" entry
 #          DOES appear, under BOTH bash and zsh.
+#
+# DEFECT D (Check 8 — pipeline permissions). NEW, from the QDM-4 cloud build.
+# The build reached its terminal stage and STALLED, paging the operator on his
+# phone to approve `gh pr create` — a step that is supposed to be automatic.
+# The cause: Glori-Holdings/quetrex-demo's .claude/settings.json had no
+# `permissions` key at all. /quetrex:init step 4e computes exactly that union
+# and init.md's own prose explains why the unattended pipeline hangs without
+# it, but the grant never landed and NOTHING anywhere reported that. Doctor
+# owns "is this repo actually armed", so it must be able to say so BEFORE a
+# build is dispatched, rather than the operator finding out from a phone
+# notification at the end of a build.
+#   AC-D1 (the exact QDM-4 shape): settings.json with NO permissions key ->
+#          Check 8 prints ✗, names BOTH stranding grants, and offers
+#          /quetrex:init as the fix.
+#   AC-D2 (green when armed): both Bash(git push:*) and Bash(gh pr:*) present
+#          -> ✓, no ✗ line.
+#   AC-D3 (partial grant is still broken): only Bash(git push:*) present ->
+#          ✗ naming the MISSING Bash(gh pr:*) and not claiming git push is
+#          missing. A presence-of-the-`permissions`-key check would pass here,
+#          which is exactly the too-shallow check that must not ship.
+#   AC-D4 (no settings.json at all): -> ✗, not a crash and not a silent pass.
 
 set -uo pipefail
 
@@ -103,6 +124,7 @@ extract_section() {  # extract_section <heading-regex-literal>
 
 CHECK2_SCRIPT="$(extract_section '## Check 2')"
 CHECK3_SCRIPT="$(extract_section '## Check 3')"
+CHECK8_SCRIPT="$(extract_section '## Check 8')"
 
 # Isolated PATH: bin/ (for quetrex-version) + node's own directory (both
 # Check 2 and Check 3 are node-assisted) + the base system dirs — but
@@ -122,6 +144,11 @@ if [ -z "$CHECK3_SCRIPT" ]; then
 else
   pass "setup: extracted Check 3's bash fence from doctor.md"
 fi
+if [ -z "$CHECK8_SCRIPT" ]; then
+  fail "setup: could not extract Check 8's bash fence from $DOCTOR_MD — doctor has no pipeline-permissions check at all, so a repo whose settings.json lacks permissions.allow gets zero warning and its next cloud build stalls at 'gh pr create'"
+else
+  pass "setup: extracted Check 8's bash fence from doctor.md"
+fi
 
 # run_check2 <fixture-repo-root> <fixture-home> [shell]
 run_check2() {
@@ -133,6 +160,19 @@ run_check2() {
     HOME_SETTINGS="$home/.claude/settings.json"; export HOME_SETTINGS
     PATH="$ISOLATED_PATH"; export PATH
     "$shell" -c "$CHECK2_SCRIPT"
+  )
+}
+
+# run_check8 <fixture-repo-root> [shell]
+run_check8() {
+  local repo="$1" shell="${2:-bash}"
+  (
+    REPO_ROOT="$repo"; export REPO_ROOT
+    HOME="$WORK/empty-home"; export HOME
+    SETTINGS="$repo/.claude/settings.json"; export SETTINGS
+    HOME_SETTINGS="$WORK/empty-home/.claude/settings.json"; export HOME_SETTINGS
+    PATH="$ISOLATED_PATH"; export PATH
+    "$shell" -c "$CHECK8_SCRIPT"
   )
 }
 
@@ -389,6 +429,69 @@ if [ "$ZSH_AVAILABLE" -eq 1 ]; then
     pass "AC-C2: bash and zsh produce byte-identical output for the same (matching) input"
   else
     fail "AC-C2: bash and zsh output diverged for the same input (bash: [$OUT_C2_BASH], zsh: [$OUT_C2_ZSH])"
+  fi
+fi
+
+# =============================================================================
+# DEFECT D — Check 8, pipeline permissions granted
+# =============================================================================
+mkdir -p "$WORK/empty-home/.claude"
+
+mk_perm_repo() {  # mk_perm_repo <dir> <settings-json-or-NONE>
+  mkdir -p "$1/.claude"
+  if [ "$2" = "NONE" ]; then
+    rm -f "$1/.claude/settings.json"
+  else
+    printf '%s\n' "$2" > "$1/.claude/settings.json"
+  fi
+}
+
+if [ -n "$CHECK8_SCRIPT" ]; then
+  # --- AC-D1: the exact QDM-4 shape — no `permissions` key at all -----------
+  D1_REPO="$WORK/d1-repo"
+  mk_perm_repo "$D1_REPO" '{ "enabledPlugins": { "quetrex@quetrex": true } }'
+  OUT_D1="$(run_check8 "$D1_REPO" bash 2>&1)"
+  if printf '%s' "$OUT_D1" | grep -q '✗' \
+     && printf '%s' "$OUT_D1" | grep -qF 'Bash(git push:*)' \
+     && printf '%s' "$OUT_D1" | grep -qF 'Bash(gh pr:*)' \
+     && printf '%s' "$OUT_D1" | grep -qF '/quetrex:init'; then
+    pass "AC-D1: a settings.json with NO permissions key is flagged ✗, naming both stranding grants and /quetrex:init as the fix"
+  else
+    fail "AC-D1: a settings.json with NO permissions key was not properly flagged (out: [$OUT_D1]) — this is the QDM-4 repo state, and it must never be diagnosed as healthy"
+  fi
+
+  # --- AC-D2: both grants present -> green ----------------------------------
+  D2_REPO="$WORK/d2-repo"
+  mk_perm_repo "$D2_REPO" '{ "permissions": { "allow": ["Bash(git push:*)","Bash(gh pr:*)","Edit(/**)"] } }'
+  OUT_D2="$(run_check8 "$D2_REPO" bash 2>&1)"
+  if printf '%s' "$OUT_D2" | grep -q '✓' && ! printf '%s' "$OUT_D2" | grep -q '✗'; then
+    pass "AC-D2: a repo carrying both pipeline grants is reported green"
+  else
+    fail "AC-D2: a correctly armed repo was not reported green (out: [$OUT_D2]) — a check that fires on a healthy repo is a check the operator learns to ignore"
+  fi
+
+  # --- AC-D3: PARTIAL grant is still broken ---------------------------------
+  D3_REPO="$WORK/d3-repo"
+  mk_perm_repo "$D3_REPO" '{ "permissions": { "allow": ["Bash(git push:*)"] } }'
+  OUT_D3="$(run_check8 "$D3_REPO" bash 2>&1)"
+  if printf '%s' "$OUT_D3" | grep -q '✗' && printf '%s' "$OUT_D3" | grep -qF 'Bash(gh pr:*)'; then
+    if printf '%s' "$OUT_D3" | grep -qF 'Bash(git push:*)'; then
+      fail "AC-D3: the ✗ line reports Bash(git push:*) as missing even though it IS granted (out: [$OUT_D3]) — the check must report the grants actually absent, not the whole list"
+    else
+      pass "AC-D3: a PARTIAL grant (git push only) is still ✗, and only the genuinely missing Bash(gh pr:*) is named"
+    fi
+  else
+    fail "AC-D3: a partial grant was not flagged (out: [$OUT_D3]) — a mere presence-of-the-permissions-key check passes here, and the pipeline still strands at 'gh pr create'"
+  fi
+
+  # --- AC-D4: no settings.json at all ---------------------------------------
+  D4_REPO="$WORK/d4-repo"
+  mk_perm_repo "$D4_REPO" "NONE"
+  OUT_D4="$(run_check8 "$D4_REPO" bash 2>&1)"
+  if printf '%s' "$OUT_D4" | grep -q '✗' && printf '%s' "$OUT_D4" | grep -qF '/quetrex:init'; then
+    pass "AC-D4: a repo with no .claude/settings.json at all is flagged ✗ with the /quetrex:init remediation, not crashed through and not silently passed"
+  else
+    fail "AC-D4: a repo with no .claude/settings.json produced no actionable ✗ (out: [$OUT_D4])"
   fi
 fi
 
