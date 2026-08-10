@@ -55,14 +55,15 @@ MOCKBIN="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-mockbin.XXXXXX")"
 cleanup() { rm -rf "$FIXTURE" "$MOCKBIN"; }
 trap cleanup EXIT
 
-# --- mock `gh` -- only implements what merge-gate.sh's PR-head resolution
-# calls: `gh pr view [<id>] [--repo x] --json headRefOid --jq .headRefOid`.
-# Prepended onto PATH for every hook invocation below so the suite never
-# depends on a real `gh` being installed/authenticated, and so the "PR head"
-# a test simulates is fully under the test's control. Set MOCK_GH_PR_VIEW_SHA
-# to the sha the mock should report, or MOCK_GH_PR_VIEW_FAIL=1 to simulate an
-# unresolvable PR (gh missing/unauthenticated/PR not found). When
-# MOCK_GH_ARGV_LOG names a file, every arg the hook actually passed to
+# --- mock `gh` -- only implements what merge-gate.sh's PR resolution calls:
+# `gh pr view [<id>] [--repo x] --json headRefOid,baseRefOid`. Prepended onto
+# PATH for every hook invocation below so the suite never depends on a real
+# `gh` being installed/authenticated, and so the "PR head"/"PR base" a test
+# simulates is fully under the test's control. Set MOCK_GH_PR_VIEW_SHA and
+# MOCK_GH_PR_BASE_SHA to the shas the mock should report (the hook parses the
+# JSON itself, same as it would gh's real output), or MOCK_GH_PR_VIEW_FAIL=1
+# to simulate an unresolvable PR (gh missing/unauthenticated/PR not found).
+# When MOCK_GH_ARGV_LOG names a file, every arg the hook actually passed to
 # `gh pr view` (after `pr view`) is written one-per-line — this is what makes
 # the PR_ID-parsing loop's ACTUAL resolved identifier assertable, rather than
 # only inferred from the gate's allow/deny outcome.
@@ -78,7 +79,7 @@ if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
     echo "mock gh: pr view failed" >&2
     exit 1
   fi
-  printf '%s' "${MOCK_GH_PR_VIEW_SHA:-}"
+  printf '{"headRefOid":"%s","baseRefOid":"%s"}' "${MOCK_GH_PR_VIEW_SHA:-}" "${MOCK_GH_PR_BASE_SHA:-}"
   exit 0
 fi
 echo "mock gh: unhandled subcommand: $*" >&2
@@ -154,33 +155,46 @@ GH_MERGE="$(printf 'gh pr mer%s' 'ge') 123 --squash"
 GH_CREATE="$(printf 'gh pr cre%s' 'ate')"
 MAIN="$(printf 'ma%s' 'in')"
 
-# run_hook <cwd> [pr_head_sha_override] [fail: 1 to simulate an unresolvable PR]
-# Without an override, the mock reports the fixture's OWN current git HEAD as
-# the "PR head" — reproducing exactly what the pre-fix hook computed directly
-# (git rev-parse HEAD in $ROOT), so every existing assertion below keeps
-# testing the same scenario it always did. Tests that need to reproduce the
-# real bug (local checkout on main, PR head elsewhere) pass an explicit
-# override.
-run_hook() {
-  local cwd="$1" pr_sha="${2:-}" failflag="${3:-}" payload
-  [ -z "$pr_sha" ] && pr_sha="$(git -C "$cwd" rev-parse HEAD 2>/dev/null)"
-  payload="$(jq -cn --arg cmd "$GH_MERGE" --arg cwd "$cwd" \
-    '{tool_input:{command:$cmd},cwd:$cwd}')"
-  printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" MOCK_GH_PR_VIEW_FAIL="$failflag" CLAUDE_PROJECT_DIR="$cwd" "$HOOK"
+# default_base_sha <cwd> — what the mock reports as baseRefOid when a test
+# doesn't care about the base end of the range: <cwd>'s own local main tip
+# (falling back to master). Reproduces exactly what the pre-Blocker-1 hook
+# used (a local ref lookup), so every existing assertion below that never
+# mentions a base override keeps testing the same scenario it always did.
+default_base_sha() {
+  git -C "$1" rev-parse --verify --quiet main 2>/dev/null \
+    || git -C "$1" rev-parse --verify --quiet master 2>/dev/null
 }
 
-# run_cmd <cwd> <command> [pr_head_sha_override] [argv_log_file] — exercise the
-# hook against an ARBITRARY command, to assert what is and is not classified
-# as a merge vector in the first place. Same mock-gh default as run_hook. The
-# optional 4th arg captures what the hook actually passed to `gh pr view`
-# (see MOCK_GH_ARGV_LOG above) — used to assert the resolved PR identifier
-# directly, not just infer it from allow/deny.
-run_cmd() {
-  local cwd="$1" cmd="$2" pr_sha="${3:-}" argv_log="${4:-}" payload
+# run_hook <cwd> [pr_head_sha_override] [pr_base_sha_override] [fail: 1 to
+# simulate an unresolvable PR]. Without overrides, the mock reports <cwd>'s
+# own current git HEAD as the "PR head" and its local main as the "PR base"
+# — reproducing exactly what the pre-fix hook computed directly, so every
+# existing assertion below keeps testing the same scenario it always did.
+# Tests reproducing the real bugs (local checkout elsewhere than the PR
+# head/base) pass explicit overrides.
+run_hook() {
+  local cwd="$1" pr_sha="${2:-}" base_sha="${3:-}" failflag="${4:-}" payload
   [ -z "$pr_sha" ] && pr_sha="$(git -C "$cwd" rev-parse HEAD 2>/dev/null)"
+  [ -z "$base_sha" ] && base_sha="$(default_base_sha "$cwd")"
+  payload="$(jq -cn --arg cmd "$GH_MERGE" --arg cwd "$cwd" \
+    '{tool_input:{command:$cmd},cwd:$cwd}')"
+  printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" MOCK_GH_PR_BASE_SHA="$base_sha" MOCK_GH_PR_VIEW_FAIL="$failflag" CLAUDE_PROJECT_DIR="$cwd" "$HOOK"
+}
+
+# run_cmd <cwd> <command> [pr_head_sha_override] [pr_base_sha_override]
+# [argv_log_file] — exercise the hook against an ARBITRARY command, to assert
+# what is and is not classified as a merge vector in the first place. Same
+# mock-gh defaults as run_hook. The optional 5th arg captures what the hook
+# actually passed to `gh pr view` (see MOCK_GH_ARGV_LOG above) — used to
+# assert the resolved PR identifier directly, not just infer it from
+# allow/deny.
+run_cmd() {
+  local cwd="$1" cmd="$2" pr_sha="${3:-}" base_sha="${4:-}" argv_log="${5:-}" payload
+  [ -z "$pr_sha" ] && pr_sha="$(git -C "$cwd" rev-parse HEAD 2>/dev/null)"
+  [ -z "$base_sha" ] && base_sha="$(default_base_sha "$cwd")"
   payload="$(jq -cn --arg cmd "$cmd" --arg cwd "$cwd" \
     '{tool_input:{command:$cmd},cwd:$cwd}')"
-  printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" MOCK_GH_ARGV_LOG="$argv_log" CLAUDE_PROJECT_DIR="$cwd" "$HOOK" 2>&1
+  printf '%s' "$payload" | env PATH="$MOCKBIN:$PATH" MOCK_GH_PR_VIEW_SHA="$pr_sha" MOCK_GH_PR_BASE_SHA="$base_sha" MOCK_GH_ARGV_LOG="$argv_log" CLAUDE_PROJECT_DIR="$cwd" "$HOOK" 2>&1
 }
 
 is_deny() { printf '%s' "$1" | grep -q '"permissionDecision":"deny"\|MERGE GATE'; }
@@ -325,7 +339,7 @@ fi
 
 # C3 -- the PR's head commit cannot be resolved at all (gh missing/PR gone/not
 # authenticated). FAIL CLOSED: must deny, never allow an unevaluated merge.
-OUT="$(run_hook "$FIXTURE" "" 1)"; CODE=$?
+OUT="$(run_hook "$FIXTURE" "" "" 1)"; CODE=$?
 if [ "$CODE" -eq 0 ] && is_deny "$OUT"; then
   pass "DEFECT C3: PR head unresolvable (gh failure) -> DENIED (fail closed)"
 else
@@ -445,7 +459,7 @@ ARGV_LOG="$(mktemp "${TMPDIR:-/tmp}/merge-gate-argv.XXXXXX")"
 assert_resolves_99() {  # assert_resolves_99 <label> <command>
   local label="$1" cmd="$2" out code resolved
   : > "$ARGV_LOG"
-  out="$(run_cmd "$FIXTURE" "$cmd" "$HEAD_SHA" "$ARGV_LOG")"; code=$?
+  out="$(run_cmd "$FIXTURE" "$cmd" "$HEAD_SHA" "" "$ARGV_LOG")"; code=$?
   resolved="$(head -n1 "$ARGV_LOG" 2>/dev/null)"
   if [ "$resolved" = "99" ] && [ "$code" -eq 0 ] && [ -z "$out" ]; then
     pass "DEFECT E: $label -> correctly resolved PR 99"
@@ -468,6 +482,93 @@ assert_resolves_99 "--match-head-commit value is not a PR number" \
   "$(printf 'gh pr mer%s' 'ge') --match-head-commit deadbeefcafe 99 --squash"
 
 rm -f "$ARGV_LOG"
+
+# =============================================================================
+# DEFECT G — the BASE end of the diff range must be the PR's actual base
+# (baseRefOid), not local main, which is routinely BEHIND origin.
+#
+# THE BUG: DEFECT F fixed the HEAD end of the range but left the base end as
+# a local ref lookup. The ordinary sequence — the cloud cuts a PR branch off
+# CURRENT main while the operator's laptop hasn't pulled — means local main
+# is stale relative to the PR's real base:
+#
+#   local main = M0 (never pulled) | origin/main = M1 | PR head = M1 + mine.ts
+#
+# Diffing "$DIFF_BASE...HEAD_SHA" from local M0 instead of the PR's actual
+# base M1 makes the M0->M1 file (something ANOTHER team already merged) show
+# up as part of THIS diff, denying a clean PR as touching a file it never
+# touched. Uses a dedicated origin/local repo pair (not $FIXTURE) so the
+# "local main is behind" shape is real, not simulated.
+# =============================================================================
+G_ORIGIN="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-g-origin.XXXXXX")"
+git -C "$G_ORIGIN" init -q -b main
+git -C "$G_ORIGIN" config user.email "test@example.com"
+git -C "$G_ORIGIN" config user.name "Fixture"
+echo root > "$G_ORIGIN/root.txt"
+git -C "$G_ORIGIN" add root.txt
+git -C "$G_ORIGIN" commit -q -m "chore: root commit"
+
+G_LOCAL="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-g-local.XXXXXX")"
+git clone -q "$G_ORIGIN" "$G_LOCAL"
+git -C "$G_LOCAL" config user.email "test@example.com"
+git -C "$G_LOCAL" config user.name "Fixture"
+mkdir -p "$G_LOCAL/.quetrex"
+printf '{"verify":["true","echo ok"]}' > "$G_LOCAL/.quetrex/verify.json"
+
+# Origin advances WITHOUT $G_LOCAL ever fetching: another team's work lands
+# on main first...
+echo other >> "$G_ORIGIN/other-team-file.ts"
+git -C "$G_ORIGIN" add other-team-file.ts
+git -C "$G_ORIGIN" commit -q -m "feat: other team's already-merged work"
+M1_SHA="$(git -C "$G_ORIGIN" rev-parse HEAD)"
+
+# ...and the PR branch is cut from THAT tip, adding only its own file.
+git -C "$G_ORIGIN" checkout -q -b claude/pr-g
+echo mine >> "$G_ORIGIN/mine.ts"
+git -C "$G_ORIGIN" add mine.ts
+git -C "$G_ORIGIN" commit -q -m "feat: my PR's own change"
+PR_HEAD_G="$(git -C "$G_ORIGIN" rev-parse HEAD)"
+git -C "$G_ORIGIN" checkout -q main
+
+# A plan owning ONLY the PR's own file -- if the gate diffs from stale local
+# main (M0), other-team-file.ts shows up as "changed" and unowned; if it
+# diffs from the PR's real base (M1), only mine.ts shows up, and it IS owned.
+mkdir -p "$G_LOCAL/.quetrex/plan"
+jq -cn '{task:"T-1",ownership:{"mine.ts":"ws-a"}}' > "$G_LOCAL/.quetrex/plan/T-1.json"
+jq -cn '{task:"T-1"}' > "$G_LOCAL/.quetrex/state.json"
+
+: > "$G_LOCAL/.quetrex/verify-ledger.jsonl"
+jq -cn --arg sha "$PR_HEAD_G" --arg cwd "$G_LOCAL" \
+  '{ts:"2026-01-01T00:00:00Z",cmd:"true",cwd:$cwd,sha:$sha,exit:0,tail:""}' \
+  >> "$G_LOCAL/.quetrex/verify-ledger.jsonl"
+jq -cn --arg sha "$PR_HEAD_G" --arg cwd "$G_LOCAL" \
+  '{ts:"2026-01-01T00:00:01Z",cmd:"echo ok",cwd:$cwd,sha:$sha,exit:0,tail:"ok"}' \
+  >> "$G_LOCAL/.quetrex/verify-ledger.jsonl"
+jq -cn --arg sha "$PR_HEAD_G" \
+  '{verdict:"AUTO_MERGE",sha:$sha,confirmed:[],inputs:{nativeSecurityReview:"clean"}}' \
+  > "$G_LOCAL/.quetrex/review-verdict.json"
+
+# G1 -- THE FIX: base of the range is the PR's REAL base (M1, fetched from
+# origin), not $G_LOCAL's stale local main (M0) -> only mine.ts is in scope,
+# it IS owned -> ALLOWED. $G_LOCAL's main never moves off M0 the whole time.
+OUT="$(run_hook "$G_LOCAL" "$PR_HEAD_G" "$M1_SHA")"; CODE=$?
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "DEFECT G1 (the fix): base-of-range is the PR's real base, not stale local main -> ALLOWED"
+else
+  fail "DEFECT G1: expected exit 0 + empty stdout (only mine.ts changed, and it IS owned), got exit $CODE stdout: [$OUT]"
+fi
+
+# G2 -- the guardrail: if the PR base is WRONGLY reported as the stale local
+# tip (M0), other-team-file.ts is (wrongly) in scope and unowned -> DENY.
+# Proves G1's ALLOW is really about which base is used, not a vacuous pass.
+OUT="$(run_hook "$G_LOCAL" "$PR_HEAD_G" "")"
+if is_deny "$OUT"; then
+  pass "DEFECT G2 (guardrail): reporting local main (M0) as the base wrongly includes other-team-file.ts -> DENIED"
+else
+  fail "DEFECT G2: expected a deny decision when the base is misreported as stale local main, got [$OUT]"
+fi
+
+rm -rf "$G_ORIGIN" "$G_LOCAL"
 
 # =============================================================================
 # DEFECT A — the gate must fire on MERGES ONLY.
@@ -573,6 +674,19 @@ if printf '%s' "$OUT" | grep -q 'other-org\|cannot evaluate this merge'; then
   fail "CROSS-REPO: --repo matching this repo's own origin must be gated normally, not refused as foreign"
 else
   pass "CROSS-REPO: --repo matching this repo's origin is gated normally"
+fi
+
+# THE GAP: the refusal above matched only the LONG form `--repo`. `-R` is the
+# exact same flag (gh's own --help lists it as an INHERITED flag alongside
+# --repo), so `gh pr merge -R other-org/other-repo 7 --squash` bypassed the
+# refusal entirely and would have been evaluated against THIS repo's
+# artifacts -- a live cross-repo authorization leak, not just a missed
+# detection.
+OUT="$(run_cmd "$FIXTURE" "$(printf 'gh pr mer%s' 'ge') 7 --squash -R other-org/other-repo")"
+if is_deny "$OUT" && printf '%s' "$OUT" | grep -q 'other-org/other-repo'; then
+  pass "CROSS-REPO: gh pr merge -R <other repo> (short form) is refused, naming the mismatch"
+else
+  fail "CROSS-REPO: gh pr merge -R <other repo> should be refused with the mismatch named, got: ${OUT:0:200}"
 fi
 git -C "$FIXTURE" remote remove origin 2>/dev/null || true
 
