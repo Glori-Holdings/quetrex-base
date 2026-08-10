@@ -1705,6 +1705,18 @@ jq -cn --arg sha "$Q_HEAD" '{verdict:"AUTO_MERGE",sha:$sha,confirmed:[],inputs:{
 # exist, and deny.
 rm -f "$FIXTURE_Q/.quetrex/security-findings.json"
 
+# P-setup -- sanity/positive control: repo P's clean push ALONE must
+# genuinely ALLOW -- proves P is not itself the confound (the exact
+# fragility DEFECT L4/L5 fixed: a fixture that denies on its own for an
+# unrelated reason makes any later "still denies" assertion vacuous no
+# matter what DIFF_BASE does).
+OUT="$(run_cmd "$FIXTURE_P" "git -C $FIXTURE_P push origin $MAIN")"; CODE=$?
+if [ "$CODE" -eq 0 ] && [ -z "$OUT" ]; then
+  pass "DEFECT P setup: repo P's push ALONE genuinely ships (not a confound)"
+else
+  fail "DEFECT P setup: expected repo P alone to ship (empty stdout), got exit $CODE stdout: [$OUT]"
+fi
+
 # P-setup -- sanity: repo Q's push ALONE (sensitive file correctly diffed
 # against Q's real "master" base) must DENY on its own -- proves the
 # fixture itself is right before combining it with P.
@@ -1725,6 +1737,27 @@ if is_deny "$OUT"; then
   pass "DEFECT P (the fix): clean-repo-P push && sensitive-repo-Q push -- Q's own base is still correctly resolved, denies"
 else
   fail "DEFECT P: expected repo Q's diff-content gate to still deny despite P running first, got: ${OUT:0:220}"
+fi
+
+# WHICH repo denied, not just that something did -- deny()'s [$VECTOR_LABEL]
+# prefix (no origin remote configured on either fixture, so VECTOR_LABEL
+# falls back to the absolute checkout path) must name Q, never P. A false
+# pass here (denying, but for/about the wrong repo) is exactly as useless
+# as DEFECT L4/L5's original vacuous confound.
+#
+# Matched by basename, not the full $FIXTURE_Q/$FIXTURE_P path: the hook
+# resolves ROOT via `git -C ... rev-parse --show-toplevel`, which on macOS
+# expands the /tmp -> /private/tmp (and /var -> /private/var) symlink, so
+# the raw $FIXTURE_Q string this test built never appears verbatim in the
+# hook's own output even when it correctly names Q. The mktemp-suffixed
+# basename is unaffected by that resolution and still uniquely identifies
+# the fixture.
+Q_BASE="$(basename "$FIXTURE_Q")"
+P_BASE="$(basename "$FIXTURE_P")"
+if printf '%s' "$OUT" | grep -qF "$Q_BASE" && ! printf '%s' "$OUT" | grep -qF "$P_BASE"; then
+  pass "DEFECT P (the fix): the denial names repo Q, not repo P"
+else
+  fail "DEFECT P: expected the denial to name repo Q ($Q_BASE) and not repo P ($P_BASE), got: ${OUT:0:300}"
 fi
 
 rm -rf "$FIXTURE_P" "$FIXTURE_Q"
