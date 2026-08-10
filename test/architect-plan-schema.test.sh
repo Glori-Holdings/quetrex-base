@@ -37,6 +37,10 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARCH="$REPO_ROOT/.claude/agents/architect.md"
+DEVPIPE="$REPO_ROOT/.claude/lib/dev-pipeline.md"
+TASKBUILD="$REPO_ROOT/.claude/commands/task-build.md"
+DERIVE_TOOL="$REPO_ROOT/bin/quetrex-env-derive"
+CLOUD_PREP="$REPO_ROOT/bin/quetrex-cloud-prep"
 
 FAIL=0
 pass() { printf 'ok - %s\n' "$1"; }
@@ -311,10 +315,462 @@ if [ "$TOOLS_LINE" = "tools: Read, Grep, Glob, Write" ]; then
 else
   fail "frontmatter tools line changed (got: '${TOOLS_LINE}') — the base_sha no-Bash rationale is now stale"
 fi
-if printf '%s' "$TOOLS_LINE" | grep -qw 'Bash'; then
-  fail "frontmatter grants Bash — the base_sha rule's 'no Bash' reason no longer holds"
-else
+# GATED ON A REAL tools: LINE, not just an absence of the word "Bash" — an
+# absent-or-empty $TOOLS_LINE (no `tools:` line in the frontmatter at all)
+# would otherwise satisfy `grep -qw 'Bash'` failing to match and PASS this
+# check, when in fact nothing was verified at all. The check above already
+# fails on that shape, but this one must not independently claim proof it
+# doesn't have.
+if [ -n "$TOOLS_LINE" ] && ! printf '%s' "$TOOLS_LINE" | grep -qw 'Bash'; then
   pass "frontmatter grants no Bash (the base_sha rationale still holds)"
+else
+  fail "frontmatter grants Bash, or no 'tools:' line was found at all — the base_sha rule's 'no Bash' reason cannot be confirmed"
+fi
+
+# --- (f) Contract A actually exists — AC19. architect.md and
+# bin/quetrex-cloud-prep both cite "Contract A ... in .claude/lib/dev-pipeline.md
+# ('The two env shape contracts')" as the single source of truth for the
+# required_env entry shape. A grep of dev-pipeline.md found 0 occurrences of
+# 'Contract A' — the cited authority did not exist. This asserts it now does,
+# and that it actually states the shape rather than merely naming it.
+if [ -f "$DEVPIPE" ]; then
+  DP_CONTRACT_A="$(grep -c 'Contract A' "$DEVPIPE")"
+  if [ "$DP_CONTRACT_A" -ge 1 ]; then
+    pass "dev-pipeline.md names Contract A at least once"
+  else
+    fail "dev-pipeline.md never mentions Contract A — the authority architect.md and bin/quetrex-cloud-prep both cite does not exist"
+  fi
+
+  MISSING_DP_KEYS=""
+  for k in name read_at placeholderable why; do
+    n="$(grep -c "\`$k\`" "$DEVPIPE")"
+    [ "$n" -ge 1 ] || MISSING_DP_KEYS="$MISSING_DP_KEYS $k"
+  done
+  if [ -z "$MISSING_DP_KEYS" ]; then
+    pass "dev-pipeline.md's Contract A section names all four entry keys"
+  else
+    fail "dev-pipeline.md is missing these Contract A keys:$MISSING_DP_KEYS"
+  fi
+
+  DP_MISSING_FIELDS=""
+  for field in required_env env_placeholdered; do
+    n="$(grep -c "$field" "$DEVPIPE")"
+    [ "$n" -ge 1 ] || DP_MISSING_FIELDS="$DP_MISSING_FIELDS $field"
+  done
+  if [ -z "$DP_MISSING_FIELDS" ]; then
+    pass "dev-pipeline.md names both contract field names: required_env and env_placeholdered"
+  else
+    fail "dev-pipeline.md never names these contract fields:$DP_MISSING_FIELDS"
+  fi
+
+  DP_TOOL_MENTIONS="$(grep -c 'quetrex-env-derive' "$DEVPIPE")"
+  if [ "$DP_TOOL_MENTIONS" -ge 1 ]; then
+    pass "dev-pipeline.md names the shared derivation tool quetrex-env-derive"
+  else
+    fail "dev-pipeline.md never names bin/quetrex-env-derive as the shared implementation both /quetrex:init and the dispatcher call"
+  fi
+else
+  fail "dev-pipeline.md not found at $DEVPIPE"
+  fail "dev-pipeline.md Contract A key checks (file missing)"
+  fail "dev-pipeline.md contract field name checks (file missing)"
+  fail "dev-pipeline.md derivation tool name check (file missing)"
+fi
+
+# The architect rule must additionally read the committed derivation output
+# instead of inventing a second one: it needs to say 'requiredEnv' (the
+# verify.json key), '.quetrex/verify.json' (where it's committed) and
+# 'dispatcher' (who repairs a miss) — 3 of 3 greps, per AC19.
+ARCH_MISSING_TOKENS=""
+for token in 'requiredEnv' '\.quetrex/verify\.json' 'dispatcher'; do
+  n="$(grep -c "$token" "$ARCH")"
+  [ "$n" -ge 1 ] || ARCH_MISSING_TOKENS="$ARCH_MISSING_TOKENS $token"
+done
+if [ -z "$ARCH_MISSING_TOKENS" ]; then
+  pass "architect.md contains requiredEnv, .quetrex/verify.json and dispatcher (reads the committed derivation instead of inventing a second one)"
+else
+  fail "architect.md is missing these tokens:$ARCH_MISSING_TOKENS — it must read the committed .quetrex/verify.json requiredEnv map (the derivation's own reviewed output) instead of re-deriving it"
+fi
+
+# --- (g) the dispatcher stamps required_env one line after quetrex-plan-stamp
+# — AC18. task-build.md:393 already invokes quetrex-plan-stamp with
+# `|| exit 1` immediately before the spec worktree is committed and pushed;
+# required_env must be stamped by the same deterministic executable path.
+ac18_checks() {  # ac18_checks <file> -> prints exactly 3 lines, PASS or FAIL:<reason>
+  local f="$1" derive_count derive_line derive_text stamp_line_num derive_line_num add_line_num
+  derive_count="$(grep -c 'quetrex-env-derive plan' "$f")"
+  if [ "$derive_count" -ge 1 ]; then echo "PASS"; else echo "FAIL:count"; fi
+
+  derive_line="$(grep -n 'quetrex-env-derive plan' "$f" | head -1)"
+  derive_text="${derive_line#*:}"
+  case "$derive_text" in
+    *'|| exit 1') echo "PASS" ;;
+    *) echo "FAIL:suffix" ;;
+  esac
+
+  stamp_line_num="$(grep -n 'quetrex-plan-stamp ' "$f" | head -1 | cut -d: -f1)"
+  derive_line_num="${derive_line%%:*}"
+  add_line_num="$(grep -n 'git -C "\$TMP_WT" add -f' "$f" | head -1 | cut -d: -f1)"
+  if [ -n "$stamp_line_num" ] && [ -n "$derive_line_num" ] && [ -n "$add_line_num" ] \
+     && [ "$derive_line_num" -gt "$stamp_line_num" ] && [ "$derive_line_num" -lt "$add_line_num" ]; then
+    echo "PASS"
+  else
+    echo "FAIL:order"
+  fi
+}
+
+if [ -f "$TASKBUILD" ]; then
+  RESULTS18="$(ac18_checks "$TASKBUILD")"
+  R18_1="$(printf '%s\n' "$RESULTS18" | sed -n '1p')"
+  R18_2="$(printf '%s\n' "$RESULTS18" | sed -n '2p')"
+  R18_3="$(printf '%s\n' "$RESULTS18" | sed -n '3p')"
+
+  if [ "$R18_1" = "PASS" ]; then
+    pass "task-build.md calls quetrex-env-derive plan at least once"
+  else
+    fail "task-build.md never calls quetrex-env-derive plan — required_env is never stamped into the dispatched plan"
+  fi
+  if [ "$R18_2" = "PASS" ]; then
+    pass "the quetrex-env-derive plan call ends with the literal '|| exit 1'"
+  else
+    fail "the quetrex-env-derive plan call must end with '|| exit 1'"
+  fi
+  if [ "$R18_3" = "PASS" ]; then
+    pass "the quetrex-env-derive plan call lands after quetrex-plan-stamp and before the git add -f staging line"
+  else
+    fail "the quetrex-env-derive plan call must land strictly between the quetrex-plan-stamp invocation and the git add -f line that stages the plan for commit"
+  fi
+
+  STAMP_COUNT="$(grep -c 'quetrex-plan-stamp ' "$TASKBUILD")"
+  if [ "$STAMP_COUNT" = "1" ]; then
+    pass "the surrounding fenced block still contains exactly 1 quetrex-plan-stamp invocation (unmodified)"
+  else
+    fail "expected exactly 1 quetrex-plan-stamp invocation, got $STAMP_COUNT — quetrex-plan-stamp itself must not be modified"
+  fi
+
+  # NEGATIVE CONTROL — deleting only the quetrex-env-derive plan call line
+  # must turn exactly 3 assertions red (the 3 above), leaving every
+  # pre-existing assertion in this file green.
+  MUT_TB="$TMPD/task-build.no-derive-stamp.md"
+  grep -v 'quetrex-env-derive plan' "$TASKBUILD" > "$MUT_TB"
+  RESULTS18_NEG="$(ac18_checks "$MUT_TB")"
+  REDS18_NEG="$(printf '%s\n' "$RESULTS18_NEG" | grep -c '^FAIL')"
+  if [ "$REDS18_NEG" = "3" ]; then
+    pass "NEGATIVE CONTROL: deleting only the quetrex-env-derive plan call line turns exactly 3 assertions red"
+  else
+    fail "NEGATIVE CONTROL: expected exactly 3 reds when the call line is deleted, got $REDS18_NEG"
+  fi
+else
+  fail "task-build.md not found at $TASKBUILD"
+  fail "task-build.md dispatcher-stamp checks (file missing)"
+fi
+
+# --- (h) end to end — AC17. The dispatcher stamp closes the QDM-1 defect
+# unattended: the plan carries Contract A required_env[], and
+# quetrex-cloud-prep hydrate — which reads only `.name` — exports exactly the
+# derived name with a credential-less placeholder, with no human hand-
+# patching the spec branch.
+#
+# THE CONTRACT `plan` MUST PROVE (post static-inference deletion, AC20):
+# it PROJECTS required_env from the human's COMMITTED declaration — the
+# `requiredEnv` mapping in .quetrex/verify.json, read from `git show
+# HEAD:.quetrex/verify.json` — the SAME artifact verify-gate.sh's
+# should_skip_for_env reads, and the ONLY thing `quetrex-env-derive declare`
+# can ever write (AC21). It never re-derives, never falls back to
+# candidateList/fallback-less-read evidence on its own, even when that
+# evidence would agree with the answer a human would have given.
+if [ ! -f "$DERIVE_TOOL" ]; then
+  fail "AC17: bin/quetrex-env-derive not found at $DERIVE_TOOL"
+elif [ ! -f "$CLOUD_PREP" ]; then
+  fail "AC17: bin/quetrex-cloud-prep not found at $CLOUD_PREP"
+elif ! command -v jq >/dev/null 2>&1; then
+  echo "SKIP AC17: jq is not installed — this section is jq-assisted, nothing to test"
+else
+  mk_ac17_fixture() {  # mk_ac17_fixture <dir> [with-declare=1]
+    # with-declare=1 (default): runs the REAL `quetrex-env-derive declare`
+    # against this fixture (--cmd "npm run build" --env A_URL) and commits
+    # the result, so `plan` has a genuine human-confirmed, committed
+    # requiredEnv declaration to project from — the actual interface, never
+    # a hand-authored JSON stand-in for what declare would have written.
+    # with-declare=0: commits verify.json with a verify[] chain but never
+    # calls declare — no requiredEnv key reaches HEAD at all, even though
+    # A_URL remains a genuine committed candidate (declared in .env.example,
+    # read fallback-lessly at src/db.js:3).
+    local d="$1"
+    local with_declare="${2:-1}"
+    mkdir -p "$d/src"
+    git -C "$d" init -q -b main
+    git -C "$d" config user.email "test@example.com"
+    git -C "$d" config user.name "Fixture"
+    printf 'A_URL=\n' > "$d/.env.example"
+    cat > "$d/src/db.js" <<'EOF'
+// db client module
+// A_URL has no fallback -- line 3 is the read the tool must find
+const url = process.env.A_URL;
+EOF
+    cat > "$d/package.json" <<'EOF'
+{
+  "scripts": {
+    "build": "./build.sh"
+  }
+}
+EOF
+    cat > "$d/build.sh" <<'EOF'
+#!/usr/bin/env bash
+if [ -z "${A_URL:-}" ]; then exit 1; else exit 0; fi
+EOF
+    chmod +x "$d/build.sh"
+    mkdir -p "$d/.quetrex"
+    jq -n '{verify: ["npm run build"]}' > "$d/.quetrex/verify.json"
+    git -C "$d" add -A
+    git -C "$d" commit -q -m "chore: AC17 fixture — A_URL is a committed candidate, not yet declared"
+    mkdir -p "$d/.quetrex/plan"
+    if [ "$with_declare" = "1" ]; then
+      "$DERIVE_TOOL" declare "$d" --cmd "npm run build" --env A_URL >/dev/null
+      git -C "$d" add .quetrex/verify.json
+      git -C "$d" commit -q -m "declare requiredEnv for npm run build"
+    fi
+  }
+
+  F17="$TMPD/ac17"
+  mk_ac17_fixture "$F17"
+  PLAN17="$F17/.quetrex/plan/T-1.json"
+  jq -n '{
+    task: "T-1", route: "STANDARD", base_sha: "deadbeef", summary: "AC17 fixture plan",
+    workstreams: [], ownership: {}, acceptance: [], security_surface: [],
+    verify: ["npm run build"],
+    security_review_required: false, db_migration: false, impact: {}, notes: []
+  }' > "$PLAN17"
+  PRE17_CANON="$(jq -S . "$PLAN17")"
+
+  "$DERIVE_TOOL" plan "$PLAN17" "$F17" >/dev/null; CODE17=$?
+  if [ "$CODE17" -eq 0 ]; then
+    pass "AC17: quetrex-env-derive plan exits 0"
+  else
+    fail "AC17: expected exit 0, got $CODE17"
+  fi
+
+  REQ_LEN17="$(jq '.required_env | length' "$PLAN17")"
+  if [ "$REQ_LEN17" = "1" ]; then
+    pass "AC17: required_env has length 1 after the stamp"
+  else
+    fail "AC17: expected required_env length 1, got '$REQ_LEN17'"
+  fi
+
+  REQ_KEYS17="$(jq -r '.required_env[0] | keys | sort | join(",")' "$PLAN17")"
+  if [ "$REQ_KEYS17" = "name,placeholderable,read_at,why" ]; then
+    pass "AC17: required_env[0] carries exactly name,placeholderable,read_at,why"
+  else
+    fail "AC17: expected exact key set, got '$REQ_KEYS17'"
+  fi
+
+  REQ_NAME17="$(jq -r '.required_env[0].name' "$PLAN17")"
+  if [ "$REQ_NAME17" = "A_URL" ]; then
+    pass "AC17: required_env[0].name == A_URL"
+  else
+    fail "AC17: expected name A_URL, got '$REQ_NAME17'"
+  fi
+
+  REQ_READAT17="$(jq -r '.required_env[0].read_at' "$PLAN17")"
+  if [ "$REQ_READAT17" = "src/db.js:3" ]; then
+    pass "AC17: required_env[0].read_at == src/db.js:3"
+  else
+    fail "AC17: expected read_at src/db.js:3, got '$REQ_READAT17'"
+  fi
+
+  POST17_DEL_CANON="$(jq -S 'del(.required_env)' "$PLAN17")"
+  if [ "$POST17_DEL_CANON" = "$PRE17_CANON" ]; then
+    pass "AC17: stripping required_env from the stamped plan reproduces the pre-stamp plan byte-for-byte (jq -S) -- base_sha and every architect field survive"
+  else
+    fail "AC17: stamping the plan altered a field other than required_env"
+  fi
+
+  cp "$PLAN17" "$TMPD/ac17-after-run1.json"
+  "$DERIVE_TOOL" plan "$PLAN17" "$F17" >/dev/null
+  if cmp -s "$TMPD/ac17-after-run1.json" "$PLAN17"; then
+    pass "AC17: a second stamp produces a byte-identical file (idempotent)"
+  else
+    fail "AC17: a second stamp changed the file — the stamp must be idempotent"
+  fi
+
+  STAMP_ARTIFACTS17="$(find "$F17/.quetrex/plan" \( -name '.stamp.*' -o -name '.qxcp.*' \) 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$STAMP_ARTIFACTS17" = "0" ]; then
+    pass "AC17: 0 stray .stamp.*/.qxcp.* files remain in the plan directory"
+  else
+    fail "AC17: expected 0 stray temp files, found $STAMP_ARTIFACTS17"
+  fi
+
+  # UNION — a plan whose architect already emitted an entry for a name the
+  # scan would not find keeps that entry, unchanged, and gains the derived one.
+  F17u="$TMPD/ac17-union"
+  mk_ac17_fixture "$F17u"
+  PLAN17u="$F17u/.quetrex/plan/T-2.json"
+  jq -n '{
+    task: "T-2", route: "STANDARD", base_sha: "deadbeef", summary: "union fixture",
+    workstreams: [], ownership: {}, acceptance: [], security_surface: [],
+    verify: ["npm run build"],
+    required_env: [{name:"ARCHITECT_ONLY",read_at:"src/other.js:9",placeholderable:true,why:"architect found it by hand"}],
+    security_review_required: false, db_migration: false, impact: {}, notes: []
+  }' > "$PLAN17u"
+  "$DERIVE_TOOL" plan "$PLAN17u" "$F17u" >/dev/null
+  UNION_LEN17="$(jq '.required_env | length' "$PLAN17u")"
+  if [ "$UNION_LEN17" = "2" ]; then
+    pass "AC17: UNION — re-running against a plan with an architect-authored entry yields length 2"
+  else
+    fail "AC17: expected union length 2, got '$UNION_LEN17'"
+  fi
+  ARCH_ENTRY_UNCHANGED17="$(jq -S -c '.required_env[] | select(.name=="ARCHITECT_ONLY")' "$PLAN17u")"
+  if [ "$ARCH_ENTRY_UNCHANGED17" = '{"name":"ARCHITECT_ONLY","placeholderable":true,"read_at":"src/other.js:9","why":"architect found it by hand"}' ]; then
+    pass "AC17: UNION — the architect's own entry is unchanged"
+  else
+    fail "AC17: expected the architect's entry unchanged, got '$ARCH_ENTRY_UNCHANGED17'"
+  fi
+
+  # END TO END — hydrate the stamped plan with A_URL unset.
+  ENV_FILE17="$TMPD/ac17-env.sh"
+  HYDRATE_OUT17="$(env -u A_URL "$CLOUD_PREP" hydrate "$PLAN17" --env-file "$ENV_FILE17" --repo "$F17" 2>/dev/null)"
+  PLACEHOLDERED17="$(printf '%s\n' "$HYDRATE_OUT17" | grep "^QX_ENV_PLACEHOLDERED=" | sed "s/^QX_ENV_PLACEHOLDERED='//; s/'\$//")"
+  if [ "$PLACEHOLDERED17" = "A_URL" ]; then
+    pass "AC17: END TO END — hydrate prints QX_ENV_PLACEHOLDERED='A_URL' (exactly 1 name)"
+  else
+    fail "AC17: expected QX_ENV_PLACEHOLDERED='A_URL', got '$PLACEHOLDERED17'"
+  fi
+
+  EXPORT_LINES17="$(grep -c '^export ' "$ENV_FILE17" 2>/dev/null || true)"
+  [ -n "$EXPORT_LINES17" ] || EXPORT_LINES17=0
+  if [ "$EXPORT_LINES17" = "1" ]; then
+    pass "AC17: END TO END — the env file has exactly 1 export line"
+  else
+    fail "AC17: expected exactly 1 export line, got $EXPORT_LINES17"
+  fi
+  if grep -q '^export A_URL=' "$ENV_FILE17" 2>/dev/null; then
+    pass "AC17: END TO END — the exported name is A_URL"
+  else
+    fail "AC17: expected an export line for A_URL"
+  fi
+  CRED_SEGMENTS17="$(grep -c '@' "$ENV_FILE17" 2>/dev/null || true)"
+  [ -n "$CRED_SEGMENTS17" ] || CRED_SEGMENTS17=0
+  if [ "$CRED_SEGMENTS17" = "0" ]; then
+    pass "AC17: END TO END — the exported value has 0 '@' credential segments"
+  else
+    fail "AC17: expected 0 '@' segments, got $CRED_SEGMENTS17"
+  fi
+
+  # UNCOMMITTED DECLARATION MUST NOT REACH THE PLAN — same reviewed-diff
+  # guarantee should_skip_for_env enforces on the gate side (constraint 2):
+  # a requiredEnv mapping is only ever authoritative from the COMMITTED
+  # blob. Start from a fixture whose committed verify.json has NO
+  # requiredEnv key, run the REAL `declare` (which writes into the
+  # working-tree verify.json) but deliberately do NOT commit the result —
+  # `plan` reads only `git show HEAD:.quetrex/verify.json`, never the
+  # working tree, so the addition must be invisible to it.
+  F17uncommitted="$TMPD/ac17-uncommitted"
+  mk_ac17_fixture "$F17uncommitted" 0
+  "$DERIVE_TOOL" declare "$F17uncommitted" --cmd "npm run build" --env A_URL >/dev/null  # writes the working tree; deliberately not committed
+  PLAN17uncommitted="$F17uncommitted/.quetrex/plan/T-4.json"
+  jq -n '{
+    task: "T-4", route: "STANDARD", base_sha: "deadbeef", summary: "uncommitted fixture",
+    workstreams: [], ownership: {}, acceptance: [], security_surface: [],
+    verify: ["npm run build"],
+    security_review_required: false, db_migration: false, impact: {}, notes: []
+  }' > "$PLAN17uncommitted"
+  # `plan`'s exit code and stdout are CAPTURED, not discarded: a plan that
+  # adds nothing writes {"required_env":0-length} either because it correctly
+  # saw no committed declaration, OR because the tool crashed/was never
+  # invoked/pointed at the wrong path — jq reading `.required_env // []` off
+  # an untouched plan file cannot tell those apart on its own (the plan JSON
+  # never carried a required_env key to begin with). Positively proving the
+  # REAL "0 additions" code path ran — exit 0 plus its own documented
+  # stdout message — is what closes that gap.
+  PLAN_UNCOMMITTED_OUT="$("$DERIVE_TOOL" plan "$PLAN17uncommitted" "$F17uncommitted")"; PLAN_UNCOMMITTED_CODE=$?
+  UNCOMMITTED_LEN17="$(jq '.required_env // [] | length' "$PLAN17uncommitted")"
+  if [ "$PLAN_UNCOMMITTED_CODE" -eq 0 ]; then
+    pass "AC17: UNCOMMITTED — plan exits 0 (proves it ran, not merely that the file was left untouched)"
+  else
+    fail "AC17: UNCOMMITTED — expected plan to exit 0, got $PLAN_UNCOMMITTED_CODE (out: [$PLAN_UNCOMMITTED_OUT])"
+  fi
+  if printf '%s' "$PLAN_UNCOMMITTED_OUT" | grep -q 'no new required_env names to stamp'; then
+    pass "AC17: UNCOMMITTED — plan reports 'no new required_env names to stamp', proving it took the real empty-projection path"
+  else
+    fail "AC17: UNCOMMITTED — expected the 'no new required_env names to stamp' message, got [$PLAN_UNCOMMITTED_OUT]"
+  fi
+  if [ "$UNCOMMITTED_LEN17" = "0" ]; then
+    pass "AC17: UNCOMMITTED — an uncommitted requiredEnv edit does not reach the plan (required_env length 0)"
+  else
+    fail "AC17: UNCOMMITTED — expected required_env length 0 (uncommitted declaration must not authorize a stamp), got '$UNCOMMITTED_LEN17'"
+  fi
+  UNCOMMITTED_STATUS17="$(git -C "$F17uncommitted" status --porcelain -- .quetrex/verify.json)"
+  if [ -n "$UNCOMMITTED_STATUS17" ]; then
+    pass "AC17: UNCOMMITTED — fixture sanity check: .quetrex/verify.json genuinely has an uncommitted change ($UNCOMMITTED_STATUS17)"
+  else
+    fail "AC17: UNCOMMITTED — fixture sanity check failed: .quetrex/verify.json shows no uncommitted change, so the check above proves nothing"
+  fi
+
+  # NO DECLARATION AT ALL -> EMPTY required_env, NEVER AN INVENTED ONE — a
+  # repo with a committed verify.json but no requiredEnv key gets
+  # required_env length 0, even though A_URL is a genuine committed
+  # candidate (declared in .env.example, read fallback-lessly at
+  # src/db.js:3). `plan` must project ONLY the human's confirmed
+  # declaration; falling back to candidateList/fallback-less-read evidence
+  # on its own would resurrect the deleted static-inference engine (AC20)
+  # by another name.
+  F17none="$TMPD/ac17-none"
+  mk_ac17_fixture "$F17none" 0
+  PLAN17none="$F17none/.quetrex/plan/T-5.json"
+  jq -n '{
+    task: "T-5", route: "STANDARD", base_sha: "deadbeef", summary: "no declaration fixture",
+    workstreams: [], ownership: {}, acceptance: [], security_surface: [],
+    verify: ["npm run build"],
+    security_review_required: false, db_migration: false, impact: {}, notes: []
+  }' > "$PLAN17none"
+  # Same capture-not-discard reasoning as the UNCOMMITTED block above: a
+  # length-0 read off an untouched plan file cannot distinguish "plan ran
+  # and correctly added nothing" from "plan never ran at all."
+  PLAN_NONE_OUT="$("$DERIVE_TOOL" plan "$PLAN17none" "$F17none")"; PLAN_NONE_CODE=$?
+  NONE_LEN17="$(jq '.required_env // [] | length' "$PLAN17none")"
+  if [ "$PLAN_NONE_CODE" -eq 0 ]; then
+    pass "AC17: NO DECLARATION — plan exits 0 (proves it ran, not merely that the file was left untouched)"
+  else
+    fail "AC17: NO DECLARATION — expected plan to exit 0, got $PLAN_NONE_CODE (out: [$PLAN_NONE_OUT])"
+  fi
+  if printf '%s' "$PLAN_NONE_OUT" | grep -q 'no new required_env names to stamp'; then
+    pass "AC17: NO DECLARATION — plan reports 'no new required_env names to stamp', proving it took the real empty-projection path"
+  else
+    fail "AC17: NO DECLARATION — expected the 'no new required_env names to stamp' message, got [$PLAN_NONE_OUT]"
+  fi
+  if [ "$NONE_LEN17" = "0" ]; then
+    pass "AC17: NO DECLARATION — a repo with no committed requiredEnv gets required_env length 0, not an invented A_URL"
+  else
+    fail "AC17: NO DECLARATION — expected required_env length 0 (no inference), got '$NONE_LEN17'"
+  fi
+
+  # NEGATIVE CONTROL — reverting only the stamp (skipping the `plan`
+  # subcommand entirely) makes QX_ENV_PLACEHOLDERED empty and the env file
+  # carry 0 export lines.
+  F17n="$TMPD/ac17-neg"
+  mk_ac17_fixture "$F17n"
+  PLAN17n="$F17n/.quetrex/plan/T-3.json"
+  jq -n '{
+    task: "T-3", route: "STANDARD", base_sha: "deadbeef", summary: "neg",
+    workstreams: [], ownership: {}, acceptance: [], security_surface: [],
+    verify: ["npm run build"],
+    security_review_required: false, db_migration: false, impact: {}, notes: []
+  }' > "$PLAN17n"
+  # deliberately do NOT run "$DERIVE_TOOL" plan here -- this is the negative control
+  ENV_FILE17n="$TMPD/ac17-neg-env.sh"
+  HYDRATE_NEG17="$(env -u A_URL "$CLOUD_PREP" hydrate "$PLAN17n" --env-file "$ENV_FILE17n" --repo "$F17n" 2>/dev/null)"
+  PLACEHOLDERED17n="$(printf '%s\n' "$HYDRATE_NEG17" | grep "^QX_ENV_PLACEHOLDERED=" | sed "s/^QX_ENV_PLACEHOLDERED='//; s/'\$//")"
+  if [ -z "$PLACEHOLDERED17n" ]; then
+    pass "AC17: NEGATIVE CONTROL — skipping the stamp makes QX_ENV_PLACEHOLDERED empty"
+  else
+    fail "AC17: NEGATIVE CONTROL — expected QX_ENV_PLACEHOLDERED empty when the stamp is skipped, got '$PLACEHOLDERED17n'"
+  fi
+  EXPORT_LINES17n="$(grep -c '^export ' "$ENV_FILE17n" 2>/dev/null || true)"
+  [ -n "$EXPORT_LINES17n" ] || EXPORT_LINES17n=0
+  if [ "$EXPORT_LINES17n" = "0" ]; then
+    pass "AC17: NEGATIVE CONTROL — skipping the stamp leaves 0 export lines"
+  else
+    fail "AC17: NEGATIVE CONTROL — expected 0 export lines, got $EXPORT_LINES17n"
+  fi
 fi
 
 finish

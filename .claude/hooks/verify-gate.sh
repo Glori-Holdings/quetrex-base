@@ -50,6 +50,9 @@
 #      arbitrary REPLACEMENT for the chain (`verifyQuick:["true"]` passes every
 #      SubagentStop). On any mismatch the quick chain is discarded, the FULL
 #      verify[] chain runs, and the block reason says why.
+#      An OPTIONAL sibling field, `requiredEnv`, declares per-command env
+#      dependencies: {"requiredEnv": {"<exact command string from verify[]>":
+#      ["VAR_NAME", ...]}}. See "DECLARATIVE ENV SKIP" below.
 #   2. $ROOT/.claude/CLAUDE.md      "## Verification" fenced command block
 #   3. autodetect (package.json scripts / Makefile / pyproject / go.mod / Cargo)
 # If none resolves, there is nothing to gate -> allow finish (exit 0).
@@ -59,12 +62,86 @@
 #
 # The ONLY conditions that allow finish without a block:
 #   - not a git repo / no verify chain resolvable anywhere (nothing to gate), or
-#   - the chain resolved AND every command exited 0 (PROVEN green by exit codes).
+#   - the chain resolved AND every command either exited 0 or was declaratively
+#     SKIPPED for a genuinely-absent required env var (PROVEN green by exit
+#     codes; a skip is never itself a pass — see "DECLARATIVE ENV SKIP").
 #
 # Contract: Stop/SubagentStop hooks BLOCK via {"decision":"block","reason":...}
 # printed on EXIT 0. Printing block JSON then exiting non-zero DISCARDS the JSON.
 # This script therefore always `exit 0` after emitting, and emits nothing to
 # stdout when it allows the finish.
+#
+# QUIET OUTPUT (no raw interpreter stack traces to the operator). A failing
+# command's full captured stdout+stderr is written to $ROOT/.quetrex/verify-gate.log
+# (mode 600, one run's worth per invocation) and NEVER interpolated into the
+# block reason. The reason is a short, labelled summary (what ran, which
+# checkout/branch, whether it BLOCKS) that references a log by path, capped
+# at 3 lines, so an agent's closing message can report the summary and the log
+# path without ever pasting a stack trace back at the operator.
+#
+# THE LOG SURVIVES THE VERY NEXT INVOCATION. verify-gate.log is recreated
+# fresh EVERY run, so an agent's next SubagentStop (dispatched to investigate
+# a block) would otherwise erase the failure. On RED only, the failing
+# command's own output is ALSO preserved into verify-gate-failed.log (mode
+# 600, same symlink-safe unlink-before-redirect), and the reason points there
+# instead. A green/skip-only run never touches it; a new RED run replaces it.
+#
+# THERE IS NO PRIMARY-CHECKOUT DEFERRAL. This hook used to skip the chain in
+# the repo's primary checkout whenever a linked worktree on the project's
+# branchPrefix looked like it was "proven" by its own ledger. That skip was
+# removed outright (SEC-1, high): `git worktree add -b claude/x decoy` is on
+# the Bash allow-list and cost the gated agent exactly one command to
+# permanently ungate the primary checkout, and every attempted proof
+# requirement (a ledger line sha-pinned to the candidate's own HEAD) was
+# fabricable by the same agent writing a JSON line into a file it fully
+# controls, or by leaving a once-genuinely-proven worktree abandoned on disk
+# forever. No attestation scheme can fix this class: any secret the check
+# reads is readable by the agent it polices. There is now NO code path in
+# this file that skips the chain based on any worktree, branch,
+# project.json field, or environment override — every checkout, including
+# the one with no linked worktree, always runs the chain here. The only skip
+# that survives is the declarative, per-command, committed-only requiredEnv
+# skip below.
+#
+# DECLARATIVE ENV SKIP. A command whose verify.json `requiredEnv` entry names a
+# variable that is genuinely unavailable in THIS checkout is never executed —
+# it is skipped pre-flight and reported with one plain "VERIFY SKIPPED" line
+# naming the variable (never its value). This is PRE-FLIGHT and DECLARATIVE
+# ONLY: it is never inferred by pattern-matching a command's output (that would
+# be exactly the env-error laundering banned above). The ENTIRE requiredEnv
+# mapping (and the `verify[]` membership check below) is read from the
+# COMMITTED `.quetrex/verify.json` blob at the ONE sha this invocation pinned
+# up front ($HEAD_SHA, captured once at the top of the script) — NEVER the
+# working-tree file, and NEVER a fresh `HEAD` re-resolved mid-run (SEC-2), so a
+# command that commits mid-chain cannot author the authorization for a LATER
+# command in the SAME run. Trap: an EMPTY $HEAD_SHA (no commits yet) degrades
+# `git show "$HEAD_SHA:path"` to `git show ":path"` (reads the INDEX,
+# fail-OPEN), so should_skip_for_env returns 1 before any git show when
+# $HEAD_SHA is empty. Reading the mapping live would let an agent
+# pair a genuinely innocuous, reviewable one-line .env.example addition with
+# an UNCOMMITTED command-to-variable association that skips an unrelated,
+# already-failing command — the association, not the variable, is the part
+# that must be visible in a reviewed diff. A skip fires ONLY when ALL of the
+# following hold, so `requiredEnv` cannot be used to weaken the gate:
+#   1. the command is byte-for-byte a member of the COMMITTED verify[] ARRAY
+#      (type-asserted: a STRING `.verify` degrades jq's `index()` to a
+#      SUBSTRING search, which would let any command that merely CONTAINS the
+#      target as a substring pass this check — the type must be checked, not
+#      assumed);
+#   2. the variable name also appears as a NAME= key in the COMMITTED blob of
+#      a tracked $ROOT/.env.example or $ROOT/.env.sample at HEAD (the repo
+#      itself must declare it as required config, visible in a reviewed
+#      diff — a tracked PATH with an uncommitted edit to the declaring line
+#      does not count either);
+#   3. the variable is unset-or-empty in the hook's own environment AND is not
+#      a key in any of $ROOT/.env, .env.local, .env.development, .env.test that
+#      exist in this checkout (those are dotenv-loaded at runtime, so their
+#      presence means the command would have had the value).
+# If the committed verify.json cannot be read at all (no HEAD, unreadable),
+# NOTHING is treated as declared and no command is ever skipped.
+# A skip writes NO ledger line for that command (it is not a pass), and a run
+# that skipped anything must NOT clear a prior .quetrex/ESCALATION — only a run
+# where every chain command genuinely executed and exited 0 may clear one.
 
 set -uo pipefail
 
@@ -102,6 +179,7 @@ ESCALATION="$QDIR/ESCALATION"
 # never authorize a merge of a NEWER HEAD (closes the stale-green hole). Empty
 # only if HEAD is unresolvable (e.g. a repo with no commits yet).
 HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)
+CUR_BRANCH=$(git -C "$ROOT" branch --show-current 2>/dev/null)
 
 # On SubagentStop we may run a QUICK subset chain if the project defines one.
 # QUICK_NOTE is set when a declared verifyQuick was REJECTED for not being a
@@ -194,7 +272,9 @@ resolve_from_verify_json() {
           (.verifyQuick - ((.verify // []) | if type == "array" then . else [] end))
           | map("`" + (. | tostring) + "`") | join(", ")
         ' "$f" 2>/dev/null)
-      QUICK_NOTE=$(printf '\n\nNOTE: .quetrex/verify.json declares a `verifyQuick` chain that is NOT a subset of `verify` (offending entr(y/ies): %s). A quick chain may only NARROW the full chain, never introduce commands it does not contain, so verifyQuick was IGNORED and the FULL `verify` chain was run. Fix verify.json so every verifyQuick entry appears verbatim in verify.' \
+      # Kept to a single line (no embedded newlines) so it can be appended to
+      # a block reason without breaking the <=3-line quiet-output budget.
+      QUICK_NOTE=$(printf ' NOTE: verifyQuick in verify.json is not a subset of verify (offending: %s); ran the FULL verify chain instead.' \
         "${foreign:-<unparseable>}")
     fi
   fi
@@ -283,6 +363,119 @@ resolve_from_verify_json || resolve_from_claude_md || resolve_autodetect || {
 
 mkdir -p "$QDIR"
 
+# --- full-output log (QUIET fix part a) -------------------------------------
+# Every command's FULL captured stdout+stderr is written here, never into the
+# block reason. Recreated fresh each run so it always reflects THIS attempt.
+# Mode 600 from creation: a failing build's output can contain values it
+# echoed (the observed case was a database URL), so this file must never be
+# group/world readable and must never be referenced by anything that stages
+# files (it stays untracked under $ROOT/.quetrex/, which is gitignored).
+LOG="$QDIR/verify-gate.log"
+# SEC-3: refuse to write THROUGH a symlink. `: > "$LOG"` follows symlinks, so
+# a symlink planted at this path would let the hook truncate, chmod 600, and
+# append captured build output to any file the user can write. Unlinking
+# whatever is at that path first (symlink or regular file) — before ever
+# redirecting into it — makes the mode-600 guarantee unconditional instead of
+# dependent on whichever inode happened to be there already; `rm -f` on a
+# symlink removes the link itself, never the file it points at.
+if [ -e "$LOG" ] || [ -L "$LOG" ]; then
+  rm -f "$LOG" 2>/dev/null
+fi
+( umask 077; : > "$LOG" ) 2>/dev/null
+chmod 600 "$LOG" 2>/dev/null
+
+# --- DECLARATIVE ENV SKIP (fix part c) --------------------------------------
+# Pre-flight only — NEVER inferred from a command's output. Returns 0 (skip)
+# and sets MISSING_ENV_VAR when `cmd` has a requiredEnv entry in verify.json
+# and every constraint in the header comment is satisfied; returns 1 (run it)
+# otherwise, which is the fail-closed default for anything ambiguous.
+MISSING_ENV_VAR=""
+should_skip_for_env() {
+  local cmd="$1"
+  MISSING_ENV_VAR=""
+  command -v jq >/dev/null 2>&1 || return 1
+  # EMPTY-HEAD TRAP (SEC-2): empty $HEAD_SHA would degrade the show below to
+  # `git show ":path"` (reads the INDEX, fail-OPEN). Return before any show.
+  [ -n "$HEAD_SHA" ] || return 1
+  # The ENTIRE requiredEnv mapping is read from the COMMITTED verify.json blob
+  # at the PINNED $HEAD_SHA (SEC-2), never the working tree nor a freshly
+  # re-resolved `HEAD`. Fail closed if it cannot be read at all.
+  local committed_verify_json
+  committed_verify_json=$(git -C "$ROOT" show "$HEAD_SHA:.quetrex/verify.json" 2>/dev/null) || return 1
+  [ -n "$committed_verify_json" ] || return 1
+  # Constraint 1: `cmd` must be a byte-for-byte member of the COMMITTED
+  # verify[] ARRAY (type ASSERTED, not assumed: when `.verify` is a STRING,
+  # jq's `index()` degrades to a SUBSTRING search, so a command that merely
+  # CONTAINS `cmd` as a substring would incorrectly satisfy this check — see
+  # ADV-D) AND the committed requiredEnv must declare vars for that exact
+  # key. A foreign/typo'd requiredEnv key that happens not to equal any
+  # verify[] entry simply cannot skip anything.
+  printf '%s' "$committed_verify_json" | jq -e --arg c "$cmd" \
+    '(.verify // []) as $v | ($v | type) == "array" and (($v | index($c)) != null)' \
+    >/dev/null 2>&1 || return 1
+  local vars
+  vars=$(printf '%s' "$committed_verify_json" | jq -r --arg c "$cmd" '
+      if (.requiredEnv // {}) | type == "object"
+      then (.requiredEnv[$c] // []) | if type == "array" then .[] else empty end
+      else empty end
+    ' 2>/dev/null)
+  [ -n "$vars" ] || return 1
+  local v declared exfile committed
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    # Only ever treat well-formed shell identifiers as candidates; anything
+    # else cannot be safely looked up and must never authorize a skip.
+    case "$v" in
+      [A-Za-z_]*) : ;;
+      *) continue ;;
+    esac
+    case "$v" in *[!A-Za-z0-9_]*) continue ;; esac
+    # Constraint 2: the repo itself must declare this as required config, and
+    # that DECLARATION must be visible in a reviewed diff — per security_surface
+    # constraint #2. Two escapes closed here:
+    #   - a plain existence/grep check on disk is not enough (an UNTRACKED
+    #     .env.example is invisible to any reviewer), so tracking is required; and
+    #   - checking that the PATH is tracked is not enough either (a tracked file
+    #     can still carry an UNCOMMITTED working-tree edit that grep would read
+    #     straight off disk — `git ls-files` only proves the PATH is tracked,
+    #     not that THIS line is). So the declaring line must be read from the
+    #     COMMITTED blob at HEAD, never the live working-tree file. Only HEAD
+    #     counts, not the staged index: a staged-but-uncommitted change still
+    #     appears in no reviewed diff (nothing has been committed for a
+    #     reviewer to see), so `git show :file` is deliberately NOT used here.
+    #     Fail CLOSED: if the committed blob cannot be read at all (no HEAD,
+    #     file absent at HEAD, git error), it does not count as declared.
+    #     Read at the PINNED $HEAD_SHA (SEC-2), never a fresh `HEAD`.
+    declared=0
+    for exfile in .env.example .env.sample; do
+      committed=$(git -C "$ROOT" show "$HEAD_SHA:$exfile" 2>/dev/null) || continue
+      if printf '%s\n' "$committed" | grep -qE "^${v}="; then
+        declared=1
+        break
+      fi
+    done
+    [ "$declared" -eq 1 ] || continue
+    # Constraint 3a: unset-or-empty in the hook's own environment.
+    local val="${!v-}"
+    [ -z "$val" ] || continue
+    # Constraint 3b: not a key in any local dotenv file that would be loaded
+    # at runtime (their presence means the command would have had the value).
+    local envfile skip_this=0
+    for envfile in "$ROOT/.env" "$ROOT/.env.local" "$ROOT/.env.development" "$ROOT/.env.test"; do
+      if [ -f "$envfile" ] && grep -qE "^${v}=" "$envfile" 2>/dev/null; then
+        skip_this=1
+        break
+      fi
+    done
+    [ "$skip_this" -eq 0 ] || continue
+    MISSING_ENV_VAR="$v"
+    return 0
+  done <<EOF
+$vars
+EOF
+  return 1
+}
+
 # --- run the chain ---------------------------------------------------------
 # Always run — no fast-skip, no stale-green. Every non-zero exit is RED. There
 # is no env-error laundering: a command that exits non-zero fails the gate even
@@ -290,6 +483,9 @@ mkdir -p "$QDIR"
 # found". Missing tooling/deps are handed to the agent to fix (bounded), not
 # excused into a green finish.
 RED=0
+SKIPPED=0
+SKIP_LINES=""
+SKIPPED_CMDS=""
 FAILED_CMD=""
 FAILED_TAIL=""
 FAILED_CODE=0
@@ -326,6 +522,18 @@ run_with_cap() {
 BUDGET_START=$(date +%s)
 
 for cmd in "${CHAIN[@]}"; do
+  if should_skip_for_env "$cmd"; then
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    {
+      printf '=== %s | SKIPPED (requiredEnv %s unavailable) | cmd: %s | cwd: %s ===\n' \
+        "$ts" "$MISSING_ENV_VAR" "$cmd" "$ROOT"
+    } >> "$LOG" 2>/dev/null
+    SKIPPED=1
+    SKIP_LINES="${SKIP_LINES}VERIFY SKIPPED: \`${cmd}\` not run in ${ROOT} — required env var ${MISSING_ENV_VAR} is unavailable in this checkout (declared in .env.example, unset here). BLOCKS nothing; the command is never proven and never counted as a pass.
+"
+    SKIPPED_CMDS="${SKIPPED_CMDS:+$SKIPPED_CMDS, }\`${cmd}\`"
+    continue
+  fi
   now=$(date +%s)
   remaining=$((BUDGET_TOTAL - (now - BUDGET_START)))
   if [ "$remaining" -le 0 ]; then
@@ -347,6 +555,13 @@ TIMEOUT: this command exceeded its ${remaining}s share of the ${BUDGET_TOTAL}s v
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   t20=$(tail20 "$out")
 
+  # Full, UNTRUNCATED output goes to the log file only — never into the block
+  # reason (that is the whole point of the quiet fix; see header comment).
+  {
+    printf '=== %s | cmd: %s | exit: %s | cwd: %s ===\n' "$ts" "$cmd" "$code" "$ROOT"
+    printf '%s\n' "$out"
+  } >> "$LOG" 2>/dev/null
+
   # Append to the append-only ledger (best-effort; failure to log never blocks).
   # `sha` pins this result to the exact commit it was proven against — the merge
   # gate requires the latest GREEN line for each chain command to carry the
@@ -366,14 +581,43 @@ TIMEOUT: this command exceeded its ${remaining}s share of the ${BUDGET_TOTAL}s v
   FAILED_CMD="$cmd"
   FAILED_CODE="$code"
   FAILED_TAIL="$t20"
+
+  # Preserve ONLY this failing command's entry (never an earlier, successful
+  # command's output) into a second, bounded, mode-600 slot that survives the
+  # next invocation — $LOG itself gets unlinked+recreated every run. Same
+  # symlink-safe unlink-before-redirect as $LOG (SEC-3).
+  FAILLOG="$QDIR/verify-gate-failed.log"
+  if [ -e "$FAILLOG" ] || [ -L "$FAILLOG" ]; then
+    rm -f "$FAILLOG" 2>/dev/null
+  fi
+  ( umask 077
+    {
+      printf '=== %s | cmd: %s | exit: %s | cwd: %s ===\n' "$ts" "$cmd" "$code" "$ROOT"
+      printf '%s\n' "$out"
+    } > "$FAILLOG"
+  ) 2>/dev/null
+  chmod 600 "$FAILLOG" 2>/dev/null
+
   break
 done
 
 # --- decision --------------------------------------------------------------
 if [ "$RED" -eq 0 ]; then
-  echo 0 > "$ATTEMPTS_FILE" 2>/dev/null   # reset self-heal counter on green
-  rm -f "$ESCALATION" 2>/dev/null         # green clears any prior escalation
-  exit 0                                   # PROVEN green by exit codes -> finish
+  # A skip's plain "VERIFY SKIPPED" line(s) are printed ONLY on this allow
+  # path — never ahead of a block() call, whose stdout must stay pure JSON
+  # (the contract's ONLY honored block form; extra leading text risks being
+  # unparseable and read as fail-open). They are deliberately plain text,
+  # never JSON, so they can never be misread as a decision object.
+  [ -n "$SKIP_LINES" ] && printf '%s' "$SKIP_LINES"
+  # A skip is NOT a green: it proves nothing about the skipped command, so a
+  # run that skipped anything must not reset the self-heal counter or clear a
+  # prior escalation. Only a run where every chain command genuinely executed
+  # and exited 0 may do either (CONTAINMENT — see header comment / AC7).
+  if [ "$SKIPPED" -eq 0 ]; then
+    echo 0 > "$ATTEMPTS_FILE" 2>/dev/null   # reset self-heal counter on green
+    rm -f "$ESCALATION" 2>/dev/null         # green clears any prior escalation
+  fi
+  exit 0                                    # allow finish (no block JSON)
 fi
 
 # RED path — bounded self-heal.
@@ -391,13 +635,29 @@ if [ "$TIMED_OUT" -eq 1 ]; then
   TIMEOUT_NOTE=" This is a TIME-BUDGET kill: verification exceeded the ${BUDGET_TOTAL}s time budget (QUETREX_VERIFY_BUDGET) — treat as red; split or speed up the chain."
 fi
 
+# A RED chain can be preceded by earlier commands that were declaratively
+# SKIPPED (requiredEnv unavailable). This whole task exists because the
+# operator could not tell a real failure from a non-failure, so the block
+# reason must say so here too — not just on the (separate, JSON-free) allow
+# path. Folded into the reason as a single-line note (never a raw stdout line
+# ahead of the block() JSON, which must stay pure — see the allow-path
+# comment below) so it stays within the <=3-line quiet-output budget.
+SKIP_NOTE=""
+if [ -n "$SKIPPED_CMDS" ]; then
+  SKIP_NOTE=" NOTE: also SKIPPED before this failure (requiredEnv unavailable, never proven): ${SKIPPED_CMDS}."
+fi
+
+# QUIET BLOCK REASONS (fix part a). One labelled summary line — what ran,
+# which checkout/branch, whether it blocks — plus a line pointing at
+# $FAILLOG, the preserved-failure slot (survives the next invocation, unlike
+# the live $LOG). FAILED_TAIL is deliberately never interpolated here.
 if [ "$n" -lt "$MAX_ATTEMPTS" ]; then
-  block "$(printf 'VERIFY FAILED (attempt %d/%d): `%s` exited %d.%s\nYou cannot finish while the verification chain is red. Fix the cause and it will re-run on your next stop.\n\n--- last 20 lines ---\n%s%s' \
-    "$n" "$MAX_ATTEMPTS" "$FAILED_CMD" "$FAILED_CODE" "$TIMEOUT_NOTE" "$FAILED_TAIL" "$QUICK_NOTE")"
+  block "$(printf 'VERIFY FAILED (attempt %d/%d): `%s` exited %d in %s (branch %s).%s%s%s BLOCKS finish — fix the cause; it re-runs on your next stop.\nFull output: %s' \
+    "$n" "$MAX_ATTEMPTS" "$FAILED_CMD" "$FAILED_CODE" "$ROOT" "${CUR_BRANCH:-<detached>}" "$TIMEOUT_NOTE" "$QUICK_NOTE" "$SKIP_NOTE" "$FAILLOG")"
 fi
 
 # Cap reached -> escalate. Persist a marker the merge gate reads so red code
 # physically cannot merge even once the agent is finally allowed to stop.
 touch "$ESCALATION" 2>/dev/null
-block "$(printf 'ESCALATE: `%s` is STILL red (exit %d) after %d self-heal attempts.%s\nSTOP self-healing now. Do NOT report this task as done. Surface this failure to the user verbatim, including the output below, and wait for direction.\n\n--- last 20 lines ---\n%s%s' \
-  "$FAILED_CMD" "$FAILED_CODE" "$MAX_ATTEMPTS" "$TIMEOUT_NOTE" "$FAILED_TAIL" "$QUICK_NOTE")"
+block "$(printf 'ESCALATE: `%s` is STILL red (exit %d) after %d self-heal attempts in %s (branch %s).%s%s%s BLOCKS finish — STOP self-healing.\nFull output: %s\nReport this one-line summary and the log path to the user; do NOT paste command output into your closing message. Wait for direction.' \
+  "$FAILED_CMD" "$FAILED_CODE" "$MAX_ATTEMPTS" "$ROOT" "${CUR_BRANCH:-<detached>}" "$TIMEOUT_NOTE" "$QUICK_NOTE" "$SKIP_NOTE" "$FAILLOG")"

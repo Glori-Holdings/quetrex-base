@@ -374,11 +374,150 @@ node -e '
 echo "Wrote ## Verification to $PROJ_RULES"
 ```
 
-The same confirmed list is also the seed for `.quetrex/verify.json` — the machine-readable
-chain that takes precedence over this section. This block is the human-readable fallback.
+**5. Seed and merge `.quetrex/verify.json`.** The confirmed list is also the seed for
+`.quetrex/verify.json` — the machine-readable chain `verify-gate.sh` reads (it takes
+precedence over the `## Verification` fence above, which stays the human-readable
+fallback). This step also DECLARES `requiredEnv`: the per-command declaration that lets
+`verify-gate.sh` skip a command pre-flight when a genuinely-required variable cannot
+exist in this checkout (see `.claude/hooks/verify-gate.sh` — "DECLARATIVE ENV SKIP"),
+instead of letting the chain go red on a variable no checkout could ever have. That
+mechanism has always been fully implemented in the hook; nothing writes the declaration
+it reads except an explicit human confirmation, right here.
+
+**STOP INFERRING.** A prior version of this step ran an unattended tool that guessed
+which command needed which variable from the command string itself — that guess was
+provably wrong in both directions (see `.quetrex/plan/VERIFY-GATE-QUIET.json`). There is
+no code path left, anywhere, that can write a `requiredEnv` key except
+`quetrex-env-derive declare`, called only with the exact `--cmd`/`--env` pairs a human
+confirms below. No name is ever written from a guess.
+
+### 5a. Seed `.verify[]`
+
+Only when `.quetrex/verify.json` does not exist yet — an already-existing chain is
+authoritative and is never touched here. Guard against BOTH an unset and an empty
+`CONFIRMED_STEPS` explicitly: a bare `"${CONFIRMED_STEPS[@]:-}"` expansion yields ONE
+EMPTY-STRING argument, not zero words, and seeding `.verify` with `[""]` permanently
+deadlocks GATE 3 of `merge-gate.sh` — no checkout can ever produce a green ledger line
+for an empty command. Never pass an unguarded `"${CONFIRMED_STEPS[@]:-}"` to the seeder;
+`quetrex-env-derive seed-chain` independently refuses an empty or all-blank command list
+too, as a second, structural backstop:
+
+```bash
+# CONFIRMED_STEPS = the user-confirmed commands from step 4b.4, one per line, in order.
+if [ -f "$REPO_ROOT/.quetrex/verify.json" ]; then
+  : # an existing chain is authoritative — never touched here
+elif [ "${CONFIRMED_STEPS+set}" = "set" ] && [ "${#CONFIRMED_STEPS[@]}" -gt 0 ]; then
+  quetrex-env-derive seed-chain "$REPO_ROOT" "${CONFIRMED_STEPS[@]}"
+fi
+```
+
+### 5b. Propose candidates from this repo's own committed evidence
+
+Run the shared derivation tool — `quetrex-env-derive`, shipped on the plugin's `bin/`
+(on PATH here, exactly like `quetrex-arm` above; call it by name, never source it) —
+**every time this step runs**, not only when a fresh `## Verification` block was just
+written:
+
+```bash
+QUETREX_ENV_DERIVE_PROPOSAL="$(quetrex-env-derive propose "$REPO_ROOT" 2>/dev/null)"; QUETREX_ENV_DERIVE_PROPOSE_RC=$?
+```
+
+`propose` is READ-ONLY — it never writes `.quetrex/verify.json`, ever, under any
+condition. Its `.candidates[]` are names this repo's own COMMITTED `.env.example` (or
+`.env.sample`) declares AND a tracked source file reads with no fallback — the exact same
+evidence `verify-gate.sh` itself re-checks on read (SEC-4), so nothing shown to the human
+below can ever be a pairing the gate would then silently refuse to honor.
+
+**A candidate is never paired to a `.verify[]` command.** `propose`'s own `.note` field
+says this in the JSON itself — there is no code path anywhere that determines which chain
+command actually reaches a given candidate's read site, and a prior version of this step
+asked the MODEL to invent that pairing and present it as derived. That is exactly the F2
+defect the human-confirmation design exists to prevent, not a shortcut it can afford:
+`declare`'s only defense is that `--cmd` names a byte-for-byte member of `.verify[]`, and
+every real command trivially satisfies that — so a fabricated pairing a human rubber-stamps
+is just as capable of silently un-gating a genuinely-red command as the deleted inference
+engine ever was. The fix is not a better guess; it is never guessing.
+
+### 5c. Confirm with the human, then write only the confirmed pairs
+
+When `${QUETREX_ENV_DERIVE_PROPOSAL}` has zero `.candidates`, there is nothing to
+confirm — skip straight to step 6. Otherwise, render two things BEFORE asking — never ask
+cold, and never render a column with no data behind it:
+
+**1. The candidates**, name and read_at only — both are real, from `.candidates[]`:
+
+| name | read_at |
+|------|---------|
+| `.candidates[].name` | `.candidates[].read_at` |
+
+**2. The real verify chain**, verbatim from `.chain` (never re-typed, never summarized):
+
+```
+1) .chain[0]
+2) .chain[1]
+...
+```
+
+If `.chain` is empty, there is nothing any candidate could ever gate — skip straight to
+step 6 for the same reason zero candidates does.
+
+Then ask with `AskUserQuestion`, **one question per candidate**, options built from the
+real chain list above: first option always **"No — leave undeclared"**, followed by one
+option per chain command, **"Yes — gate `<chain[i]>`"**, `AskUserQuestion`'s multi-select
+so a human can pick more than one command for the same name when that is genuinely true.
+Cap the interaction at no more than 1 AskUserQuestion round trip per 4 candidates (batch
+beyond that). Example question: *"`<NAME>` is a committed candidate, read at `<read_at>` —
+which of these commands, if any, should `verify-gate` skip when `<NAME>` is unset in this
+checkout? (Nothing here was derived — you are the only source of this pairing.)"*
+
+**Non-interactive guard — propose nothing, write nothing.** When there is nobody to
+ask — the literal env var `QUETREX_INIT_NONINTERACTIVE` is set, or a no-TTY test
+(`[ ! -t 0 ] || [ ! -t 1 ]`) is true — skip 5c's question entirely: propose nothing,
+write nothing. This is a structural backstop, not only a prose one: even if the guard
+were somehow skipped, `declare` called with zero `--cmd`/`--env`/`--decline` pairs
+writes nothing at all (see `bin/quetrex-env-derive`'s own "ONLY WRITER" contract) — so a
+model that skips the confirmation step can never manufacture a declaration either way.
+
+```bash
+# CONFIRM_CMD_ENV = ("cmd" "NAME") tuples the human answered "Yes" to in 5c.
+# CONFIRM_DECLINE  = NAMEs the human answered "No" to in 5c.
+# Both stay empty when 5c never ran (nothing to confirm, or the non-interactive guard
+# below fired) — an empty DECLARE_ARGS means the declare call below never fires.
+DECLARE_ARGS=()
+if [ -n "${QUETREX_INIT_NONINTERACTIVE:-}" ] || [ ! -t 0 ] || [ ! -t 1 ]; then
+  echo "non-interactive session detected — propose nothing, write nothing for requiredEnv"
+else
+  for pair in "${CONFIRM_CMD_ENV[@]:-}"; do
+    [ -n "$pair" ] || continue
+    DECLARE_ARGS+=(--cmd "${pair%%$'\t'*}" --env "${pair##*$'\t'}")
+  done
+  for name in "${CONFIRM_DECLINE[@]:-}"; do
+    [ -n "$name" ] || continue
+    DECLARE_ARGS+=(--decline "$name")
+  done
+  if [ "${#DECLARE_ARGS[@]}" -gt 0 ]; then
+    quetrex-env-derive declare "$REPO_ROOT" "${DECLARE_ARGS[@]}"
+  fi
+fi
+```
 
 Same `$REPO_ROOT` pin and "never the global file" rule as step 4. Record whether 4b
-created or appended so step 6 stages the file and step 7 reports it.
+created or appended the `## Verification` block, and whether this step wrote
+`.quetrex/verify.json` — so step 6 stages the file and step 7 reports it. **The
+declaration only has effect once committed:** `verify-gate.sh` reads `requiredEnv` from
+`git show HEAD:.quetrex/verify.json` (SEC-2), never the working tree, specifically so
+every association a human is ever skipped by first appeared in a reviewed diff. Step 6
+already stages `.quetrex/verify.json` when present and opens the PR — that path is what
+carries this write into a reviewed commit; nothing further is needed here.
+
+**Already-adopted repos.** Because 5c is union-only and never narrows an existing
+`.verify[]` or a pre-existing `requiredEnv`/`requiredEnvDeclined` entry, simply
+**re-running `/quetrex:init`** is the complete remediation for a repo whose
+`.quetrex/verify.json` predates this field — it re-proposes and, once the human
+confirms, merges into whatever is already committed, without touching a command, a
+name, or anything a human already wrote by hand. `/quetrex:doctor` Check 5 detects
+exactly this state (a committed candidate covered by neither `requiredEnv` nor
+`requiredEnvDeclined`) and points back here.
 
 ---
 
@@ -816,7 +955,15 @@ git -C "$REPO_ROOT" add .quetrex/project.json 2>/dev/null || true
 [ -f "$REPO_ROOT/CLAUDE.md" ]        && git -C "$REPO_ROOT" add CLAUDE.md 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/CLAUDE.md" ] && git -C "$REPO_ROOT" add .claude/CLAUDE.md 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/settings.json" ] && git -C "$REPO_ROOT" add .claude/settings.json 2>/dev/null || true
-[ -f "$REPO_ROOT/.quetrex/verify.json" ]  && git -C "$REPO_ROOT" add .quetrex/verify.json 2>/dev/null || true
+# F3 (CONFIRMED): unlike the lines above, this one is NOT swallowed on
+# failure. .quetrex/* is commonly gitignored wholesale in a target repo, and
+# a future install-time hardening (SEC-2's own remediation) is expected to
+# assert exactly that — which would silently kill the whole requiredEnv
+# mechanism everywhere unless that same hardening also adds
+# `!.quetrex/verify.json` as an exception. If `git add` here ever fails, the
+# human/model running this step needs to see it, not have it disappear
+# behind `|| true` the way every neighboring line still does.
+[ -f "$REPO_ROOT/.quetrex/verify.json" ]  && git -C "$REPO_ROOT" add .quetrex/verify.json
 [ -f "$REPO_ROOT/.worktreeinclude" ]      && git -C "$REPO_ROOT" add .worktreeinclude 2>/dev/null || true
 # The committed engine pin is read by cloud routines from the repo, so it must be
 # committed. `.mcp.json` uses `add -A` on purpose: step 4h now REMOVES the dead

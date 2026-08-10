@@ -391,6 +391,16 @@ printf '%s\n' "$PLAN_JSON" > "$TMP_WT/.quetrex/plan/$TASK_ID.json"
 # stamp that silently does not happen leaves the routine trusting the handed
 # checkout — the exact root cause. It fails loudly instead.
 quetrex-plan-stamp "$TMP_WT/.quetrex/plan/$TASK_ID.json" "$REPO_ROOT" "$BASE_BRANCH_FOR_SPEC" || exit 1
+# Stamp Contract A `required_env[]` (see .claude/lib/dev-pipeline.md — "The two
+# env shape contracts") into the same plan, deterministically, right here. The
+# architect already tried to fill this field, but its frontmatter grants no
+# Bash, so it cannot run the shared discovery tool itself — this call is the
+# backstop that repairs a miss. WHY IT MATTERS: on QDM-1 the plan shipped with
+# no `required_env` at all, `quetrex-cloud-prep hydrate` exported nothing, and
+# the cloud build would have died on an unset DEMO_DATABASE_URL; a human hand-
+# patched the published spec branch mid-run to rescue it. Union-only: it never
+# removes an architect-authored entry, only adds names the architect missed.
+quetrex-env-derive plan "$TMP_WT/.quetrex/plan/$TASK_ID.json" "$REPO_ROOT" || exit 1
 git -C "$TMP_WT" checkout -q -b "$SPEC_BRANCH"
 git -C "$TMP_WT" add -f ".quetrex/plan/$TASK_ID.json"
 git -C "$TMP_WT" -c user.name='quetrex-bot' -c user.email='quetrex-bot@users.noreply.github.com' \
@@ -430,9 +440,16 @@ Load `.claude/lib/cloud-build-routine.md`, substitute its `{{TASK}}`, `{{REPO_UR
 use the filled text verbatim as the event's `message.content`. Then call the tool,
 `action:"create"` then `action:"run"`, with a body of this exact shape:
 
+`name` is what the operator sees in the routine list on claude.ai and on the phone — the ONLY
+place this run is identified there, so it must be scannable at a glance: `<TASK_ID> <title>`,
+plain space, no `·` separator, no `(cloud build)` suffix (a wall of characters nobody recognizes
+is worse than useless on a phone-width list). If `<title>` alone would push `name` past ~60
+characters, truncate `<title>` to fit (cut to ~50 chars plus a trailing `…`) — never truncate or
+drop `<TASK_ID>`, since that is the one token the operator actually keys off.
+
 ```json
 {
-  "name": "<TASK_ID> · <title> (cloud build)",
+  "name": "<TASK_ID> <title>",
   "run_once_at": "<RUN_AT>",
   "enabled": true,
   "job_config": {

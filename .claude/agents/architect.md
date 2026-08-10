@@ -113,7 +113,18 @@ Field rules:
 - **`acceptance[]`** — see Contract Rules. Each maps to a `workstream`.
 - **`verify`** — copied verbatim from `verify.json`.
 - **`required_env[]`** — the environment variable names the `verify` chain will actually demand:
-  **discovered, never enumerated.** Two filters, both required:
+  **discovered, never enumerated.** Two sources feed this field, and you emit the union of both —
+  never only one. **Source 1: read the committed derivation.** Read `./.quetrex/verify.json`'s
+  `requiredEnv` map (a `{command: [names...]}` object keyed by verify-chain command; written ONLY
+  by `bin/quetrex-env-derive declare`, from an explicit human-confirmed `--cmd`/`--env` pair typed
+  during `/quetrex:init` — never inferred, never enumerated by the tool itself — and the same
+  committed declaration this dispatcher-stamped field ultimately projects from — see Contract A
+  below). Every name that appears
+  anywhere in that map's values, for a command present in your `verify[]`, belongs in
+  `required_env[]`. You have `Read`, so you CAN read this committed, already-reviewed derivation —
+  do not re-derive it by re-implementing the scan yourself; reading it is strictly more reliable
+  than guessing at a second discovery pass. **Source 2: your own fallback-less grep**, two filters,
+  both required:
   1. **Fallback-less reads only.** Grep for `process.env.<NAME>` (and the stack's equivalent —
      `os.environ[...]`, `System.getenv(...)`, `ENV[...]`) and keep only reads with **no** `??`,
      `||`, `.get(x, default)` or config-default behind them. A read that falls back is satisfied
