@@ -48,6 +48,18 @@
 # So every long-option match in this file is a PREFIX match (opt_is), never an
 # equality test. Over-matching a prefix git itself calls ambiguous costs
 # nothing: git refuses to run those, so nothing legitimate is lost.
+#
+# FORCE IS A REFSPEC SYNTAX, NOT ONLY A FLAG. `git push origin +main:main`
+# force-updates main and names no flag at all, so a guard that decides "is this
+# a force push?" from FLAGS alone waves it through. MEASURED against real git
+# and a real bare remote (remote main = A->B, local `rewrite` = A->C):
+#   git push origin  rewrite:main -> ! [rejected] (non-fast-forward), exit 1
+#   git push origin +rewrite:main -> + 43ca87a...9dac8d5 (forced update), exit 0
+# and B was afterwards NOT an ancestor of the remote main. `+refs/heads/*:
+# refs/heads/*` does that to every branch at once. Both the parsed push arm and
+# the piped-shell backstop therefore judge a `+` refspec on its DESTINATION ref
+# (refspec_dst) through the same disposable_ref() predicate the delete arm uses.
+# --force-with-lease has no refspec spelling, so `+` is always the unsafe form.
 
 set -o pipefail
 
@@ -215,6 +227,20 @@ disposable_ref() {
   return 1
 }
 
+# The ref a refspec UPDATES is its DESTINATION — everything after the colon.
+#   +src:dst              -> dst        (`+main:main`, `+HEAD:main`)
+#   +ref                  -> ref        (`+main`, src and dst are the same name)
+#   +refs/heads/*:refs/heads/*  -> refs/heads/*   (a wildcard is not a name the
+#                                 carve-out can clear, so it fails CLOSED)
+# A ref name cannot contain a colon, so the first colon is the only colon.
+refspec_dst() {
+  d="${1#+}"
+  case "$d" in
+    *:*) d="${d#*:}" ;;
+  esac
+  printf '%s' "$d"
+}
+
 check_git() {
   shift                      # drop 'git'
   # skip git's own global options so `git -C /worktree push --force` is seen
@@ -306,6 +332,31 @@ check_git() {
             disposable_ref "$p" || deny "Deleting the remote ref '$p' is blocked. \`git push <remote> :<ref>\` is a ref DELETION — strictly less recoverable than the force-push this guard already denies. Only the pipeline's disposable namespaces may be deleted: quetrex-spec/* and *-gates." ;;
         esac
       done
+      # FORCE BY REFSPEC. `+` is git's OTHER force syntax and it names no flag
+      # at all, so every flag test above is blind to it. MEASURED against real
+      # git and a real bare remote, remote main = A->B, local `rewrite` = A->C:
+      #   git push origin  rewrite:main  -> ! [rejected] rewrite -> main
+      #                                     (non-fast-forward), exit 1
+      #   git push origin +rewrite:main  ->  + 43ca87a...9dac8d5 rewrite -> main
+      #                                     (forced update), exit 0
+      # and B was no longer an ancestor of the remote main — history destroyed
+      # by a command carrying no --force anywhere. `+refs/heads/*:refs/heads/*`
+      # does it to every branch at once.
+      #
+      # There is no safe-form carve-out to preserve here: --force-with-lease has
+      # no refspec equivalent, so `+` is ALWAYS the unconditional force. The
+      # only carve-out is the same one the delete arm gets, judged the same way
+      # — on the ref itself, via disposable_ref() — because quetrex-spec/* and
+      # *-gates are republished by construction. A dst the guard cannot resolve
+      # (a wildcard, an unexpanded $VAR) is NOT disposable and fails closed.
+      for p in $pos_first $pos_rest; do
+        case "$p" in
+          +:*) : ;;             # force-delete: already judged by the loop above
+          +*)
+            fdst=$(refspec_dst "$p")
+            disposable_ref "$fdst" || deny "Force-updating the remote ref '$fdst' is blocked. A leading \`+\` on a refspec ('$p') IS a force-push — git reports it as '(forced update)' and it overwrites the remote exactly as \`--force\` does, with no --force flag present. Unconditional force-push is blocked — use --force-with-lease (which has no refspec form, so drop the \`+\` and pass the flag), or a PR + branch protection. Only the pipeline's disposable namespaces may be force-updated this way: quetrex-spec/* and *-gates." ;;
+        esac
+      done
       if [ "$delete" -eq 1 ]; then
         # `git push [--delete] <remote> <ref>...`: the first positional is the
         # remote. A delete that named only ONE positional is malformed git, so
@@ -368,14 +419,31 @@ set +f
 # --- backstop: text piped into a bare shell really will be executed ---------
 if [ "$PIPE_TO_SHELL" -eq 1 ]; then
   c=" $(printf '%s' "$cmd" | tr -s '[:space:]' ' ') "
-  case "$c" in
-    *"reset --hard"*) deny "git reset --hard is blocked — stash or commit first." ;;
-    *"clean -f"*|*"clean -df"*|*"clean -fd"*|*"clean -xf"*|*"clean -fx"*) deny "git clean -f is blocked (irreversible)." ;;
-  esac
-  case "$c" in
-    *"--force-with-lease"*|*"--force-if-includes"*) : ;;
-    *"push --force"*|*"push -f"*) deny "Unconditional force-push is blocked — use --force-with-lease, or a PR + branch protection." ;;
-  esac
+  # EVERY RULE BELOW IS DECIDED ON PARSED TOKENS, NOT ON THE COMMAND TEXT.
+  #
+  # The force, reset and clean arms used to be `case "$c" in *"push --force"*`
+  # style substring tests over the whole flattened string, which is this repo's
+  # known failure class and the same one the delete arm was already converted
+  # away from. Measured against this hook before the change:
+  #   ALLOW  echo 'git push origin --force main' | bash
+  #             — the substring test needed `push` and `--force` ADJACENT, and
+  #               the remote sits between them in perfectly ordinary git
+  #   ALLOW  echo 'git push --force origin main # --force-with-lease' | bash
+  #             — the safe-form carve-out was judged on the WHOLE TEXT, so
+  #               naming the safe form in a COMMENT disabled the force backstop
+  #   ALLOW  echo 'git push --fo origin main' | bash
+  #   ALLOW  echo 'git reset --har' | bash
+  #   ALLOW  echo 'git clean --force' | bash
+  #             — no abbreviation handling at all, while the PARSED path gets
+  #               all three right via opt_is (see the header: an unambiguous
+  #               prefix IS the option to git)
+  #   ALLOW  echo 'git push origin +main:main' | bash
+  #             — the refspec force form, unguarded here as well
+  # So the token loop below carries the force/reset/clean decisions too: the
+  # safe-form exemption is applied PER TOKEN (a comment can never reach it,
+  # because `#` ends the command), long options go through opt_is exactly as
+  # the parsed path does, and a `+` refspec is judged on its destination ref.
+  #
   # Ref DELETION, same backstop.
   #
   # THE CARVE-OUT IS EVALUATED AGAINST THE REF, NEVER AGAINST THE COMMAND TEXT
@@ -390,7 +458,8 @@ if [ "$PIPE_TO_SHELL" -eq 1 ]; then
   # disposable_ref() predicate the parsed path uses. A delete that names no ref
   # the guard can resolve fails CLOSED.
   bs_push=0; bs_del=0; bs_seen=0; bs_first=""; bs_rest=""
-  BS_TARGETS=""; BS_COLON=""
+  bs_reset=0; bs_clean=0
+  BS_TARGETS=""; BS_COLON=""; BS_FORCE=""
   bs_flush() {
     if [ "$bs_del" -eq 1 ]; then
       if [ -n "$bs_rest" ]; then
@@ -404,6 +473,7 @@ if [ "$PIPE_TO_SHELL" -eq 1 ]; then
       fi
     fi
     bs_push=0; bs_del=0; bs_seen=0; bs_first=""; bs_rest=""
+    bs_reset=0; bs_clean=0
   }
   set -f                     # no globbing while word-splitting the text
   for tok in $c; do
@@ -412,11 +482,34 @@ if [ "$PIPE_TO_SHELL" -eq 1 ]; then
       '#'*) break ;;                        # a comment ends the command
       *'|'*|*';'*|*'&'*) bs_flush; continue ;;
     esac
-    if [ "$bs_push" -eq 0 ]; then
-      case "$tok" in push|git-push) bs_push=1 ;; esac
-      continue
-    fi
+    # Which git subcommand are we inside? Latched independently, so a segment
+    # that runs several (`git push origin main && git clean -f`) is judged on
+    # each of them — the old whole-text scan caught those and this must not
+    # narrow that.
     case "$tok" in
+      push|git-push)   bs_push=1;  continue ;;
+      reset|git-reset) bs_reset=1; continue ;;
+      clean|git-clean) bs_clean=1; continue ;;
+    esac
+    # `--h`, `--ha`, `--har` are all `--hard` to git — the same opt_is the
+    # parsed path uses, instead of a `*"reset --hard"*` substring test.
+    if [ "$bs_reset" -eq 1 ]; then
+      opt_is "$tok" --hard && deny "git reset --hard is blocked — stash or commit first. This text is piped into a shell, so it really is about to run."
+    fi
+    # `--f` is already `--force` to git clean, and the long form was missing
+    # from the old short-flag-only substring list entirely.
+    if [ "$bs_clean" -eq 1 ]; then
+      case "$tok" in
+        --*) opt_is "$tok" --force && deny "git clean -f is blocked (irreversible). This text is piped into a shell, so it really is about to run." ;;
+        -*)  case "$tok" in *f*) deny "git clean -f is blocked (irreversible). This text is piped into a shell, so it really is about to run." ;; esac ;;
+      esac
+    fi
+    [ "$bs_push" -eq 1 ] || continue
+    case "$tok" in
+      # The SAFE forms, exempted PER TOKEN. Judged here the token cannot be a
+      # comment (`#` broke the loop above) and cannot be an unrelated word
+      # elsewhere in the line — which is exactly how the old whole-text
+      # carve-out was disabled by `# --force-with-lease`.
       --force-with-lease|--force-with-lease=*|--force-if-includes) : ;;
       --*)
         if opt_is "$tok" --delete; then
@@ -425,9 +518,14 @@ if [ "$PIPE_TO_SHELL" -eq 1 ]; then
           deny "\`git push --mirror\` is blocked. This text is piped into a shell, so it really is about to run: --mirror DELETES every remote ref that is absent locally, and names no ref for the disposable-namespace carve-out (quetrex-spec/*, *-gates) to clear."
         elif opt_is "$tok" --prune; then
           deny "\`git push --prune\` is blocked. This text is piped into a shell, so it really is about to run: --prune DELETES every remote ref the pushed refspec does not match, and names no ref for the disposable-namespace carve-out (quetrex-spec/*, *-gates) to clear."
+        elif opt_is "$tok" --force; then
+          deny "Unconditional force-push is blocked — use --force-with-lease, or a PR + branch protection. This text is piped into a shell, so it really is about to run."
         fi ;;
-      -*) case "$tok" in *d*) bs_del=1 ;; esac ;;
-      :*) BS_COLON="$BS_COLON $tok" ;;
+      -*) case "$tok" in *f*) deny "Unconditional force-push is blocked — use --force-with-lease, or a PR + branch protection. This text is piped into a shell, so it really is about to run." ;; esac
+          case "$tok" in *d*) bs_del=1 ;; esac ;;
+      :*|+:*) BS_COLON="$BS_COLON $tok" ;;
+      # a leading + IS a force-push and names no flag — see check_git's push arm
+      +*) BS_FORCE="$BS_FORCE $tok" ;;
       # a redirection is not a refspec — git refuses < and > in a ref name
       *'>'*|*'<'*) : ;;
       *) if [ "$bs_seen" -eq 0 ]; then bs_seen=1; bs_first="$tok"; else bs_rest="$bs_rest $tok"; fi ;;
@@ -436,6 +534,10 @@ if [ "$PIPE_TO_SHELL" -eq 1 ]; then
   bs_flush
   for p in $BS_COLON; do
     disposable_ref "$p" || deny "Deleting the remote ref '$p' is blocked. This text is piped into a shell, so it really is about to run: \`git push <remote> :<ref>\` is a ref DELETION. Only quetrex-spec/* and *-gates may be deleted this way."
+  done
+  for p in $BS_FORCE; do
+    fdst=$(refspec_dst "$p")
+    disposable_ref "$fdst" || deny "Force-updating the remote ref '$fdst' is blocked. This text is piped into a shell, so it really is about to run: a leading \`+\` on a refspec ('$p') IS a force-push — git reports '(forced update)' and it overwrites the remote exactly as \`--force\` does, with no --force flag present. Only quetrex-spec/* and *-gates may be force-updated this way."
   done
   for p in $BS_TARGETS; do
     disposable_ref "$p" || deny "Deleting the remote ref '$p' is blocked. This text is piped into a shell, so it really is about to run: \`git push --delete <ref>\` removes the branch outright, which is strictly less recoverable than the force-push this guard already denies. Only quetrex-spec/* and *-gates may be deleted this way — and that carve-out is judged on the REF, so naming either namespace elsewhere in the command (a comment, a path) does not clear it."

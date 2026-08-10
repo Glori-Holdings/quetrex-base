@@ -36,6 +36,18 @@
 # `$BRANCH_PREFIX$TASK-gates`), and this file feeds the REAL shipped lines to
 # the REAL hook to prove they stay legal. Without that assertion, tightening
 # the guard would silently break the pipeline's own publication step.
+#
+# SECTIONS 9 AND 10 close the two defects the review of 27551e4 confirmed on
+# this same surface, and they are the same two shapes as everything above:
+#   9  — FORCE, like deletion, has a syntax that names NO FLAG. A leading `+`
+#        on a refspec forces the update, so a flag-only force test allowed
+#        `git push origin +main:main`. Proven against real git: `+rewrite:main`
+#        reported "(forced update)" and destroyed a commit that the same push
+#        without the `+` had just been rejected for.
+#   10 — the piped-shell backstop's force/reset/clean arms were still matching
+#        flattened COMMAND TEXT, this repo's known failure class, so a trailing
+#        COMMENT naming --force-with-lease switched the force backstop off.
+# Both halves ship in each section: the new BLOCK and the new ALLOW.
 
 set -uo pipefail
 
@@ -366,6 +378,163 @@ expect_allow "AC8-r: a trailing comment on an ordinary push is not mistaken for 
              'git push origin claude/QUE-1 # publish the unit branch'
 expect_allow "AC8-s: a quoted # keeps a mentioning grep a mention" \
              'grep -rn "# git push origin --delete main" .claude/'
+
+# =============================================================================
+# 9 — FORCE IS A REFSPEC SYNTAX, NOT ONLY A FLAG: `+<src>:<dst>`
+# =============================================================================
+# THE DEFECT (review of 27551e4, finding 1). check_git's push arm decided "is
+# this a force push?" from FLAGS alone — --force / -f / the opt_is prefixes.
+# git's OTHER force syntax names no flag at all: a leading `+` on a refspec
+# forces the update. The guard already KNEW about `+` — disposable_ref() strips
+# it with the comment "a leading + (force refspec) is not part of the name" —
+# so `+` was parsed for the DELETE path and ignored for the FORCE path.
+#
+# MEASURED against the real hook before this fix:
+#   git push origin --force                          -> DENY
+#   git push origin -f                               -> DENY
+#   git push origin --delete main                    -> DENY
+#   git push origin :main                            -> DENY
+#   git push origin +main:main                       -> ALLOW   <- bypass
+#   git push origin +refs/heads/main:refs/heads/main -> ALLOW
+#   git push origin +HEAD:main                       -> ALLOW
+#   git push origin '+refs/heads/*:refs/heads/*'     -> ALLOW
+#
+# MEASURED against real git and a real bare remote, proving `+` really forces:
+#   remote main = A -> B          (B = 43ca87a)
+#   local rewrite = A -> C        (C = 9dac8d5, drops B)
+#   git push origin  rewrite:main -> ! [rejected] rewrite -> main
+#                                    (non-fast-forward), exit 1
+#   git push origin +rewrite:main ->  + 43ca87a...9dac8d5 rewrite -> main
+#                                    (forced update), exit 0
+#   afterwards: B is NOT an ancestor of the remote main — history destroyed,
+#   by a command carrying no --force anywhere.
+#
+# THE RULE THIS PINS. A `+` refspec is a force-push, judged on its DESTINATION
+# ref (the part after the colon — the ref that actually gets overwritten)
+# through the same disposable_ref() predicate the delete arm uses.
+# --force-with-lease has no refspec spelling, so there is no safe form to
+# carve out; the only carve-out is the disposable namespaces.
+expect_deny "AC9-a: +<src>:<dst> is a force-push — the exact bypass, on the default branch" \
+            'git push origin +main:main'
+expect_deny "AC9-b: fully-qualified refs are not a way around it" \
+            'git push origin +refs/heads/main:refs/heads/main'
+expect_deny "AC9-c: +HEAD:<dst> forces the destination just the same" \
+            'git push origin +HEAD:main'
+expect_deny "AC9-d: the wildcard form force-updates EVERY branch at once" \
+            'git push origin +refs/heads/*:refs/heads/*'
+expect_deny "AC9-e: a diverged source overwriting a protected ref (the real-git case above)" \
+            'git push origin +develop:main'
+expect_deny "AC9-f: the colonless form, where src and dst are the same name" \
+            'git push origin +main'
+expect_deny "AC9-g: a + refspec survives git's own global options (-C)" \
+            'git -C /tmp/wt push origin +main:main'
+expect_deny "AC9-h: a + refspec behind an unrelated flag" \
+            'git push --quiet origin +claude/QUE-1:main'
+expect_deny "AC9-i: the carve-out is judged on the DESTINATION, not the source — a disposable SOURCE does not launder a protected target" \
+            'git push origin +quetrex-spec/QUE-1:main'
+expect_deny "AC9-j: an opaque variable is not assumed disposable here either" \
+            'git push origin "+$BASE_BRANCH"'
+expect_deny "AC9-k: a + naming nothing resolvable fails CLOSED" \
+            'git push origin +'
+# ...and the same carve-outs the delete arm gets, or the pipeline's own
+# republication breaks and the guard gets switched off.
+expect_allow "AC9-l: force-updating the spec branch — republished every dispatch" \
+             'git push origin +quetrex-spec/QUE-1'
+expect_allow "AC9-m: force-updating a gates branch — republished every run" \
+             'git push origin +claude/QUE-1-gates:claude/QUE-1-gates'
+expect_allow "AC9-n: a + refspec whose DESTINATION is disposable is allowed" \
+             'git push origin +HEAD:quetrex-spec/QUE-1'
+expect_allow "AC9-o: a fully-qualified disposable destination" \
+             'git push origin +HEAD:refs/heads/quetrex-spec/QUE-1'
+# ...and a `+` that is not a refspec at all must not be swept up.
+expect_allow "AC9-p: an ordinary non-force refspec push is untouched" \
+             'git push origin HEAD:main'
+expect_allow "AC9-q: a + in a --push-option VALUE is not a refspec" \
+             'git push --push-option +ci.skip origin claude/QUE-1'
+expect_allow "AC9-r: a + in a -o VALUE is not a refspec either" \
+             'git push -o +ci.skip origin claude/QUE-1'
+expect_allow "AC9-s: a + in a commit message is not this guard's business" \
+             'git commit -m "+1 fix"'
+
+# =============================================================================
+# 10 — the backstop's FORCE / RESET / CLEAN arms are parsed, not text-matched
+# =============================================================================
+# THE DEFECT (review of 27551e4, finding 2). The delete arm was converted to
+# tokenise and judge the actual invocation (section 8), but the force, reset
+# and clean arms next to it were left as `case "$c" in *"push --force"*` —
+# substring tests over the whole flattened command. That is verbatim the
+# failure class the comment above the delete arm says was fixed.
+#
+# MEASURED against the real hook before this fix. The backstop is the ONLY
+# defence for text piped into a shell (the parsed path sees only `echo` with a
+# quoted argument), so every ALLOW below really runs:
+#   DENY   echo 'git push --force origin main' | bash   <- adjacent literal only
+#   ALLOW  echo 'git push origin --force main' | bash
+#             the remote sits between `push` and `--force` in ordinary git, and
+#             the substring test required them ADJACENT
+#   ALLOW  echo 'git push --force origin main # --force-with-lease' | bash
+#             the safe-form carve-out was judged on the WHOLE TEXT, so naming
+#             the safe form in a COMMENT switched the force backstop off
+#   ALLOW  echo 'git push --fo origin main' | bash      <- no abbreviation handling
+#   ALLOW  echo 'git reset --har' | bash                <- the PARSED path denies this
+#   ALLOW  echo 'git clean --force' | bash              <- long form absent from the list
+#   ALLOW  echo 'git push origin +main:main' | bash     <- section 9, unguarded here too
+expect_deny "AC10-a: adjacency — the remote between push and --force no longer hides it" \
+            "echo 'git push origin --force main' | bash"
+expect_deny "AC10-b: a COMMENT naming the safe form does not disable the force backstop" \
+            "echo 'git push --force origin main # --force-with-lease' | bash"
+expect_deny "AC10-c: a comment naming the safe form OUTSIDE the piped text does not either" \
+            "echo 'git push --force origin main' | bash # --force-with-lease"
+expect_deny "AC10-d: --fo is --force to git's parse-options" \
+            "echo 'git push --fo origin main' | bash"
+expect_deny "AC10-e: --forc, the same class" \
+            "echo 'git push --forc origin main' | bash"
+expect_deny "AC10-f: the + refspec force form is caught by the backstop too" \
+            "echo 'git push origin +main:main' | bash"
+expect_deny "AC10-g: the + wildcard form, piped" \
+            "echo 'git push origin +refs/heads/*:refs/heads/*' | bash"
+expect_deny "AC10-h: git reset --har is git reset --hard, piped" \
+            "echo 'git reset --har' | bash"
+expect_deny "AC10-i: git reset --h, the shortest spelling git takes, piped" \
+            "echo 'git reset --h HEAD~1' | bash"
+expect_deny "AC10-j: git clean --force — the long form the short-flag list never had" \
+            "echo 'git clean --force' | bash"
+expect_deny "AC10-k: git clean --f is git clean --force, piped" \
+            "echo 'git clean --f -xd' | bash"
+# NON-WEAKENING: everything the old substring scan caught must still be caught.
+expect_deny "AC10-l: the original adjacent force literal still fires" \
+            "echo 'git push --force origin main' | bash"
+expect_deny "AC10-m: the short flag still fires" \
+            "echo 'git push -f origin main' | bash"
+expect_deny "AC10-n: the spelled-out reset --hard still fires" \
+            "echo 'git reset --hard' | bash"
+expect_deny "AC10-o: clean -f and clean -fd still fire" \
+            "echo 'git clean -fd' | bash"
+expect_deny "AC10-p: a SECOND subcommand in the same piped text is still judged" \
+            "echo 'git push origin main && git clean -f' | bash"
+expect_deny "AC10-q: a reset --hard after a push in one segment is still judged" \
+            "echo 'git push origin main reset --hard' | bash"
+# ...and the parsed backstop must not become a new source of over-blocking.
+expect_allow "AC10-r: --force-with-lease remains the sanctioned remedy when piped" \
+             "echo 'git push --force-with-lease origin claude/QUE-1' | bash"
+expect_allow "AC10-s: the =<expect> form of the safe remedy, piped" \
+             "echo 'git push --force-with-lease=refs/heads/x origin claude/QUE-1' | bash"
+expect_allow "AC10-t: the abbreviated SAFE form is not the unsafe one" \
+             "echo 'git push --force-with-leas origin claude/QUE-1' | bash"
+expect_allow "AC10-u: --follow-tags is not a prefix of --force, piped" \
+             "echo 'git push --follow-tags origin main' | bash"
+expect_allow "AC10-v: --dry-run is not a force, piped" \
+             "echo 'git push --dry-run origin main' | bash"
+expect_allow "AC10-w: git reset --soft is not --hard, piped" \
+             "echo 'git reset --soft HEAD~1' | bash"
+expect_allow "AC10-x: git clean --dry-run is not --force, piped" \
+             "echo 'git clean --dry-run -d' | bash"
+expect_allow "AC10-y: a disposable + force stays allowed when piped" \
+             "echo 'git push origin +claude/QUE-1-gates' | bash"
+expect_allow "AC10-z: a comment mentioning the safe form on an ordinary push is not a force" \
+             "echo 'git push origin main # --force-with-lease' | bash"
+expect_allow "AC10-aa: text mentioning a force, piped to something that is not a shell" \
+             "echo 'git push origin --force main' | wc -l"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
