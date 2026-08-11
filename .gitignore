@@ -34,3 +34,6 @@ node_modules/
 .quetrex/*
 !.quetrex/project.json
 !.quetrex/verify.json
+
+# Agent isolation worktrees — never part of the engine
+.claude/worktrees/
