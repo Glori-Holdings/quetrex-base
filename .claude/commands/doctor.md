@@ -16,7 +16,7 @@ itself. If a check below reveals a platform/plugin-install problem (a plugin not
 enabled, the CLI unhealthy), say so and **point the user at `/doctor`** rather
 than re-implementing those checks here.
 
-What THIS command owns are the seven Quetrex-app checks native `/doctor` knows
+What THIS command owns are the eight Quetrex-app checks native `/doctor` knows
 nothing about. Run them all, then print one line per check:
 
 - `✓ <check> — <what's good>`
@@ -338,9 +338,111 @@ fi
 
 ---
 
+## Check 8 — Arming is COMMITTED, not just present on disk
+
+Checks 1–7 all read the **working tree**. A teammate's clone — and every cloud
+routine, which starts from a *fresh clone* and can only ever see committed
+files — sees just what git **tracks**. So a repo whose arming artifacts exist
+on disk but were never `git add`ed (or sit under a `.gitignore` rule such as
+`.quetrex/` or `.claude/`) is armed for **you** and unarmed for **everyone and
+everything else**, while every check above still prints ✓. That is the most
+consequential half-armed state there is: doctor says green, the operator
+dispatches a build, and the routine clones a repo with no project binding, no
+engine enablement and no verify chain.
+
+So ask the same questions again — of `HEAD` instead of of the working tree.
+Never infer this from `[ -f ... ]`; use `git ls-files` / `git cat-file -e
+HEAD:<path>`, which is the only thing a clone reproduces.
+
+```bash
+GONE=""
+note_gone() {  # note_gone <text> — append to the "a fresh clone would not see" list
+  if [ -n "$GONE" ]; then GONE="$GONE; "; fi
+  GONE="$GONE$1"
+}
+tracked_state() {  # tracked_state <repo-relative-path> -> absent|ignored|untracked|staged|committed
+  if ! git -C "$REPO_ROOT" ls-files --error-unmatch -- "$1" >/dev/null 2>&1; then
+    if [ ! -e "$REPO_ROOT/$1" ]; then echo absent; return; fi
+    if git -C "$REPO_ROOT" check-ignore -q -- "$1" 2>/dev/null; then echo ignored; return; fi
+    echo untracked; return
+  fi
+  # Tracked is not enough: a clone materialises HEAD, so a file that is only
+  # in the index (git add, never committed) is still absent from every clone.
+  if git -C "$REPO_ROOT" cat-file -e "HEAD:$1" 2>/dev/null; then echo committed; else echo staged; fi
+}
+say_state() {  # say_state <repo-relative-path> <state>
+  case "$2" in
+    absent)    note_gone "$1 (missing here too)" ;;
+    ignored)   note_gone "$1 (on disk but UNTRACKED — a .gitignore rule excludes it)" ;;
+    untracked) note_gone "$1 (on disk but UNTRACKED — never git add'ed)" ;;
+    staged)    note_gone "$1 (staged in the index but never committed)" ;;
+  esac
+}
+
+if ! git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "✗ Arming committed — $REPO_ROOT is not a git repository, so there is nothing for a teammate or a cloud routine to clone."
+  echo "    Fix: git init and commit this repo, then run /quetrex:init."
+else
+  say_state ".quetrex/project.json" "$(tracked_state .quetrex/project.json)"
+
+  SET_STATE="$(tracked_state .claude/settings.json)"
+  say_state ".claude/settings.json" "$SET_STATE"
+  # Tracked AND committed is still not enough for settings.json: the arming
+  # edit itself (enabledPlugins) can sit uncommitted in a long-tracked file,
+  # so read the COMMITTED blob, never the one on disk.
+  if [ "$SET_STATE" = "committed" ]; then
+    HEAD_ENABLED="$(git -C "$REPO_ROOT" show HEAD:.claude/settings.json 2>/dev/null | node -e '
+      let s=""; process.stdin.on("data",function(d){s+=d}).on("end",function(){
+        let o={}; try{o=JSON.parse(s)}catch{}
+        const e=o.enabledPlugins||{};
+        process.stdout.write(String(e["quetrex@quetrex"]===true && e["quetrex-factory@quetrex"]===true));
+      });' 2>/dev/null)"
+    if [ "$HEAD_ENABLED" != "true" ]; then
+      note_gone ".claude/settings.json (committed, but the COMMITTED copy does not enable quetrex + quetrex-factory)"
+    fi
+  fi
+
+  # Verify chain — mirror Check 5's either/or against HEAD. Only asked when
+  # the working tree actually has one of the two; if it has neither, Check 5
+  # already owns that failure and this must not double-report it.
+  if [ -f "$REPO_ROOT/.quetrex/verify.json" ] || [ -f "$REPO_ROOT/.claude/CLAUDE.md" ]; then
+    CHAIN_AT_HEAD=false
+    if git -C "$REPO_ROOT" show HEAD:.quetrex/verify.json 2>/dev/null | node -e '
+      let s=""; process.stdin.on("data",function(d){s+=d}).on("end",function(){
+        let o; try{o=JSON.parse(s)}catch{process.exit(1)}
+        const steps=o.steps||o.commands||o.chain||o.verify;
+        process.exit(Array.isArray(steps)&&steps.length?0:1);
+      });' 2>/dev/null; then
+      CHAIN_AT_HEAD=true
+    elif git -C "$REPO_ROOT" show HEAD:.claude/CLAUDE.md 2>/dev/null | node -e '
+      let s=""; process.stdin.on("data",function(d){s+=d}).on("end",function(){
+        process.exit(/^##\s+Verification\s*$/m.test(s)?0:1);
+      });' 2>/dev/null; then
+      CHAIN_AT_HEAD=true
+    fi
+    if [ "$CHAIN_AT_HEAD" != "true" ]; then
+      note_gone "the verify chain (neither a committed .quetrex/verify.json with a non-empty chain nor a committed .claude/CLAUDE.md with a ## Verification section)"
+    fi
+  fi
+
+  if [ -z "$GONE" ]; then
+    echo "✓ Arming committed — every arming artifact this repo has is committed, so a fresh clone (a teammate's, or a cloud routine's) is armed exactly like this checkout."
+  else
+    echo "✗ Arming committed — a fresh clone would NOT be armed: $GONE. This repo is armed for you alone; every teammate and every cloud routine (which starts from a fresh clone and sees only committed files) gets an UNARMED repo with no gates at all."
+    echo "    Fix: commit the arming artifacts — git add -f .quetrex/project.json .claude/settings.json (plus your verify chain) and commit them. If .gitignore excludes .claude/ or .quetrex/, add negations (e.g. '!.quetrex/project.json') so they stay tracked for the whole team."
+  fi
+fi
+```
+
+Never "fix" this by loosening the check to the working tree, and never report
+it as a board/auth problem — the repo is fine locally *by construction*; the
+whole point is that locally-fine and clone-armed are different questions.
+
+---
+
 ## Final summary
 
-After the seven checks, print a one-line roll-up: *"Quetrex health: N/7 green."*
+After the eight checks, print a one-line roll-up: *"Quetrex health: N/8 green."*
 If any check surfaced a **platform or plugin-install** symptom (a plugin not
 enabled, the CLI itself unhealthy, marketplace unreachable), add one line
 directing the user to native **`/doctor`** for that layer — this command
