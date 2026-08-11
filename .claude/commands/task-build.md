@@ -1359,7 +1359,28 @@ fails, the tick is unaffected.
 
    ```bash
    PLAN_OUT="$(qx_epic_tick_plan "$PAYLOAD" "$SNAP")" || exit 1
-   eval "$(printf '%s\n' "$PLAN_OUT" | grep -E '^(IN_FLIGHT|READY|BLOCKED|REAP|SETTLED|FAILED|EXHAUSTED|PROBE|RECOVER|FIXPOINT|ALL_SETTLED_DONE)=')"
+   # NO eval — this was the twin of the one removed from task-rework.md, and it was
+   # reproduced: a `routineId` carrying a newline ("r1\nREAP=;touch /tmp/PWN;X=") makes the
+   # RECOVER note emit a SECOND physical line beginning `REAP=`. grep is line-based, so it
+   # matched, and eval ran it. The taint reaches here from the RemoteTrigger response via the
+   # local payload — narrower than a committed branchPrefix, but the same primitive, and the
+   # same "every fixture used a benign value so nothing exercised it" blind spot.
+   # Parsing the key/value lines directly needs no quoting scheme to be got right: a value is
+   # never part of a command, so it can never be executed. Only the known keys are accepted,
+   # and a value carrying a newline simply lands as two lines, the second matching no key.
+   IN_FLIGHT=""; READY=""; BLOCKED=""; REAP=""; SETTLED=""; FAILED=""
+   EXHAUSTED=""; PROBE=""; RECOVER=""; FIXPOINT=""; ALL_SETTLED_DONE=""
+   while IFS='=' read -r _k _v; do
+     case "$_k" in
+       IN_FLIGHT) IN_FLIGHT="$_v" ;; READY) READY="$_v" ;; BLOCKED) BLOCKED="$_v" ;;
+       REAP) REAP="$_v" ;; SETTLED) SETTLED="$_v" ;; FAILED) FAILED="$_v" ;;
+       EXHAUSTED) EXHAUSTED="$_v" ;; PROBE) PROBE="$_v" ;; RECOVER) RECOVER="$_v" ;;
+       FIXPOINT) FIXPOINT="$_v" ;; ALL_SETTLED_DONE) ALL_SETTLED_DONE="$_v" ;;
+     esac
+   done <<EOF
+$PLAN_OUT
+EOF
+   unset _k _v
    if [ "$FIXPOINT" = "yes" ]; then
      echo "EPIC FIXPOINT REACHED"
    else
