@@ -1,12 +1,18 @@
 ---
 description: Merge a Quetrex task's reviewed PR — brings the cloud build's gate evidence home, verifies it against the PR head, squash-merges, sets the task to merged, and tears the branch down. Usage: /quetrex:merge SMA-1
-argument-hint: "<TASK-ID>  (e.g. DEA-1)"
+argument-hint: "<TASK-ID>  (e.g. DEA-1, or DEA-1.2 for an epic child)"
 ---
 
 # Quetrex Merge
 
 Merge the pull request for one task, and finish the job: status moved, branches and worktree
 gone. One command, no manual GitHub visit.
+
+"One task" means a standalone unit, an **epic child** (`<CODE>-<N>.<C>`), or an epic's
+integration → main terminus — all three are ordinary PRs judged by the same gate. The child
+case is not a variant: `/quetrex:merge <child>` is what the epic's dispatch tick calls to
+**reap** each finished child, and it is the only thing in the engine that sets a child to
+`merged` — the one status that satisfies a dependency and releases the next wave of the DAG.
 
 ## Why this command exists
 
@@ -56,11 +62,24 @@ overrides it for those two blocks.
 TASK="$(echo "$ARGUMENTS" | tr -d '[:space:]')"
 [ -n "$TASK" ] || { echo "Usage: /quetrex:merge <TASK-ID>   (e.g. /quetrex:merge DEA-1)" >&2; exit 1; }
 
-# A Quetrex task id is <CODE>-<number>. Validate the shape here: it catches a typo before it
-# can be matched loosely against a hundred branch names, and it is what lets the matcher below
-# build a regex straight from the id without escaping (a validated id carries no metacharacter).
-printf '%s' "$TASK" | grep -qE '^[A-Za-z][A-Za-z0-9]*-[0-9]+$' || {
-  echo "Not a Quetrex task id: '$TASK' — expected <CODE>-<number>, e.g. DEA-1." >&2; exit 1; }
+# A Quetrex task id is <CODE>-<number>, and an epic CHILD is <CODE>-<number>.<child> —
+# exactly one level deep, because the decomposition forbids grandchildren. The server is
+# authoritative on the shape: quetrex-kanban's `src/lib/task-ref.ts` matches
+# `^([A-Za-z][A-Za-z0-9]*)-(\d+)(?:\.(\d+))?$` and `src/lib/dto.ts` renders it with
+# `childIdent(n, cn, code) => cn == null ? code-n : code-n.cn`.
+#
+# **The child form must be accepted here.** `/quetrex:merge <child>` is the reaper of an
+# epic's DAG — it is the only thing in the engine that sets a child to `merged`, and `merged`
+# is the only status that satisfies a dependency. While this validator required the plain
+# form, every `/quetrex:merge QDM-2.1` died on this line, so no wave after the first could
+# ever be unblocked and every epic stranded.
+#
+# Validating the shape still matters for the same reason as before — it catches a typo before
+# it is matched against a hundred branch names, and it keeps a shell metacharacter out of the
+# ref names and paths §2/§5 build from it. What it no longer buys is regex safety: a child id
+# contains a literal `.`, so the matcher below MUST escape it (see there).
+printf '%s' "$TASK" | grep -qE '^[A-Za-z][A-Za-z0-9]*-[0-9]+(\.[0-9]+)?$' || {
+  echo "Not a Quetrex task id: '$TASK' — expected <CODE>-<number>, or <CODE>-<number>.<child> for an epic child (e.g. DEA-1, DEA-1.2)." >&2; exit 1; }
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
 BIND="$REPO_ROOT/.quetrex/project.json"
@@ -96,7 +115,20 @@ PR="$(printf '%s' "$PR_JSON" | node -e '
     // matcher silently returned the WRONG PR as its single hit. Require a non-alphanumeric
     // boundary (or the string edge) on BOTH sides: qdm-1 matches claude/qdm-1 and
     // claude/qdm-1-manifest, and does not match claude/qdm-10-manifest.
-    const re=new RegExp("(^|[^a-z0-9])"+task+"([^a-z0-9]|$)");
+    //
+    // ESCAPE THE ID FIRST. It used to be concatenated straight in, on the claim that a
+    // validated id carries no metacharacter. An epic CHILD id does: `qdm-2.1`, where `.`
+    // is a regex WILDCARD — unescaped, it matched `claude/qdm-231-manifest` as one
+    // confident, unambiguous, WRONG hit. Escaping is what makes accepting the child form
+    // safe rather than a silent wrong-PR merge.
+    const lit=task.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+    // `.` IS EXCLUDED FROM THE RIGHT-HAND BOUNDARY, and only there. It is non-alphanumeric,
+    // so the old class let a PARENT id select one of its CHILDREN's PRs: qdm-2 matched
+    // claude/qdm-2.1-manifest. With the epic's integration PR not yet open and one child
+    // PR still open, that is again a single unambiguous hit on the wrong PR. Excluding it
+    // means `<EPIC>` only ever matches the epic's own head and `<EPIC>.<n>` only its own —
+    // and a child's worktree/refs are torn down by that child's own reap, not the epic's.
+    const re=new RegExp("(^|[^a-z0-9])"+lit+"([^a-z0-9.]|$)");
     const hit=a.filter(p=>re.test(String(p.headRefName).toLowerCase()));
     if(hit.length!==1){
       process.stderr.write(hit.length+" candidate(s)\n");
@@ -285,12 +317,46 @@ git -C "$REPO_ROOT" fetch --prune -q origin
 git -C "$REPO_ROOT" pull --ff-only -q origin "$(git -C "$REPO_ROOT" branch --show-current)"
 
 # c. Tear down the worktree for this task, if the pipeline made one.
-for wt in $(git -C "$REPO_ROOT" worktree list --porcelain | awk '/^worktree /{print $2}'); do
-  case "$wt" in
-    *"$TASK"*) git -C "$REPO_ROOT" worktree remove "$wt" --force 2>/dev/null && echo "removed worktree $wt" ;;
-  esac
-done
-git -C "$REPO_ROOT" worktree prune
+#
+# ── quetrex:exec-block qx_remove_task_worktrees ─────────────────────────────
+# Executable, and executed: test/merge-child-ids.test.sh drives this function
+# against real `git worktree`s holding real uncommitted files.
+#
+# WHY A BOUNDED MATCH, AND WHY IT IS NOT A NICETY. This used to be
+# `case "$wt" in *"$TASK"*)` — an UNBOUNDED SUBSTRING. `/quetrex:merge QDM-1`
+# therefore force-removed the worktrees of QDM-10, QDM-100 and QDM-1.2 along
+# with its own, and `--force` is exactly the flag that overrides git's refusal
+# to delete a worktree containing modified or untracked files. Merging one task
+# silently destroyed another task's in-progress work, with no prompt and no
+# recovery — the destructive twin of the wrong-PR match §1 fixes.
+#
+# The rule is the same one §1's matcher uses, so an id can never reach into a
+# longer id or into one of its own children:
+#   - left  boundary: a non-alphanumeric character, or the start of the path;
+#   - right boundary: a character that is neither alphanumeric NOR `.`, or the
+#     end of the path. Excluding `.` is what stops the epic QDM-2 from taking
+#     child QDM-2.1's worktree; each child is torn down by its own reap.
+# Every pattern quotes "$task", so the `.` in a child id is a literal here too,
+# not a glob wildcard.
+#
+# The MAIN checkout is never a candidate. `git worktree list` puts it first,
+# and the operator's own repo directory may perfectly well be named after a
+# task (…/QDM-7-app); attempting to remove it fails harmlessly today, but not
+# offering it as a candidate at all is the honest way to say "never".
+qx_remove_task_worktrees() {   # qx_remove_task_worktrees <repo-root> <task-id>
+  local root="$1" task="$2" main_wt wt
+  main_wt="$(git -C "$root" worktree list --porcelain | sed -n 's/^worktree //p' | head -1)"
+  git -C "$root" worktree list --porcelain | sed -n 's/^worktree //p' | while IFS= read -r wt; do
+    [ -n "$wt" ] && [ "$wt" != "$main_wt" ] || continue
+    case "$wt" in
+      "$task"|"$task"[!A-Za-z0-9.]*|*[!A-Za-z0-9]"$task"|*[!A-Za-z0-9]"$task"[!A-Za-z0-9.]*)
+        git -C "$root" worktree remove "$wt" --force 2>/dev/null && echo "removed worktree $wt" ;;
+    esac
+  done
+  git -C "$root" worktree prune
+}
+# ── end quetrex:exec-block qx_remove_task_worktrees ─────────────────────────
+qx_remove_task_worktrees "$REPO_ROOT" "$TASK"
 
 # Print the refs §5d has to delete, so their names can be typed in literally.
 echo "delete locally : $PR_HEAD  $GATES_BRANCH  $SPEC_BRANCH"
