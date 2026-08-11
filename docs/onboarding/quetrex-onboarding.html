@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quetrex Onboarding Guide</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #16181d;
+    --muted: #5b6472;
+    --rule: #e3e7ee;
+    --panel: #f6f8fb;
+    --accent: #1f5eff;
+    --warn-bg: #fff7e6;
+    --warn-rule: #e6b800;
+    --stop-bg: #fdf0f0;
+    --stop-rule: #d24141;
+    --code-bg: #f2f4f8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12141a;
+      --fg: #e7eaf0;
+      --muted: #9aa4b4;
+      --rule: #262b35;
+      --panel: #191d25;
+      --accent: #7aa2ff;
+      --warn-bg: #241e0d;
+      --warn-rule: #8a6d12;
+      --stop-bg: #2a1416;
+      --stop-rule: #a13a3a;
+      --code-bg: #1b1f28;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12141a;
+    --fg: #e7eaf0;
+    --muted: #9aa4b4;
+    --rule: #262b35;
+    --panel: #191d25;
+    --accent: #7aa2ff;
+    --warn-bg: #241e0d;
+    --warn-rule: #8a6d12;
+    --stop-bg: #2a1416;
+    --stop-rule: #a13a3a;
+    --code-bg: #1b1f28;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Helvetica, Arial, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 46rem; margin: 0 auto; padding: 3rem 1.25rem 6rem; }
+  header.masthead { border-bottom: 2px solid var(--fg); padding-bottom: 1.5rem; margin-bottom: 2.5rem; }
+  .eyebrow { font-size: .75rem; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin: 0 0 .5rem; }
+  h1 { font-size: 2.1rem; line-height: 1.15; margin: 0 0 .75rem; letter-spacing: -.02em; }
+  .lede { font-size: 1.08rem; color: var(--muted); margin: 0; }
+  h2 { font-size: 1.35rem; margin: 3rem 0 .35rem; letter-spacing: -.01em; scroll-margin-top: 1rem; }
+  h2 .num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .5rem; }
+  h3 { font-size: 1rem; margin: 2rem 0 .4rem; }
+  h2 + .sub { color: var(--muted); margin: 0 0 1.25rem; border-bottom: 1px solid var(--rule); padding-bottom: 1rem; }
+  p { margin: 0 0 1rem; }
+  ul, ol { margin: 0 0 1rem; padding-left: 1.35rem; }
+  li { margin: .3rem 0; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+  code { background: var(--code-bg); padding: .1em .35em; border-radius: 4px; font-size: .89em; }
+  pre { background: var(--code-bg); border: 1px solid var(--rule); border-radius: 8px; padding: .9rem 1rem; overflow-x: auto; font-size: .85rem; line-height: 1.5; }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 1rem 1.15rem; margin: 1.25rem 0; }
+  .panel > :last-child { margin-bottom: 0; }
+  .panel .label { font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); display: block; margin-bottom: .4rem; }
+  .warn { background: var(--warn-bg); border-left: 4px solid var(--warn-rule); }
+  .stop { background: var(--stop-bg); border-left: 4px solid var(--stop-rule); }
+  .flow { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin: 1rem 0 1.25rem; font-size: .82rem; }
+  .flow span.step { background: var(--panel); border: 1px solid var(--rule); border-radius: 999px; padding: .2rem .7rem; white-space: nowrap; }
+  .flow span.arrow { color: var(--muted); }
+  .tablewrap { overflow-x: auto; margin: 1.25rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+  th, td { text-align: left; vertical-align: top; padding: .55rem .7rem; border-bottom: 1px solid var(--rule); }
+  th { font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  td code { white-space: nowrap; }
+  nav.toc ol { list-style: none; padding: 0; counter-reset: toc; }
+  nav.toc li { counter-increment: toc; margin: .25rem 0; }
+  nav.toc li::before { content: counter(toc) "."; color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .5rem; }
+  nav.toc a { color: inherit; text-decoration: none; border-bottom: 1px solid var(--rule); }
+  nav.toc a:hover { border-bottom-color: var(--accent); }
+  footer { margin-top: 4rem; padding-top: 1.25rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: .85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">Quetrex</p>
+  <h1>Onboarding Guide</h1>
+  <p class="lede">How work actually moves through Quetrex: you plan a task, you approve its scope, a build runs on Anthropic servers without you, you merge it behind a gate, and you deploy it by hand.</p>
+</header>
+
+<nav class="toc">
+  <p class="eyebrow">Contents</p>
+  <ol>
+    <li><a href="#s1">What Quetrex is — the mental model</a></li>
+    <li><a href="#s2">Setup — one command per machine, one per repo</a></li>
+    <li><a href="#s3">The daily loop</a></li>
+    <li><a href="#s4">What the cloud build actually does</a></li>
+    <li><a href="#s5">The gates — why a merge means something</a></li>
+    <li><a href="#s6">Keeping the engine current</a></li>
+    <li><a href="#s7">Known limits, stated plainly</a></li>
+    <li><a href="#s8">Quick reference</a></li>
+  </ol>
+</nav>
+
+<h2 id="s1"><span class="num">1</span>What Quetrex is</h2>
+<p class="sub">Get this section right and the rest is mechanics.</p>
+
+<p><strong>Quetrex is a routine-fired kanban.</strong> A task on the board is the unit of work. You give it a scope, you approve that scope, and a build fires on Anthropic servers and carries it to a reviewed pull request. Your attention is spent at two or three taps, not on a running session.</p>
+
+<p>The loop, end to end:</p>
+
+<div class="flow">
+  <span class="step">plan</span><span class="arrow">&rarr;</span>
+  <span class="step">approve the scope from your phone</span><span class="arrow">&rarr;</span>
+  <span class="step">automated build in the cloud</span><span class="arrow">&rarr;</span>
+  <span class="step">review + gate</span><span class="arrow">&rarr;</span>
+  <span class="step">merge</span><span class="arrow">&rarr;</span>
+  <span class="step">manual deploy</span>
+</div>
+
+<p>The board is watch-plus-gate-taps. You are looking at it to see where things are and to tap the two or three decisions that are genuinely yours: the scope, the merge, the deploy.</p>
+
+<div class="panel stop">
+  <span class="label">The one thing to unlearn</span>
+  <p><strong>You do not sit and watch an agent type.</strong> Quetrex exists to replace that workflow. There is no always-watching terminal session that you babysit, and there is no machine of yours that has to stay awake for a build to finish. If you find yourself staring at streaming output waiting for a build, something has gone wrong with how the task was started.</p>
+</div>
+
+<h3>Where the compute runs</h3>
+<p><strong>Compute runs only on Anthropic servers</strong>, as a fired Claude Code cloud routine. Not on your laptop, not on a shared box someone keeps plugged in, not in CI. The one thing that runs locally is the short planning conversation in section 3, because it needs a person in it.</p>
+
+<h3>Where the guarantees live</h3>
+<p>Every promise Quetrex makes is a <strong>hook that reads a file on disk</strong> — never an agent&rsquo;s word for it. An agent claiming the tests passed means nothing; a hook reading the recorded exit code is the gate. Those hooks are committed into the repo under <code>.claude/</code>, which is why they behave identically in your local session and inside a cloud routine: the routine clones the same repo and gets the same enforcement.</p>
+
+<h3>Quetrex is project-scoped</h3>
+<p>A repository opts in. Nothing is global, and nothing is silently applied to code you did not arm. <strong>An unarmed repo has no gates at all</strong> — no branch enforcement, no verify gate, no merge gate. Arming is section 2 and takes one command.</p>
+
+<h2 id="s2"><span class="num">2</span>Setup</h2>
+<p class="sub">Two commands. One is per machine, one is per repository.</p>
+
+<h3>2.1 &nbsp;Once per machine</h3>
+<pre><code>/quetrex:login</code></pre>
+<p>Opens a browser device flow against the Quetrex board and writes a per-user API token to <code>~/.quetrex/auth.json</code> with mode <code>600</code>. The token is never printed. Run it once; every other command assumes it.</p>
+
+<h3>2.2 &nbsp;Once per repository</h3>
+<pre><code>/quetrex:init</code></pre>
+<p>Links this repo to a board project (writing <code>.quetrex/project.json</code>, which pins the project code and its branch prefix) and then arms the repo: it enables the engine, records the marketplace, unions in the permissions the pipeline needs, and makes sure a verify chain is declared. It is non-destructive and idempotent — re-running it on an already-armed repo is the supported way to repair one.</p>
+
+<h3>2.3 &nbsp;What arming writes, and why every character matters</h3>
+<p><code>/quetrex:init</code> writes this into the repo&rsquo;s checked-in <code>.claude/settings.json</code>. You should not hand-write it, but you should be able to recognise a broken one:</p>
+
+<pre><code>{
+  "extraKnownMarketplaces": {
+    "quetrex": {
+      "source": { "source": "github", "repo": "Glori-Holdings/quetrex-plugins" },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "quetrex@quetrex": true,
+    "quetrex-factory@quetrex": true
+  }
+}</code></pre>
+
+<ul>
+  <li><code>"quetrex@quetrex": true</code> is the command layer. Without it you get no <code>/quetrex:*</code> commands at all — no login, no init, no build. It is the plugin to check first when the commands are simply not there.</li>
+  <li><code>"quetrex-factory@quetrex": true</code> is the build engine: the specialist agents, the pipeline definition, and the hooks.</li>
+  <li><code>"autoUpdate": true</code> on the marketplace entry is required, not decoration. A third-party marketplace defaults to auto-update <em>off</em>, which freezes the catalog: a fix published today would never reach anyone on the team.</li>
+</ul>
+
+<div class="panel warn">
+  <span class="label">Never pin a version</span>
+  <p>Both plugins are enabled with a plain boolean. <strong>Never pin a version</strong> — a pinned entry, whether an array like <code>["1.2.1"]</code> or a bare version string, makes the plugin count as <em>disabled</em> for dependency resolution. This has already caused a total outage: the entire <code>/quetrex:*</code> command layer failed to load in every armed repo, including the ones whose pin named the exact installed version. Booleans plus <code>autoUpdate</code> are the whole mechanism. The running version is surfaced in the status bar, never in config.</p>
+</div>
+
+<h3>2.4 &nbsp;The marketplace</h3>
+<p><strong>The marketplace is public.</strong> <code>Glori-Holdings/quetrex-plugins</code> and the engine repo behind it are public on purpose: a fresh cloud routine has no credentials of yours, and it has to be able to install the engine unauthenticated before it can do anything else. Nothing secret lives there — it carries plugin definitions, agent prompts, and hook scripts.</p>
+<p>The same marketplace also carries optional per-stack packs (<code>quetrex-nextjs</code>, <code>quetrex-python</code>, <code>quetrex-rust</code>, <code>quetrex-swift</code>). They are optional, and <code>/quetrex:init</code> does not enable them.</p>
+
+<h3>2.5 &nbsp;Checking your work</h3>
+<pre><code>/quetrex:doctor</code></pre>
+<p>Health-checks the Quetrex layer of the current repo: board reachable, engine enabled and auto-updating and never pinned, no stale legacy artifacts, verify chain configured, deploy target set. It reports in the checkmark-and-fix style of the native <code>/doctor</code> and tells you the command that fixes each finding. It is triage — it is not how a feature gets armed. Arming is <code>/quetrex:login</code> and <code>/quetrex:init</code>.</p>
+
+<div class="panel">
+  <span class="label">Naming</span>
+  <p>Every Quetrex command is namespaced with a colon: <code>/quetrex:init</code>, <code>/quetrex:task-build</code>. If you find a command written with a hyphen where the colon should be, it is a stale name from the retired npm-era packaging and no longer exists — delete it and use the namespaced one.</p>
+</div>
+
+<h2 id="s3"><span class="num">3</span>The daily loop</h2>
+<p class="sub">Create, sharpen, approve, merge, deploy. Everything between those is unattended.</p>
+
+<h3>3.1 &nbsp;Create and sharpen</h3>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>/quetrex:task-new</code></td><td>Creates one Backlog task on the board. Does not start work.</td></tr>
+    <tr><td><code>/quetrex:task-refine</code></td><td>Turns the task into a buildable spec — acceptance criteria, scope, likely-affected files, edge cases — through a dialog grounded in this repo&rsquo;s actual code. Does not change status and does not start work.</td></tr>
+  </tbody>
+</table>
+</div>
+<p>Refinement is where a human adds the most value. An under-specified task is the top cause of rework, and rework costs a whole build cycle.</p>
+
+<h3>3.2 &nbsp;Build, in two halves split at the scope gate</h3>
+<pre><code>/quetrex:task-build SMA-1</code></pre>
+<p>This command deliberately splits in half at a human gate:</p>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Half</th><th>Runs where</th><th>Needs you?</th></tr></thead>
+  <tbody>
+    <tr><td><strong>PLAN</strong></td><td>Locally, in a session a person is in</td><td>Yes — one tap on Approve</td></tr>
+    <tr><td><strong>BUILD</strong></td><td>A fired cloud routine on Anthropic servers</td><td>No</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The plan half classifies the task, has the architect produce an implementation plan with a strict file-ownership map, and writes it to <code>.quetrex/plan/&lt;TASK&gt;.json</code>. Then it stops and asks you to approve <em>scope</em> — not implementation detail, scope. That approval stamps <code>scopeApprovedAt</code> into the plan, and nothing will build without it.</p>
+
+<p>Because the approval is a stamp on an artifact rather than a moment in a conversation, the build half can be re-entered later from a fresh process. That is what makes it fireable, and it is why <strong>you can approve the scope from your phone</strong> and put the phone away.</p>
+
+<p>On approval, <strong>the build runs on Anthropic's cloud</strong>. Your terminal is free immediately. Section 4 is what happens inside it.</p>
+
+<h3>3.3 &nbsp;Merge</h3>
+<pre><code>/quetrex:merge SMA-1</code></pre>
+<p><strong>Merging is not automatic.</strong> The cloud build ends at an <em>open</em> pull request plus published gate evidence; a human still decides. <code>/quetrex:merge</code> brings that evidence home, proves it describes the pull request&rsquo;s current head, squash-merges, moves the task to merged, and tears the branch and worktree down. You do not go to GitHub to do this by hand.</p>
+
+<h3>3.4 &nbsp;Deploy, then close</h3>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>/quetrex:deploy</code></td><td>Deploys using this project&rsquo;s vault secrets, fetched in memory and never printed. Fly.io in v1, rolling strategy. <code>/quetrex:deploy rollback</code> goes back to the previous release. <strong>Deploy is manual on purpose</strong> — it is the last deliberate human gate.</td></tr>
+    <tr><td><code>/quetrex:task-complete</code></td><td>Moves a deployed task to complete. Board only — no git, no pull requests.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>3.5 &nbsp;When a build comes back unhappy</h3>
+<p>A build that cannot honestly finish sets the task to <code>needs_clarity</code> and stops rather than guessing. That is a question for you, and it stays parked until you answer it:</p>
+<pre><code>/quetrex:task-rework SMA-1</code></pre>
+<p>Rework works out <em>why</em> it failed with you, records the agreed plan on the board, re-queues the task, and re-runs the same pipeline. Small non-blocking review nits get applied directly instead of costing a rebuild.</p>
+
+<h2 id="s4"><span class="num">4</span>What the cloud build actually does</h2>
+<p class="sub">You never have to drive this. Read it once so the pull request that appears is not magic.</p>
+
+<p>When you approve the scope, the local half publishes the approved plan to a disposable spec branch named <code>quetrex-spec/&lt;TASK&gt;</code> and fires a routine. The routine gets a fresh session with <em>zero</em> context — no conversation history, no plugin, nothing but an unauthenticated clone. In order, it:</p>
+
+<ol>
+  <li><strong>Installs the engine</strong> from the public marketplace. This is why the marketplace has to be public: the clone has no credentials of yours.</li>
+  <li><strong>Fetches the approved plan</strong> off the spec branch. It does not re-plan and it cannot widen the ownership map you approved. If the plan is missing or malformed it reports a transport failure instead of inventing one.</li>
+  <li><strong>Syncs to the approved base by ancestry.</strong> A routine starts from whatever snapshot it was handed, which cannot be trusted — one real run built on a base a day stale and then opened three unrelated pull requests trying to unblock itself. The sync decides by ancestry, never by comparing strings: a base <em>behind</em> the approved sha aborts and pushes nothing, because a build on a base nobody approved is worse than no build.</li>
+  <li><strong>Hydrates a credential-less environment.</strong> A fresh clone has no <code>.env</code> at all, and a verify chain that reads one variable fails on that alone. The routine projects the variable <em>names</em> out of the plan&rsquo;s <code>required_env</code> and writes placeholder values. It never has real credentials — see section 7.</li>
+  <li><strong>Runs the pipeline</strong> — developer, then QA, then reviewer, then security-reviewer, then git-workflow — and opens the pull request.</li>
+  <li><strong>Publishes its gate evidence</strong> to a branch named <code>&lt;prefix&gt;&lt;TASK&gt;-gates</code>.</li>
+</ol>
+
+<div class="flow">
+  <span class="step">developer</span><span class="arrow">&rarr;</span>
+  <span class="step">QA</span><span class="arrow">&rarr;</span>
+  <span class="step">reviewer</span><span class="arrow">&rarr;</span>
+  <span class="step">security-reviewer</span><span class="arrow">&rarr;</span>
+  <span class="step">git-workflow</span>
+</div>
+
+<h2 id="s5"><span class="num">5</span>The gates</h2>
+<p class="sub">Why a Quetrex merge means more than a green checkmark.</p>
+
+<p>The evidence branch carries files, not claims:</p>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Artifact</th><th>What it proves</th></tr></thead>
+  <tbody>
+    <tr><td><code>verify-ledger.jsonl</code></td><td>The verify chain ran, with real recorded exit codes.</td></tr>
+    <tr><td><code>qa-report.json</code></td><td>QA proved green rather than taking a developer&rsquo;s word.</td></tr>
+    <tr><td><code>review-verdict.json</code></td><td>The reviewer read the full diff and returned a verdict.</td></tr>
+    <tr><td><code>security-findings.json</code></td><td>The security review ran and what it found.</td></tr>
+    <tr><td><code>gates-head</code></td><td>The exact commit sha all of the above describe.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>That last file is the point. <code>/quetrex:merge</code> compares <code>gates-head</code> against the pull request&rsquo;s current head, and refuses when commits landed after the evidence was published — because in that case nothing has verified what would actually merge. The honest answer there is to re-run the build so the gates are re-published, or to make a deliberate human decision.</p>
+
+<p>The merge gate hook then re-verifies independently and can deny the merge on its own. You cannot talk past it, and neither can an agent.</p>
+
+<div class="panel">
+  <span class="label">The hooks</span>
+  <p><code>enforce-branch</code> keeps work off <code>main</code>. <code>secret-scan</code> stops secrets being committed. <code>deny-guard</code> blocks destructive operations. <code>verify-gate</code> requires a real green result. <code>merge-gate</code> re-checks the evidence against the head that is actually merging. All of them read files, all of them are committed into the repo, and all of them fire the same way in a cloud routine as they do locally.</p>
+</div>
+
+<h2 id="s6"><span class="num">6</span>Keeping the engine current</h2>
+<p class="sub">Auto-update is the mechanism. This command is how you force it and confirm it.</p>
+
+<pre><code>/quetrex:update</code></pre>
+<p>Pulls the latest engine into this machine&rsquo;s plugin cache and reports what is now running. It will never create a version pin — see the warning in section 2.3 for why that would be an outage rather than a preference. Day to day you should not need it: <code>autoUpdate</code> on the marketplace entry is what keeps the whole team current, and the running version shows in the status bar.</p>
+
+<h2 id="s7"><span class="num">7</span>Known limits</h2>
+<p class="sub">True as written. If something here is not listed as working, do not assume it is.</p>
+
+<ul>
+  <li><strong>Cloud builds have no credentials.</strong> There is no secrets store on the cloud side; the routine writes placeholder values for the variable names the plan declares. Anything whose verify chain needs a live credential to pass will not pass in a cloud build. Keep credential-dependent checks out of the gating chain.</li>
+  <li><strong>Cloud pushes need the GitHub App installed on the organisation that owns the repo.</strong> The routine writes through that app, per organisation. If it is not installed there, the build cannot push and the run ends without a pull request.</li>
+  <li><strong>Board status does not fully advance itself from a cloud run.</strong> Expect to see cards that need moving by hand, or to learn a build finished from the pull request rather than from the column it sits in.</li>
+  <li><strong>The single-unit path is the proven one.</strong> One task, one plan, one build, one pull request has been run end to end. Epic decomposition into child tasks is implemented in the command but has <em>not</em> been proven end to end — treat it as unproven and prefer splitting an epic into separate tasks yourself.</li>
+  <li><strong>Merging stays a human decision.</strong> There is no path in which a build merges its own work.</li>
+</ul>
+
+<h2 id="s8"><span class="num">8</span>Quick reference</h2>
+<p class="sub">Keep this open for a week.</p>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Command</th><th>When</th></tr></thead>
+  <tbody>
+    <tr><td><code>/quetrex:login</code></td><td>Once per machine, before anything else.</td></tr>
+    <tr><td><code>/quetrex:init</code></td><td>Once per repo, to link and arm it. Re-run to repair.</td></tr>
+    <tr><td><code>/quetrex:doctor</code></td><td>When something is off and you want the fix named.</td></tr>
+    <tr><td><code>/quetrex:task-new</code></td><td>Put work on the board.</td></tr>
+    <tr><td><code>/quetrex:task-refine</code></td><td>Sharpen it into a buildable spec. Highest-leverage step.</td></tr>
+    <tr><td><code>/quetrex:task-build</code></td><td>Plan, approve the scope, fire the cloud build.</td></tr>
+    <tr><td><code>/quetrex:task-rework</code></td><td>A build came back with a question.</td></tr>
+    <tr><td><code>/quetrex:merge</code></td><td>Gate-checked squash merge, plus cleanup.</td></tr>
+    <tr><td><code>/quetrex:deploy</code></td><td>Manual deploy. Also <code>rollback</code>.</td></tr>
+    <tr><td><code>/quetrex:task-complete</code></td><td>Close a deployed task.</td></tr>
+    <tr><td><code>/quetrex:update</code></td><td>Force the engine forward and report the version.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="panel">
+  <span class="label">If you remember four things</span>
+  <ol>
+    <li>Quetrex is a routine-fired kanban: plan, approve, build in the cloud, gated merge, manual deploy.</li>
+    <li>Compute runs only on Anthropic servers. You do not sit and watch an agent type.</li>
+    <li>Booleans and <code>autoUpdate</code> in settings. Never pin a version.</li>
+    <li>A repo is armed by <code>/quetrex:login</code> then <code>/quetrex:init</code>, and an unarmed repo has no gates at all.</li>
+  </ol>
+</div>
+
+<footer>
+  Internal engineering document. Quetrex is a plugin family layered on Claude Code; builds execute as Claude Code cloud routines on Anthropic infrastructure.
+</footer>
+
+</div>
+</body>
+</html>
