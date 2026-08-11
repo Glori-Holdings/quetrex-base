@@ -1,5 +1,5 @@
 ---
-description: Diagnose this repo's Quetrex health — board reachable, engine enabled and auto-updating (never pinned), no leftover legacy artifacts, no dead MCP broker, verify chain configured, deploy target set, vault wired — in the checkmark / here's-the-fix style of the native /doctor. Usage: /quetrex:doctor
+description: Diagnose this repo's Quetrex health — board reachable, engine enabled and auto-updating (never pinned), no leftover legacy artifacts, no dead MCP broker, verify chain configured, deploy target set, vault wired, pipeline permissions granted — in the checkmark / here's-the-fix style of the native /doctor. Usage: /quetrex:doctor
 argument-hint: ""
 ---
 
@@ -16,7 +16,7 @@ itself. If a check below reveals a platform/plugin-install problem (a plugin not
 enabled, the CLI unhealthy), say so and **point the user at `/doctor`** rather
 than re-implementing those checks here.
 
-What THIS command owns are the seven Quetrex-app checks native `/doctor` knows
+What THIS command owns are the eight Quetrex-app checks native `/doctor` knows
 nothing about. Run them all, then print one line per check:
 
 - `✓ <check> — <what's good>`
@@ -338,9 +338,48 @@ fi
 
 ---
 
+## Check 8 — Pipeline permissions granted
+
+A plugin **cannot** ship a `permissions.allow` block — Claude Code honours only
+two keys from a plugin's `settings.json` — so the pipeline's terminal grants
+have to live in the customer's own committed `.claude/settings.json`, written
+there by `/quetrex:init` step 4e. When they are missing, nothing fails early:
+the architect plans, the developers build, QA and the reviewer pass, and then
+the very last step tries to `git push` / `gh pr create`, hits a permission
+prompt, and **hangs with the work already done**. In an unattended cloud build
+there is nobody at the keyboard — measured on QDM-4, where the operator was
+paged on his phone to approve a `gh pr create` that is supposed to be automatic,
+because `quetrex-demo`'s `.claude/settings.json` had no `permissions` key at all.
+
+Check the two grants that actually strand the terminal stage, by name.
+`Bash(git push:*)` and `Bash(gh pr:*)` are the pair; a repo missing either one
+hangs in exactly the same place, so report which are absent rather than whether
+the `permissions` key merely exists:
+
+```bash
+MISSING_PERMS="$(node -e '
+  const fs=require("fs");
+  const need=["Bash(git push:*)","Bash(gh pr:*)"];
+  let o={}; try{o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+  const allow=(o.permissions&&Array.isArray(o.permissions.allow))?o.permissions.allow:[];
+  process.stdout.write(need.filter(function(n){return allow.indexOf(n)===-1}).join(", "));
+' "$SETTINGS" 2>/dev/null)"
+if [ -z "$MISSING_PERMS" ]; then
+  echo "✓ Pipeline permissions granted — this repo's .claude/settings.json allows the terminal git push and gh pr calls."
+else
+  echo "✗ Pipeline permissions granted — .claude/settings.json is missing $MISSING_PERMS, so the pipeline runs the whole build and then HANGS at the final push/PR step waiting for a human to approve it."
+  echo "    Fix: run /quetrex:init — its step 4e unions the FULL pipeline grant set (12 entries) into your own committed .claude/settings.json, not only the ones named above: the git worktree/checkout/merge/diff/rev-parse/add/commit calls, Bash(jq:*), Bash(mkdir:*), and Edit(/**) — the file-write grant, anchored at your project root. It only ever adds, never removes or narrows an existing entry, and never touches permissions.deny/ask. See init.md step 4e for the exact list; every entry lands in your own settings, so it is visible and revocable by you."
+fi
+```
+
+This is a **repo** check, not a machine one: the grants must be committed, or
+they reach neither a teammate's checkout nor a cloud routine's fresh clone.
+
+---
+
 ## Final summary
 
-After the seven checks, print a one-line roll-up: *"Quetrex health: N/7 green."*
+After the eight checks, print a one-line roll-up: *"Quetrex health: N/8 green."*
 If any check surfaced a **platform or plugin-install** symptom (a plugin not
 enabled, the CLI itself unhealthy, marketplace unreachable), add one line
 directing the user to native **`/doctor`** for that layer — this command
