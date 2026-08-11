@@ -24,7 +24,7 @@ notok() { FAIL=$((FAIL+1)); echo "NOT OK - $1"; }
 
 # Every helper the lib duplicates from the CLI. Adding a shared helper to either file
 # without adding it here is itself drift, so ASSERTION 3 checks for that too.
-SHARED="qx_create_child qx_add_dep qx_is_unblocked qx_task_status qx_task_type qx_task_ainote qx_task_comment qx_binding_path qx_env_scan qx_secret_put_from_env"
+SHARED="qx_create_child qx_add_dep qx_is_unblocked qx_task_status qx_task_type qx_task_ainote qx_task_comment qx_binding_path qx_env_scan qx_secret_put_from_env _qx_trim _qx_task_json _qx_task_uuid _qx_json_get"
 
 for f in "$BIN" "$LIB"; do
   [ -f "$f" ] || { echo "NOT OK - missing $f"; exit 1; }
@@ -53,8 +53,11 @@ done
 
 # --- ASSERTION 3: no shared helper escapes the list above ---------------------
 # Catches the drift-of-the-drift-check: a helper added to BOTH files but never compared.
-BIN_FNS="$(grep -oE '^qx_[a-z_]+\(\) \{' "$BIN" | sed 's/() {//' | sort)"
-LIB_FNS="$(grep -oE '^qx_[a-z_]+\(\) \{' "$LIB" | sed 's/() {//' | sort)"
+# The pattern matches a LEADING UNDERSCORE deliberately. It did not, and that blind spot was
+# real: the three public helpers were synced without the three PRIVATE ones they call, so all
+# three were dead in the lib (`_qx_trim: command not found`) while this file reported 12/12.
+BIN_FNS="$(grep -oE '^_?qx_[a-z_]+\(\) \{' "$BIN" | sed 's/() {//' | sort)"
+LIB_FNS="$(grep -oE '^_?qx_[a-z_]+\(\) \{' "$LIB" | sed 's/() {//' | sort)"
 COMMON="$(comm -12 <(printf '%s\n' "$BIN_FNS") <(printf '%s\n' "$LIB_FNS"))"
 UNLISTED=""
 for fn in $COMMON; do
@@ -72,6 +75,16 @@ if bash -n "$LIB" 2>/dev/null; then
   ok "ASSERTION 4: .claude/lib/quetrex-api.sh parses"
 else
   notok "ASSERTION 4: .claude/lib/quetrex-api.sh has a syntax error — every caller that sources it fails"
+fi
+
+# --- ASSERTION 5: BEHAVIORAL — a synced helper must actually run when sourced ----
+# Byte-identical bodies prove nothing if a callee they depend on was left behind. This is the
+# assertion that would have caught the private-helper omission; the three above could not.
+PROBE="$(bash -c 'source "'"$LIB"'" 2>/dev/null; qapi(){ printf "{}"; }; QX_PROJECT_CODE=X; qx_create_child P t d 2>&1 >/dev/null; ' 2>&1)"
+if printf '%s' "$PROBE" | grep -q 'command not found'; then
+  notok "ASSERTION 5: sourcing the lib and calling qx_create_child hits a missing callee — a helper it depends on was not synced ($(printf '%s' "$PROBE" | grep -o '[_a-z]*: command not found' | head -1))"
+else
+  ok "ASSERTION 5: the synced helpers resolve their callees when the lib is sourced"
 fi
 
 echo

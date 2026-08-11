@@ -255,6 +255,47 @@ qx_task_type() {
 #   new child's human identifier (CODE-N.C) on stdout; returns 1 on failure.
 #   Requires QX_PROJECT_CODE (resolve_project). EPIC_ID is the parent's human id.
 # shellcheck disable=SC2329,SC2016
+_qx_trim() {
+  local s="${1-}"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+_qx_task_json() {
+  local ref json
+  ref="$(_qx_trim "${1-}")"
+  if [ -z "$ref" ]; then
+    return 1
+  fi
+  json="$(qapi GET "/api/tasks/$ref")" || return 1
+  printf '%s' "$json"
+}
+
+_qx_task_uuid() {
+  local ref json
+  ref="$(_qx_trim "${1-}")"
+  if [ -z "$ref" ]; then
+    echo "quetrex-api: missing task id" >&2
+    return 1
+  fi
+  json="$(_qx_task_json "$ref")" || {
+    echo "quetrex-api: could not read task '$ref'" >&2
+    return 1
+  }
+  node -e '
+    let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(1); }
+    const id = typeof o.id === "string" ? o.id : "";
+    if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id)) {
+      process.exit(1);
+    }
+    process.stdout.write(id);
+  ' "$json" || {
+    echo "quetrex-api: task '$ref' came back without a usable id" >&2
+    return 1
+  }
+}
+
 qx_create_child() {
   local parent_ref title desc parent_json parent_meta parent_uuid parent_code parent_child body resp ident
 
