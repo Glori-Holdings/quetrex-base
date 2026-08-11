@@ -1065,7 +1065,18 @@ unset QX_DECLARE_SHIM_LOG
 
 # --- NEGATIVE CONTROL: reverting only the non-interactive guard makes the
 # branch invoke declare >= 1 time. ------------------------------------------
-MUT_GUARD_BLOCK="$(printf '%s\n' "$GUARD_BLOCK" | sed -E 's/if \[ -n "\$\{QUETREX_INIT_NONINTERACTIVE:-\}" \] \|\| \[ ! -t 0 \] \|\| \[ ! -t 1 \]; then/if false; then/')"
+# RE-ANCHORED: the guard used to also test [ ! -t 0 ] / [ ! -t 1 ], which are never
+# true inside Claude Code's Bash tool and so made the sanctioned writer unreachable
+# (init never authored a requiredEnv entry). The TTY clauses are gone; human
+# confirmation is now the AskUserQuestion round trip, and QUETREX_INIT_NONINTERACTIVE
+# remains the only suppressor. The control mutates that surviving clause, so it still
+# proves the guard is load-bearing rather than decorative.
+MUT_GUARD_BLOCK="$(printf '%s\n' "$GUARD_BLOCK" | sed -E 's/if \[ -n "\$\{QUETREX_INIT_NONINTERACTIVE:-\}" \]; then/if false; then/')"
+# The mutation must actually apply — a sed that silently matches nothing would make
+# this control vacuous, which is precisely how it went stale the first time.
+if [ "$MUT_GUARD_BLOCK" = "$GUARD_BLOCK" ]; then
+  fail "AC24 NEGATIVE CONTROL: the mutation matched nothing — the control is anchored to text that no longer exists in 5c"
+fi
 NEG24_SCRIPT="$TMPROOT/ac24-neg-run.sh"
 {
   printf '#!/usr/bin/env bash\nset -u\nREPO_ROOT=%q\n' "$F24"

@@ -19,7 +19,31 @@
 #
 # Idempotently and non-destructively writes, into <repo-root>:
 #
+#   .claude/statusline-command.sh
+#     The shipped status-bar renderer, copied in beside settings.json.
+#
 #   .claude/settings.json
+#     statusLine = {"type":"command",
+#                   "command":"bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/statusline-command.sh\""}
+#       WHY ARMING OWNS THIS. Nothing is version-pinned anywhere, so config
+#       carries no engine version at all — /quetrex:update and /quetrex:doctor
+#       both tell the operator the running version "lives in the status bar".
+#       A Claude Code plugin CANNOT register a statusLine, so if arming does
+#       not write it into the TARGET repo, the one place the product points at
+#       is blank in every armed repo and a teammate stranded on an old engine
+#       has no on-screen signal at all. The renderer reads the version at
+#       runtime via quetrex-version, so the committed copy never goes stale.
+#
+#       The ${CLAUDE_PROJECT_DIR:-.} default is load-bearing: the bare form
+#       resolves to /.claude/statusline-command.sh when the variable is unset
+#       and bash exits 127, which the operator reads as a failed build. A
+#       previously-written BARE registration pointing at our own script is
+#       therefore REPAIRED to the guarded form; any other statusLine the
+#       operator set is left byte-for-byte alone (union-only, never narrow),
+#       and an existing .claude/statusline-command.sh in the repo is never
+#       overwritten. If the shipped script cannot be located, NO statusLine is
+#       registered — never a registration pointing at nothing.
+#
 #     enabledPlugins["quetrex@quetrex"]        = true
 #     enabledPlugins["quetrex-factory@quetrex"] = true
 #       NO VERSION PINS. A pinned (array or string) value makes the plugin count
@@ -57,19 +81,27 @@
 #
 # Testability: the marketplace URL can be overridden via QX_ARM_MARKET_URL
 # (accepts any URL curl understands, including file:// for offline fixtures)
-# so tests never depend on network access.
+# so tests never depend on network access. The status-bar script's source
+# path can be overridden via QX_ARM_STATUSLINE_SRC for the same reason.
 
 set -uo pipefail
 
 MARKET_URL="${QX_ARM_MARKET_URL:-https://raw.githubusercontent.com/Glori-Holdings/quetrex-plugins/main/.claude-plugin/marketplace.json}"
+
+# The ONE registration string. Single-quoted on purpose: ${CLAUDE_PROJECT_DIR:-.}
+# is a literal for Claude Code to expand at render time, not something this
+# script expands now.
+QXARM_STATUSLINE_CMD='bash "${CLAUDE_PROJECT_DIR:-.}/.claude/statusline-command.sh"'
 
 _qxarm_usage() {
   cat >&2 <<'EOF'
 usage: quetrex-arm <repo-root> <kanban-url>
 
 Idempotently, non-destructively arms <repo-root> for cloud execution:
-  - .claude/settings.json: enabledPlugins pin (quetrex + quetrex-factory) and
-    extraKnownMarketplaces.quetrex
+  - .claude/settings.json: enabledPlugins pin (quetrex + quetrex-factory),
+    extraKnownMarketplaces.quetrex, and the statusLine registration
+  - .claude/statusline-command.sh: the status-bar renderer that surfaces the
+    running engine version (a plugin cannot register a statusLine itself)
   - .mcp.json: purges the retired mcpServers.quetrex-kanban broker
     (<kanban>/api/mcp), an endpoint that was never built
 EOF
@@ -91,13 +123,66 @@ _qxarm_resolve_factory_version() {
   ' 2>/dev/null
 }
 
-# _qxarm_write_settings <file> <factory-version-or-empty>
-#   Merge the enabledPlugins pin and extraKnownMarketplaces entry into <file>.
+# _qxarm_statusline_src
+#   Absolute path to the status-bar renderer this engine ships. bin/ and
+#   .claude/ are siblings under the plugin root, so resolve it RELATIVE TO
+#   THIS FILE — exactly how bin/quetrex-cleanup finds its own engine lib —
+#   because ${CLAUDE_PLUGIN_ROOT} is unset in the slash-command bash that
+#   calls this tool. Prints nothing when the location cannot be resolved.
+_qxarm_statusline_src() {
+  if [ -n "${QX_ARM_STATUSLINE_SRC:-}" ]; then
+    printf '%s' "$QX_ARM_STATUSLINE_SRC"
+    return 0
+  fi
+  local self_dir
+  self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || return 0
+  [ -n "$self_dir" ] || return 0
+  printf '%s' "$self_dir/.claude/statusline-command.sh"
+}
+
+# _qxarm_install_statusline <repo-root>
+#   Put the status-bar renderer at <repo-root>/.claude/statusline-command.sh.
+#   Prints its report on stdout and, on success, sets QXARM_STATUSLINE_READY=1
+#   so the caller knows a registration has something real to point at.
+#   NEVER overwrites a script the repo already has (the operator may have
+#   customised it) and NEVER fails the run: an unresolvable or uncopyable
+#   source just means the status bar is not registered this time.
+_qxarm_install_statusline() {
+  local repo_root="$1" src dest
+  QXARM_STATUSLINE_READY=0
+  dest="$repo_root/.claude/statusline-command.sh"
+
+  if [ -f "$dest" ]; then
+    echo "statusline-command.sh: already present — left untouched."
+    QXARM_STATUSLINE_READY=1
+    return 0
+  fi
+
+  src="$(_qxarm_statusline_src)"
+  if [ -z "$src" ] || [ ! -f "$src" ]; then
+    echo "statusline-command.sh: shipped copy not found${src:+ at $src} — status bar not registered." >&2
+    return 0
+  fi
+
+  mkdir -p "$repo_root/.claude" 2>/dev/null || true
+  if cp "$src" "$dest" 2>/dev/null; then
+    chmod +x "$dest" 2>/dev/null || true
+    echo "statusline-command.sh: installed — the running engine version is surfaced nowhere else."
+    QXARM_STATUSLINE_READY=1
+  else
+    echo "statusline-command.sh: could not be copied from $src — status bar not registered." >&2
+  fi
+  return 0
+}
+
+# _qxarm_write_settings <file> <statusline-command-or-empty>
+#   Merge the enabledPlugins pin, the extraKnownMarketplaces entry and (when a
+#   command string is given) the statusLine registration into <file>.
 #   Never clobbers any other key. Prints a per-concern change report.
 _qxarm_write_settings() {
   node -e '
     const fs = require("fs"), path = require("path");
-    const [file] = process.argv.slice(1);
+    const [file, slCmd] = process.argv.slice(1);
 
     let o = {};
     try { o = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
@@ -150,7 +235,30 @@ _qxarm_write_settings() {
     };
     const mktChanged = JSON.stringify(o.extraKnownMarketplaces.quetrex) !== beforeMkt;
 
-    if (!pinsChanged && !mktChanged) {
+    // STATUS BAR. A plugin cannot register a statusLine, so the target repo has
+    // to carry the registration itself or the running engine version is shown
+    // nowhere at all (nothing is version-pinned, so config names no version).
+    //
+    // Union-only, exactly like every other write here: an existing statusLine
+    // is the operator speaking, and it wins. The ONE exception is a repair, not
+    // a clobber — a registration that already points at OUR script but omits
+    // the ${CLAUDE_PROJECT_DIR:-.} default is rewritten, because the bare form
+    // resolves to /.claude/statusline-command.sh when the variable is unset and
+    // bash exits 127, which reads to the operator as a failed build.
+    let slChanged = false;
+    if (slCmd) {
+      const cur = o.statusLine;
+      const curCmd = (cur && typeof cur === "object" && typeof cur.command === "string") ? cur.command : null;
+      if (cur === undefined || cur === null) {
+        o.statusLine = { type: "command", command: slCmd };
+        slChanged = true;
+      } else if (curCmd !== null && /\.claude\/statusline-command\.sh/.test(curCmd) && curCmd !== slCmd) {
+        o.statusLine = { type: "command", command: slCmd };
+        slChanged = true;
+      }
+    }
+
+    if (!pinsChanged && !mktChanged && !slChanged) {
       console.log("settings.json: already current.");
       process.exit(0);
     }
@@ -165,8 +273,9 @@ _qxarm_write_settings() {
       );
     }
     if (mktChanged) { parts.push("extraKnownMarketplaces.quetrex"); }
+    if (slChanged) { parts.push("statusLine (the running engine version has no other home)"); }
     console.log("settings.json: wrote " + parts.join(", "));
-  ' "$1"
+  ' "$1" "${2:-}"
 }
 
 # _qxarm_purge_dead_mcp <file>
@@ -239,7 +348,14 @@ _qxarm_main() {
 
   # No marketplace lookup: there is no version to resolve because nothing is
   # pinned. Arming is now fully offline-capable.
-  _qxarm_write_settings "$repo_root/.claude/settings.json" || return 1
+  #
+  # The status-bar script goes in FIRST so the registration below is only ever
+  # written once there is a real file for it to point at.
+  QXARM_STATUSLINE_READY=0
+  _qxarm_install_statusline "$repo_root"
+  local sl_cmd=""
+  [ "${QXARM_STATUSLINE_READY:-0}" = "1" ] && sl_cmd="$QXARM_STATUSLINE_CMD"
+  _qxarm_write_settings "$repo_root/.claude/settings.json" "$sl_cmd" || return 1
   # <kanban-url> is still required (see the -z check above) so the call
   # signature every installed /quetrex:init uses keeps working, but the MCP
   # step no longer builds a URL from it — it only purges the retired broker.

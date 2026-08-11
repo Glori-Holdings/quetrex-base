@@ -172,17 +172,46 @@ git-ignored, so a normal push leaves all of it behind. The operator's machine th
 `merge-gate.sh`, finds no verdict and no ledger, and denies the merge — which is exactly why
 merging used to require going around the gate by hand. **The evidence has to come home.**
 
-Push it to a dedicated branch, the same way the spec branch delivered the plan here:
+Push it to a dedicated branch, the same way the spec branch delivered the plan here. Run the
+block between the two sentinel comments **verbatim** — it is executed as-is by this repo's
+test suite, so an edit here is an edit to tested behaviour:
 
-    HEAD_SHA="$(git rev-parse HEAD)"        # the exact commit the PR will merge
+    # >>> QUETREX GATE PUBLICATION >>>
+    HEAD_SHA="$(git rev-parse HEAD)" || { echo "transport_failure: no HEAD to publish gates for" >&2; exit 1; }
     GATES_BRANCH="{{BRANCH_PREFIX}}{{TASK}}-gates"
-    node -e 'const fs=require("fs");fs.writeFileSync(".quetrex/gates-head",process.argv[1]+"\n")' "$HEAD_SHA"
-    git checkout -q -B "$GATES_BRANCH"
-    git add -f .quetrex/verify-ledger.jsonl .quetrex/review-verdict.json \
-               .quetrex/qa-report.json .quetrex/security-findings.json \
-               .quetrex/gates-head 2>/dev/null || true
+    mkdir -p .quetrex/plan || { echo "transport_failure: cannot create .quetrex/plan" >&2; exit 1; }
+    # THE PLAN AND THE STATE ARE GATE EVIDENCE, not scratch. merge-gate.sh reads
+    # .quetrex/plan/<TASK>.json for the file-ownership map (GATE 5) and for
+    # security_review_required (GATE 4), and reads .quetrex/state.json to know WHICH
+    # plan governs this merge. Both are git-ignored, so neither reaches the operator
+    # through the PR: without publishing them here, both gates silently no-op on every
+    # cloud build and a developer that edited outside its lane ships unchallenged.
+    [ -f ".quetrex/plan/{{TASK}}.json" ] || cp "/tmp/plan-{{TASK}}.json" ".quetrex/plan/{{TASK}}.json" \
+      || { echo "transport_failure: the approved plan /tmp/plan-{{TASK}}.json is gone; cannot publish it" >&2; exit 1; }
+    node -e 'const fs=require("fs"),p=".quetrex/state.json";let s={};try{s=JSON.parse(fs.readFileSync(p,"utf8"))}catch(e){}if(!s.task)s.task=process.argv[1];fs.writeFileSync(p,JSON.stringify(s,null,2)+"\n")' "{{TASK}}" \
+      || { echo "transport_failure: cannot write .quetrex/state.json" >&2; exit 1; }
+    node -e 'const fs=require("fs");fs.writeFileSync(".quetrex/gates-head",process.argv[1]+"\n")' "$HEAD_SHA" \
+      || { echo "transport_failure: cannot write .quetrex/gates-head" >&2; exit 1; }
+    git checkout -q -b "$GATES_BRANCH" || { echo "transport_failure: cannot create $GATES_BRANCH" >&2; exit 1; }
+    # REQUIRED. Never `2>/dev/null || true` here: a swallowed staging failure publishes a
+    # gates branch that LOOKS complete while the evidence is silently absent, which is
+    # strictly worse than no branch at all — the operator's gate then reads "no plan" and
+    # skips the very checks this branch exists to carry. Missing required evidence is a
+    # transport_failure (rule 5): stop, push nothing, and say which artifact is missing.
+    for f in .quetrex/gates-head .quetrex/review-verdict.json .quetrex/verify-ledger.jsonl \
+             ".quetrex/plan/{{TASK}}.json" .quetrex/state.json; do
+      [ -f "$f" ] || { echo "transport_failure: required gate artifact missing: $f" >&2; exit 1; }
+      git add -f "$f" || { echo "transport_failure: cannot stage gate artifact: $f" >&2; exit 1; }
+    done
+    # OPTIONAL — legitimately absent on some runs (no security review was required; a route
+    # with no separate QA report). Absent is fine; failing to stage one that EXISTS is not.
+    for f in .quetrex/qa-report.json .quetrex/security-findings.json; do
+      [ -f "$f" ] || continue
+      git add -f "$f" || { echo "transport_failure: cannot stage gate artifact: $f" >&2; exit 1; }
+    done
     git -c user.name='quetrex-bot' -c user.email='quetrex-bot@users.noreply.github.com' \
-      commit -q -m "chore(gates): {{TASK}} gate artifacts for $HEAD_SHA"
+      commit -q -m "chore(gates): {{TASK}} gate artifacts for $HEAD_SHA" \
+      || { echo "transport_failure: cannot commit the gate artifacts" >&2; exit 1; }
     # Idempotent AND hook-legal. `git push -f` / `--force` is DENIED outright by
     # deny-guard.sh, which the engine you installed in step 1 ships, so the old
     # `push -f` here dies the moment a task is built twice and the gates branch
@@ -197,19 +226,26 @@ Push it to a dedicated branch, the same way the spec branch delivered the plan h
     if git ls-remote --exit-code --heads origin "$GATES_BRANCH" >/dev/null 2>&1; then
       git push --quiet origin --delete "{{BRANCH_PREFIX}}{{TASK}}-gates" || exit 1
     fi
-    git push --quiet origin "$GATES_BRANCH" || exit 1
+    git push --quiet origin "$GATES_BRANCH" \
+      || { echo "transport_failure: cannot push $GATES_BRANCH" >&2; exit 1; }
+    # <<< QUETREX GATE PUBLICATION <<<
 
 Rules that make this evidence and not decoration:
 
 - Publish the artifacts **exactly as the stages wrote them.** Do not edit, summarise,
   re-time, or re-`sha` anything. If a gate is red, publish it red — `/quetrex:merge` is
   supposed to refuse, and a doctored artifact is the one failure mode that would make the
-  whole gate meaningless.
+  whole gate meaningless. The only two files this step may create are the ones nothing else
+  writes in the sandbox: `gates-head`, and `state.json`'s `.task` when the pipeline never
+  seeded it (an existing `.task` is left exactly as the stages wrote it).
 - `gates-head` must be the **same commit the PR merges.** If you push more commits after
   writing it, re-run this step; a mismatch makes the local gate reject the artifacts as
   stale, which is the correct outcome.
-- Include whichever of the four files exist. A missing `security-findings.json` on a neutral
-  diff is legitimate; a missing `review-verdict.json` is not, and the merge will be denied.
+- Five files are REQUIRED — `gates-head`, `review-verdict.json`, `verify-ledger.jsonl`,
+  `plan/{{TASK}}.json`, `state.json`. If any one of them cannot be staged, the block above
+  stops and pushes nothing: report `transport_failure` (rule 5) naming the artifact. Two are
+  optional and published when present — a missing `security-findings.json` on a neutral diff
+  is legitimate, as is a route that produced no separate `qa-report.json`.
 - Say the gates branch name in your final message so the operator can see it.
 
 **Do NOT depend on cloud board-MCP.** Writing kanban status/comments needs interactive
@@ -232,3 +268,15 @@ API from here.
 - The spec branch (`{{SPEC_BRANCH}}`) carries only `.quetrex/plan/{{TASK}}.json` — the plan
   itself must never carry a credential; it is architecture and acceptance criteria, nothing
   the `security_surface` classifies as secret.
+- The publication block in step 5b is delimited by the sentinel comments
+  `# >>> QUETREX GATE PUBLICATION >>>` / `# <<< QUETREX GATE PUBLICATION <<<`.
+  `test/routine-transport.test.sh` extracts exactly those lines, substitutes the
+  placeholders, and RUNS them against a real repo with a bare remote. Keep the sentinels and
+  keep the block executable shell: a change that breaks either turns the only executable
+  proof of this transport back into prose.
+- The gates branch is the return leg of a two-owner contract. It carries seven paths:
+  `verify-ledger.jsonl`, `review-verdict.json`, `qa-report.json`, `security-findings.json`,
+  `gates-head`, **`plan/{{TASK}}.json`** and **`state.json`**. `/quetrex:merge` fetches all
+  of them into the operator's `.quetrex/` (and removes them again in cleanup); `merge-gate.sh`
+  then has the plan it needs for GATE 5's ownership check and for the plan-forced security
+  review. Dropping either of the last two from this push silently disarms both gates.
