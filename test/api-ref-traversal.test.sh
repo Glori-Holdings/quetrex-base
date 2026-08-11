@@ -69,14 +69,57 @@ for ref in "QDM-4" "QDM-2.1" "3d3f18e7-be33-4fc0-a92a-294d55e3ba39"; do
   fi
 done
 
-# --- THE SAME GUARD MUST EXIST IN THE CLI, NOT ONLY THE LIB -------------------
-# The two files carry parallel copies; a fix in one is not a fix. api-lib-parity.test.sh pins
-# them byte-for-byte, but assert the guard's presence here too so this file fails on its own
-# terms if someone syncs the wrong direction.
-if grep -q 'refusing a task reference' "$BIN"; then
-  ok "the CLI carries the same guard, not just the sourceable lib"
+# --- THE CLI MUST BEHAVE, NOT MERELY MENTION ---------------------------------
+# The previous version of this block grepped $BIN for the phrase "refusing a task reference".
+# A reviewer deleted the guard entirely, left the phrase in a dead comment, and this file still
+# reported `ok` while the binary happily constructed /api/tasks/../admin/secrets. That is the
+# sixth says-not-does assertion found in this repo — and the second one written INSIDE a test
+# meant to prevent the class. So drive the real binary and watch what it does.
+CLI_PROBE="$TMP/cli"; mkdir -p "$CLI_PROBE"
+# Stub the network at the lowest layer the CLI uses, so the guard is what is under test rather
+# than curl's own refusal to accept a malformed URL.
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -uo pipefail'
+  printf 'source %q\n' "$BIN"
+  printf '%s\n' 'qapi() { printf "%s\n" "$2" >> "$QX_PROBE_LOG"; printf "{\"id\":\"x\"}"; }'
+  printf '%s\n' '_qx_task_json "$1" >/dev/null 2>&1; echo "$?"'
+} > "$CLI_PROBE/run.sh"
+chmod +x "$CLI_PROBE/run.sh"
+
+if grep -q '^_qx_main' "$BIN" 2>/dev/null || true; then :; fi
+
+export QX_PROBE_LOG="$TMP/cli-paths.txt"
+: > "$QX_PROBE_LOG"
+CLI_RC="$(bash "$CLI_PROBE/run.sh" '../admin/secrets' 2>/dev/null | tail -1)"
+CLI_SENT="$(grep -c . "$QX_PROBE_LOG" 2>/dev/null)"; CLI_SENT="${CLI_SENT:-0}"
+if [ "$CLI_RC" != "0" ] && [ "$CLI_SENT" = "0" ]; then
+  ok "the CLI itself refuses a traversal and builds no request (executed, not grepped)"
 else
-  notok "bin/quetrex-api has no reference guard — every command-line caller is still traversable"
+  notok "the CLI constructed $CLI_SENT request(s) for '../admin/secrets' (rc=$CLI_RC) — every command-line caller is traversable"
+fi
+
+: > "$QX_PROBE_LOG"
+CLI_RC2="$(bash "$CLI_PROBE/run.sh" 'QDM-2.1' 2>/dev/null | tail -1)"
+CLI_PATH="$(head -1 "$QX_PROBE_LOG" 2>/dev/null || true)"
+if [ "$CLI_RC2" = "0" ] && [ "$CLI_PATH" = "/api/tasks/QDM-2.1" ]; then
+  ok "the CLI still routes a legitimate child id correctly"
+else
+  notok "the CLI broke a legitimate ref: rc=$CLI_RC2 path='$CLI_PATH'"
+fi
+
+# --- EMBEDDED NEWLINE: an anchored regex matches PER LINE ----------------------
+# `grep -E '^...$'` is satisfied by ANY line, so "SMA-1\n../admin/secrets" passed the first
+# version of this guard. It was contained only by curl refusing control characters — i.e. by
+# another program's parser, not by us.
+: > "$TMP/paths.txt"
+NL_REF="$(printf 'SMA-1\n../admin/secrets')"
+nl_rc="$(probe "$LIB" "$NL_REF")"
+nl_sent="$(grep -c . "$TMP/paths.txt" 2>/dev/null)"; nl_sent="${nl_sent:-0}"
+if [ "$nl_rc" != "0" ] && [ "$nl_sent" = "0" ]; then
+  ok "a ref with an embedded newline is refused, and builds no request"
+else
+  notok "NEWLINE BYPASS: an embedded newline produced rc=$nl_rc with $nl_sent request(s) — the anchor matches per line"
 fi
 
 echo

@@ -371,6 +371,7 @@ qapi() {
 qx_task_status() {
   local body
   body="$(node -e 'process.stdout.write(JSON.stringify({status:process.argv[1]}))' "$2")" || return 1
+  _qx_require_ref "$1" || return 1
   qapi PATCH "/api/tasks/$1" "$body" >/dev/null
 }
 
@@ -378,6 +379,7 @@ qx_task_status() {
 qx_task_ainote() {
   local body
   body="$(node -e 'process.stdout.write(JSON.stringify({aiNotes:process.argv[1]}))' "$2")" || return 1
+  _qx_require_ref "$1" || return 1
   qapi PATCH "/api/tasks/$1" "$body" >/dev/null
 }
 
@@ -385,6 +387,7 @@ qx_task_ainote() {
 qx_task_comment() {
   local body
   body="$(node -e 'process.stdout.write(JSON.stringify({body:process.argv[1]}))' "$2")" || return 1
+  _qx_require_ref "$1" || return 1
   qapi POST "/api/tasks/$1/comments" "$body" >/dev/null
 }
 
@@ -392,6 +395,7 @@ qx_task_comment() {
 qx_task_type() {
   local body
   body="$(node -e 'process.stdout.write(JSON.stringify({type:process.argv[1]}))' "$2")" || return 1
+  _qx_require_ref "$1" || return 1
   qapi PATCH "/api/tasks/$1" "$body" >/dev/null
 }
 
@@ -419,6 +423,32 @@ qx_task_type() {
 # _qx_trim STRING -> print STRING with leading/trailing whitespace removed.
 #   Whitespace-only arguments are the disguise an empty argument wears when it
 #   comes out of a payload field or a mis-quoted shell variable.
+# _qx_require_ref REF  -> 0 if REF is a task reference and nothing else.
+#   SEC-EPIC-2b. Every helper below interpolates its argument into the request PATH, and curl
+#   performs RFC 3986 dot-segment removal BEFORE sending — so `../admin/secrets` leaves as
+#   `GET /api/admin/secrets`, carrying the bearer token to a caller-chosen endpoint. qapi is
+#   built so the token never reaches argv or a log; that is worth nothing if the PATH is
+#   attacker-chosen. This predates the epic work (it was already reachable through
+#   qx_is_unblocked on main) and is closed here for every call site at once.
+#   A ref is a human identifier (SMA-1, or a child's SMA-1.2) or a UUID. Nothing else.
+#   The check is on the WHOLE value: grep -E '^...$' anchors PER LINE, so an embedded newline
+#   ("SMA-1\n../admin/secrets") satisfied a naive anchored match. Control characters are
+#   rejected outright rather than relying on curl's parser to refuse them downstream.
+_qx_require_ref() {
+  local ref="${1-}"
+  case "$ref" in
+    *[![:print:]]*) echo "quetrex-api: task reference contains a control character — refusing" >&2; return 1 ;;
+  esac
+  case "$ref" in
+    *$'\n'*|*$'\r'*|*/*|*..*) echo "quetrex-api: refusing a task reference that is not an identifier or a UUID: '$ref'" >&2; return 1 ;;
+  esac
+  if printf '%s' "$ref" | grep -qxE '[A-Za-z][A-Za-z0-9]*-[0-9]+(\.[0-9]+)?|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'; then
+    return 0
+  fi
+  echo "quetrex-api: refusing a task reference that is not an identifier or a UUID: '$ref'" >&2
+  return 1
+}
+
 _qx_trim() {
   local s="${1-}"
   s="${s#"${s%%[![:space:]]*}"}"
@@ -436,22 +466,7 @@ _qx_task_json() {
   if [ -z "$ref" ]; then
     return 1
   fi
-  # PATH TRAVERSAL. `ref` is interpolated straight into the request path, and curl
-  # performs RFC 3986 dot-segment removal BEFORE sending — so `../admin/secrets`
-  # leaves the machine as `GET /api/admin/secrets`, carrying the operator's bearer
-  # token to an endpoint the caller chose. Reproduced against a real listener.
-  # A ref is a task reference and nothing else: a human identifier (SMA-1, or a
-  # child's SMA-1.2) or a UUID. Anchor it here, at the one place every task fetch
-  # funnels through, rather than trusting each caller to have validated already.
-  case "$ref" in
-    [A-Za-z]*-[0-9]*) : ;;                                  # human id, shape-checked below
-    [0-9a-fA-F]*-[0-9a-fA-F]*-[0-9a-fA-F]*-*) : ;;          # uuid, shape-checked below
-    *) echo "quetrex-api: refusing a task reference that is not an identifier or a UUID: '$ref'" >&2; return 1 ;;
-  esac
-  if ! printf '%s' "$ref" | grep -qE '^([A-Za-z][A-Za-z0-9]*-[0-9]+(\.[0-9]+)?|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$'; then
-    echo "quetrex-api: refusing a task reference that is not an identifier or a UUID: '$ref'" >&2
-    return 1
-  fi
+  _qx_require_ref "$ref" || return 1
   json="$(qapi GET "/api/tasks/$ref")" || return 1
   printf '%s' "$json"
 }
@@ -670,6 +685,7 @@ qx_is_unblocked() {
     echo "quetrex-api is-unblocked: missing task id — readiness UNDETERMINED." >&2
     return 2
   fi
+  _qx_require_ref "$ref" || return 1
   task="$(qapi GET "/api/tasks/$ref")" || {
     echo "quetrex-api is-unblocked: could not read '$ref' — readiness UNDETERMINED (do not dispatch)." >&2
     return 2
