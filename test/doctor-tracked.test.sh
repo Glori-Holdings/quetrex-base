@@ -91,7 +91,7 @@ cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
 # -----------------------------------------------------------------------------
-# Extract the "## Check 8" bash fence out of doctor.md — the same technique
+# Extract the "## Check 9" bash fence out of doctor.md — the same technique
 # test/doctor-checks.test.sh and test/env-derive.test.sh use, so this is proven
 # against the REAL shipped prose, never a copy that can drift from it.
 # -----------------------------------------------------------------------------
@@ -106,7 +106,7 @@ extract_section() {  # extract_section <heading-regex-literal>
   ' "$DOCTOR_MD"
 }
 
-CHECK8_SCRIPT="$(extract_section '## Check 8')"
+CHECK8_SCRIPT="$(extract_section '## Check 9')"
 
 NODE_DIR="$(dirname "$(command -v node)")"
 GIT_DIR_BIN="$(dirname "$(command -v git)")"

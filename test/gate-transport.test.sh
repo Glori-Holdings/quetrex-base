@@ -175,11 +175,42 @@ write_verdict "$R1" "$B1"
 ledger_reset "$R1"
 ledger_add "$R1" "npm run check" "$B1" 0
 
+# DELIBERATE BEHAVIOR CHANGE, recorded rather than quietly re-anchored.
+# This assertion used to require that REPLACING the chain (drop "npm test", add
+# "npm run check") merges. It no longer does, and that is the point: SEC-1 proved a
+# branch could de-gate ITSELF by shrinking its own verify[] — the removed command
+# stopped being required while every survivor was green, so a measurably red suite
+# reached the base branch with the gate satisfied. The effective chain is now the
+# UNION of base and head, so a dropped command must still be proven green for this
+# commit.
+#
+# A rename is a drop plus an add, so it is denied until the old command is proven at
+# this commit — the expand -> migrate -> contract shape this repo already requires of
+# database migrations. The half of the original fix that mattered is preserved and
+# asserted at 1a-add below: a chain change is no longer read from the operator's
+# WORKING TREE, so a task that legitimately edits verify.json is not unmergeable.
 OUT="$(run_gate "$R1" "$B1" "$A1")"
 if is_deny "$OUT"; then
-  fail "1a: PR that replaces the verify chain is mergeable (chain read from the merged commit) [got: $(printf '%s' "$OUT" | head -c 260)]"
+  pass "1a: dropping a command from the chain is DENIED while it is unproven — a branch cannot de-gate itself (SEC-1)"
 else
-  pass "1a: PR that replaces the verify chain is mergeable — GATE 3 reads the chain at the commit being merged, not the working tree"
+  fail "1a: a branch dropped 'npm test' from its own chain and merged anyway — SEC-1 de-gating is open [got: $(printf '%s' "$OUT" | head -c 260)]"
+fi
+
+# 1a-add — the half of the original fix that must survive: a task that legitimately
+# EDITS its verify chain is not permanently unmergeable. Adding a command tightens
+# the gate immediately; it does not lock the PR out. Without this, the SEC-1 union
+# could have been "over-corrected" into refusing every verify.json change, which was
+# the original defect (GATE 3 read the chain from the operator's working tree).
+read -r RADD AADD BADD <<<"$(mk_repo radd '{"verify":["npm test"]}' '{"verify":["npm test","npm run check"]}')"
+write_verdict "$RADD" "$BADD"
+ledger_reset "$RADD"
+ledger_add "$RADD" "npm test" "$BADD" 0
+ledger_add "$RADD" "npm run check" "$BADD" 0
+OUT="$(run_gate "$RADD" "$BADD" "$AADD")"
+if is_deny "$OUT"; then
+  fail "1a-add: ADDING a command to the chain blocked the merge — the lower bound over-corrected into refusing every verify.json edit [got: $(printf '%s' "$OUT" | head -c 200)]"
+else
+  pass "1a-add: adding a command to the chain still merges when both are proven — editing verify.json is not a lockout"
 fi
 
 # The complement, and the proof this is not simply 'trust whatever the ledger
