@@ -436,6 +436,22 @@ _qx_task_json() {
   if [ -z "$ref" ]; then
     return 1
   fi
+  # PATH TRAVERSAL. `ref` is interpolated straight into the request path, and curl
+  # performs RFC 3986 dot-segment removal BEFORE sending — so `../admin/secrets`
+  # leaves the machine as `GET /api/admin/secrets`, carrying the operator's bearer
+  # token to an endpoint the caller chose. Reproduced against a real listener.
+  # A ref is a task reference and nothing else: a human identifier (SMA-1, or a
+  # child's SMA-1.2) or a UUID. Anchor it here, at the one place every task fetch
+  # funnels through, rather than trusting each caller to have validated already.
+  case "$ref" in
+    [A-Za-z]*-[0-9]*) : ;;                                  # human id, shape-checked below
+    [0-9a-fA-F]*-[0-9a-fA-F]*-[0-9a-fA-F]*-*) : ;;          # uuid, shape-checked below
+    *) echo "quetrex-api: refusing a task reference that is not an identifier or a UUID: '$ref'" >&2; return 1 ;;
+  esac
+  if ! printf '%s' "$ref" | grep -qE '^([A-Za-z][A-Za-z0-9]*-[0-9]+(\.[0-9]+)?|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$'; then
+    echo "quetrex-api: refusing a task reference that is not an identifier or a UUID: '$ref'" >&2
+    return 1
+  fi
   json="$(qapi GET "/api/tasks/$ref")" || return 1
   printf '%s' "$json"
 }
