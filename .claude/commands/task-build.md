@@ -896,6 +896,26 @@ and worktree teardown) never ran.
   `quetrex-api task-status <EPIC-ID> merged`. (Every child branch was deleted on its auto-merge, so
   the integration branch is the only one carrying the epic id.)
 
+  **Then publish the epic's own gate evidence — without it the PR can never merge.**
+  `merge-gate.sh` requires `review-verdict.json`'s `.sha` to equal the PR head, and every
+  child's verdict is pinned to its own commit, so the children's artifacts are **not** a
+  substitute and must never be re-pinned or aggregated to look like one. The integration
+  head is a commit no child gate ever saw: it is the merge of all of them, and nothing has
+  verified *that* tree.
+
+  So dispatch one more cloud routine, against the integration branch, exactly as Step 6A
+  dispatches a unit — same `RemoteTrigger` shape, same `create` → `run` →
+  `update{enabled:false}` order — with `{{TASK}}` = `<EPIC-ID>` and the base branch
+  `${BRANCH_PREFIX}<EPIC-ID>`. It runs QA → reviewer → security-reviewer against the
+  integration head (there is no developer stage; the code is already written and merged),
+  and publishes `${BRANCH_PREFIX}<EPIC-ID>-gates` with the same seven artifacts and the same
+  `gates-head` pin a unit publishes. `/quetrex:merge <EPIC-ID>` then works on the epic with
+  no special case.
+
+  If that routine reports `REWORK` or `ESCALATE_HUMAN`, the epic is **not** mergeable even
+  though every child passed — the integration tree is where cross-child breakage shows up,
+  which is the entire reason this stage exists rather than trusting the children's verdicts.
+
 - **Any child `needs_clarity`, or blocked-waiting on one** → do **NOT** open the
   integration PR. Report exactly which children **failed** and which are
   **blocked-waiting** on a failed dependency. The user runs **`/quetrex:task-rework <child>`** on
