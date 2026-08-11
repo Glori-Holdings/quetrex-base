@@ -256,18 +256,106 @@ qx_task_type() {
 #   Requires QX_PROJECT_CODE (resolve_project). EPIC_ID is the parent's human id.
 # shellcheck disable=SC2329,SC2016
 qx_create_child() {
-  local body resp
+  local parent_ref title desc parent_json parent_meta parent_uuid parent_code parent_child body resp ident
+
+  parent_ref="$(_qx_trim "${1-}")"
+  title="$(_qx_trim "${2-}")"
+  desc="${3-}"
+
+  if [ -z "$parent_ref" ]; then
+    echo "quetrex-api create-child: missing epic id (argument 1). Refusing to create anything — an empty parent makes the server create a TOP-LEVEL task, and a task cannot be deleted." >&2
+    return 1
+  fi
+  if [ -z "$title" ]; then
+    echo "quetrex-api create-child: missing child title (argument 2). Refusing to create anything." >&2
+    return 1
+  fi
+  if [ -z "${QX_PROJECT_CODE:-}" ]; then
+    echo "Run /quetrex:init" >&2
+    return 1
+  fi
+
+  # Prove the parent exists and get the id the API actually links by.
+  parent_json="$(_qx_task_json "$parent_ref")" || {
+    echo "quetrex-api create-child: parent task '$parent_ref' could not be read. Refusing to create a child that would land as a top-level task." >&2
+    return 1
+  }
+
+  # uuid US projectCode US childNumber ("" when top-level) US identifier, where
+  # US is \037. NOT tab: tab is IFS *whitespace*, so bash collapses a run of
+  # them into one delimiter and drops empty fields — a top-level parent (empty
+  # childNumber) would shift `identifier` into `parent_child` and trip the
+  # grandchild guard on every single valid parent. \037 is non-whitespace, so
+  # every field position is preserved exactly, empty or not.
+  parent_meta="$(node -e '
+    let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(1); }
+    const id = typeof o.id === "string" ? o.id : "";
+    if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id)) {
+      process.exit(2);
+    }
+    process.stdout.write([
+      id,
+      o.projectCode == null ? "" : String(o.projectCode),
+      o.childNumber == null ? "" : String(o.childNumber),
+      o.identifier == null ? "" : String(o.identifier),
+    ].join("\u001f"));
+  ' "$parent_json")" || {
+    echo "quetrex-api create-child: parent task '$parent_ref' came back without a usable UUID id. Refusing to create a child." >&2
+    return 1
+  }
+
+  IFS=$'\037' read -r parent_uuid parent_code parent_child ident <<<"$parent_meta"
+
+  # One level only — an epic decomposes once; children have no children.
+  if [ -n "$parent_child" ]; then
+    echo "quetrex-api create-child: '${ident:-$parent_ref}' is itself a child (childNumber=$parent_child). Epics decompose ONE level — no grandchildren. Refusing to create anything." >&2
+    return 1
+  fi
+
+  # A cross-project parent is a 404 at the server; say what actually happened.
+  if [ -n "$parent_code" ] && [ "$parent_code" != "$QX_PROJECT_CODE" ]; then
+    echo "quetrex-api create-child: parent '${ident:-$parent_ref}' belongs to project $parent_code, but this repo is bound to $QX_PROJECT_CODE. Refusing to create anything." >&2
+    return 1
+  fi
+
+  # parentTaskId is the parent's UUID — never its human identifier.
   body="$(node -e '
     const [parentTaskId, projectCode, title, description] = process.argv.slice(1);
-    process.stdout.write(JSON.stringify({ parentTaskId, projectCode, title, description }));
-  ' "$1" "$QX_PROJECT_CODE" "$2" "$3")" || return 1
+    const b = { parentTaskId, projectCode, title };
+    if (description) { b.description = description; }
+    process.stdout.write(JSON.stringify(b));
+  ' "$parent_uuid" "$QX_PROJECT_CODE" "$title" "$desc")" || return 1
+
   resp="$(qapi POST /api/tasks "$body")" || return 1
+
+  # Trust nothing: a 201 proves a task was created, not that it was created as
+  # a CHILD. Print the identifier only if the link is really there.
   node -e '
     let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(1); }
-    if (o.identifier) { process.stdout.write(String(o.identifier)); process.exit(0); }
-    if (o.code && o.number != null) { process.stdout.write(`${o.code}-${o.number}`); process.exit(0); }
-    process.exit(1);
-  ' "$resp"
+    const parentUuid = process.argv[2];
+    const parentRef = process.argv[3];
+    const code = o.projectCode || o.code || "";
+    const ident = o.identifier
+      || (code && o.number != null
+        ? `${code}-${o.number}${o.childNumber != null ? "." + o.childNumber : ""}`
+        : "");
+    const linked = typeof o.parentTaskId === "string"
+      && o.parentTaskId.toLowerCase() === parentUuid.toLowerCase();
+    if (!linked || o.childNumber == null) {
+      process.stderr.write(
+        `quetrex-api create-child: the server created ${ident || "a task"} as a TOP-LEVEL task ` +
+        `(parentTaskId=${JSON.stringify(o.parentTaskId ?? null)}, childNumber=${JSON.stringify(o.childNumber ?? null)}) ` +
+        `instead of a child of ${parentRef}. A task cannot be deleted — reconcile the board before retrying.\n`);
+      process.exit(3);
+    }
+    if (!/^[A-Za-z][A-Za-z0-9]*-\d+\.\d+$/.test(ident)) {
+      process.stderr.write(
+        `quetrex-api create-child: the created child has no CODE-N.C identifier (got ${JSON.stringify(ident)}). ` +
+        `The dispatcher and /quetrex:merge key off that shape.\n`);
+      process.exit(4);
+    }
+    process.stdout.write(ident + "\n");
+  ' "$resp" "$parent_uuid" "${ident:-$parent_ref}"
 }
 
 # qx_add_dep TASK_ID DEPENDS_ON_ID  -> POST /api/tasks/$ID/dependencies {dependsOnTaskId}
@@ -275,9 +363,31 @@ qx_create_child() {
 #   graph before any write (see /quetrex:task-build).
 # shellcheck disable=SC2329
 qx_add_dep() {
-  local body
-  body="$(node -e 'process.stdout.write(JSON.stringify({dependsOnTaskId:process.argv[1]}))' "$2")" || return 1
-  qapi POST "/api/tasks/$1/dependencies" "$body" >/dev/null
+  local task_ref dep_ref task_uuid dep_uuid body
+
+  task_ref="$(_qx_trim "${1-}")"
+  dep_ref="$(_qx_trim "${2-}")"
+
+  if [ -z "$task_ref" ]; then
+    echo "quetrex-api add-dep: missing task id (argument 1). Refusing to call the API." >&2
+    return 1
+  fi
+  if [ -z "$dep_ref" ]; then
+    echo "quetrex-api add-dep: missing dependency id (argument 2). Refusing to call the API." >&2
+    return 1
+  fi
+
+  task_uuid="$(_qx_task_uuid "$task_ref")" || return 1
+  dep_uuid="$(_qx_task_uuid "$dep_ref")" || return 1
+
+  if [ "$task_uuid" = "$dep_uuid" ]; then
+    echo "quetrex-api add-dep: '$task_ref' cannot depend on itself." >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2016
+  body="$(node -e 'process.stdout.write(JSON.stringify({dependsOnTaskId:process.argv[1]}))' "$dep_uuid")" || return 1
+  qapi POST "/api/tasks/$task_uuid/dependencies" "$body" >/dev/null
 }
 
 # qx_is_unblocked TASK_ID  -> exit 0 if ready to start, 1 if still blocked.
@@ -287,10 +397,19 @@ qx_add_dep() {
 #   after each child auto-merge to refill the ready set.
 # shellcheck disable=SC2329
 qx_is_unblocked() {
-  local task
-  task="$(qapi GET "/api/tasks/$1")" || return 1
+  local ref task rc
+  ref="$(_qx_trim "${1-}")"
+  if [ -z "$ref" ]; then
+    echo "quetrex-api is-unblocked: missing task id — readiness UNDETERMINED." >&2
+    return 2
+  fi
+  task="$(qapi GET "/api/tasks/$ref")" || {
+    echo "quetrex-api is-unblocked: could not read '$ref' — readiness UNDETERMINED (do not dispatch)." >&2
+    return 2
+  }
   node -e '
-    let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(1); }
+    let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(2); }
+    if (o == null || typeof o !== "object") { process.exit(2); }
     const DONE = new Set(["merged", "deployed", "complete"]);
     if (typeof o.isBlocked === "boolean") { process.exit(o.isBlocked ? 1 : 0); }
     const deps = Array.isArray(o.dependencies) ? o.dependencies : [];
@@ -300,6 +419,11 @@ qx_is_unblocked() {
     }
     process.exit(0);
   ' "$task"
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "quetrex-api is-unblocked: '$ref' came back in an unreadable shape — readiness UNDETERMINED (do not dispatch)." >&2
+  fi
+  return "$rc"
 }
 
 # ---------------------------------------------------------------------------
