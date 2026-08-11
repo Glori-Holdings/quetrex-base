@@ -470,22 +470,43 @@ beyond that). Example question: *"`<NAME>` is a committed candidate, read at `<r
 which of these commands, if any, should `verify-gate` skip when `<NAME>` is unset in this
 checkout? (Nothing here was derived — you are the only source of this pairing.)"*
 
-**Non-interactive guard — propose nothing, write nothing.** When there is nobody to
-ask — the literal env var `QUETREX_INIT_NONINTERACTIVE` is set, or a no-TTY test
-(`[ ! -t 0 ] || [ ! -t 1 ]`) is true — skip 5c's question entirely: propose nothing,
-write nothing. This is a structural backstop, not only a prose one: even if the guard
-were somehow skipped, `declare` called with zero `--cmd`/`--env`/`--decline` pairs
-writes nothing at all (see `bin/quetrex-env-derive`'s own "ONLY WRITER" contract) — so a
-model that skips the confirmation step can never manufacture a declaration either way.
+**`AskUserQuestion` IS the human confirmation. Never test for a terminal here.** The
+requirement that a human authorises every pairing is absolute and unchanged — but the
+authorising surface is the `AskUserQuestion` tool call above, which is a tool call, not a
+terminal. `/quetrex:init` only ever executes through Claude Code's Bash tool, where
+neither stdin nor stdout is ever a terminal, so a terminal test in this step is not a
+conservative fallback: it is an unconditional off switch. One shipped, and the
+consequence was measured — `quetrex-env-derive declare`, the ONLY writer of
+`requiredEnv`, became structurally unreachable, so no repo `/quetrex:init` ever armed
+carried a `requiredEnv` map, `verify-gate`'s declarative env skip never fired anywhere,
+and the first cloud build of any repo whose chain needs a credential died on an unset
+variable no sandbox could hold. The one existing map in the wild had to be typed by hand.
+
+**The only suppressor — propose nothing, write nothing.** When the literal env var
+`QUETREX_INIT_NONINTERACTIVE` is set, skip 5c's question entirely: propose nothing, write
+nothing. Nothing else suppresses it. If `AskUserQuestion` genuinely cannot be used in this
+session, leave `CONFIRM_CMD_ENV`/`CONFIRM_DECLINE` empty — the block below then writes
+nothing — and report `requiredEnv` as **outstanding** in step 7 rather than silently
+skipped. The guarantee is structural, not merely prose: `declare` called with zero
+`--cmd`/`--env`/`--decline` pairs writes nothing at all (see `bin/quetrex-env-derive`'s
+own "ONLY WRITER" contract) — so a model that skips the confirmation step can never
+manufacture a declaration either way.
 
 ```bash
 # CONFIRM_CMD_ENV = ("cmd" "NAME") tuples the human answered "Yes" to in 5c.
 # CONFIRM_DECLINE  = NAMEs the human answered "No" to in 5c.
-# Both stay empty when 5c never ran (nothing to confirm, or the non-interactive guard
-# below fired) — an empty DECLARE_ARGS means the declare call below never fires.
+# Both stay empty when 5c never ran (nothing to confirm, AskUserQuestion was unusable,
+# or the explicit opt-out below fired) — an empty DECLARE_ARGS means the declare call
+# below never fires.
+#
+# NEVER add a terminal test to this condition. Terminal tests are false in every
+# Claude Code Bash tool invocation, which is the ONLY way this command runs, so one
+# here disables the sanctioned requiredEnv writer outright rather than guarding it.
+# The human confirmation happens in AskUserQuestion above; this block only carries
+# the answers a human already gave.
 DECLARE_ARGS=()
-if [ -n "${QUETREX_INIT_NONINTERACTIVE:-}" ] || [ ! -t 0 ] || [ ! -t 1 ]; then
-  echo "non-interactive session detected — propose nothing, write nothing for requiredEnv"
+if [ -n "${QUETREX_INIT_NONINTERACTIVE:-}" ]; then
+  echo "QUETREX_INIT_NONINTERACTIVE set — non-interactive by explicit opt-out; propose nothing, write nothing for requiredEnv"
 else
   for pair in "${CONFIRM_CMD_ENV[@]:-}"; do
     [ -n "$pair" ] || continue
@@ -766,6 +787,23 @@ fi
 - `.claude/settings.json` `extraKnownMarketplaces.quetrex.source`:
   `{"source":"github","repo":"Glori-Holdings/quetrex-plugins"}` — without this the
   `quetrex-factory` pin above cannot resolve.
+- `.claude/statusline-command.sh` + `.claude/settings.json` `statusLine`:
+  `{"type":"command","command":"bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/statusline-command.sh\""}`.
+  **A Claude Code plugin cannot register a `statusLine`**, so the repo has to carry it or
+  the running engine version is displayed nowhere: nothing is version-pinned, so config
+  names no version, and both `/quetrex:update` and `/quetrex:doctor` tell the operator the
+  version "lives in the status bar." Before this, that bar was empty in every armed repo,
+  and a teammate silently stranded on an old engine had no on-screen signal at all. The
+  renderer reads the version at runtime via `quetrex-version`, so the committed copy never
+  goes stale. The `${CLAUDE_PROJECT_DIR:-.}` default is load-bearing — the bare form
+  resolves to `/.claude/statusline-command.sh` when the variable is unset and bash exits
+  127, which the operator reads as a failed build. Union-only as ever: a `statusLine` the
+  operator set is left byte-for-byte alone, and an existing
+  `.claude/statusline-command.sh` in the repo is never overwritten. The single exception
+  is a repair, not a clobber — a registration that already points at *our* script but
+  omits the default is rewritten to the guarded form, so **re-running `/quetrex:init` is
+  the remediation path**. If the shipped script cannot be located, arming registers
+  **nothing** rather than a status bar pointing at a file that does not exist.
 It also **removes** one thing, and this is a repair, not an omission:
 
 - `.mcp.json` `mcpServers.quetrex-kanban` — deleted when its url is `<kanbanUrl>/api/mcp`.
@@ -784,7 +822,7 @@ Every write merges — it never clobbers any other `enabledPlugins` entry, any o
 `extraKnownMarketplaces` entry, any other `mcpServers` entry, or any other settings key.
 Record whatever `quetrex-arm` printed (each concern reports "wrote ...", "already current",
 or what it removed/left alone in `.mcp.json`) so step 6 stages `.claude/settings.json` +
-`.mcp.json` and step 7 reports it verbatim.
+`.claude/statusline-command.sh` + `.mcp.json` and step 7 reports it verbatim.
 
 ---
 
@@ -955,6 +993,11 @@ git -C "$REPO_ROOT" add .quetrex/project.json 2>/dev/null || true
 [ -f "$REPO_ROOT/CLAUDE.md" ]        && git -C "$REPO_ROOT" add CLAUDE.md 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/CLAUDE.md" ] && git -C "$REPO_ROOT" add .claude/CLAUDE.md 2>/dev/null || true
 [ -f "$REPO_ROOT/.claude/settings.json" ] && git -C "$REPO_ROOT" add .claude/settings.json 2>/dev/null || true
+# The status bar is the ONLY place the running engine version is ever named (nothing
+# is version-pinned), and a plugin cannot register a statusLine — so the renderer step
+# 4h installed must be COMMITTED alongside the registration in settings.json, or every
+# teammate and every cloud checkout gets a registration pointing at a missing file.
+[ -f "$REPO_ROOT/.claude/statusline-command.sh" ] && git -C "$REPO_ROOT" add .claude/statusline-command.sh 2>/dev/null || true
 # F3 (CONFIRMED): unlike the lines above, this one is NOT swallowed on
 # failure. .quetrex/* is commonly gitignored wholesale in a target repo, and
 # a future install-time hardening (SEC-2's own remediation) is expected to
@@ -1052,13 +1095,16 @@ Summarize for the user:
 - Never print the bearer token. Build all JSON with `node` / `JSON.stringify`.
 - Idempotent: re-running on a linked repo never re-creates the binding and never
   prompts for a name — it re-verifies access and can re-clean / re-PR.
-- Non-destructive: the only files this command creates are `.quetrex/project.json` and
-  `.worktreeinclude` (step 4f). The single deletion it performs anywhere is step 4h's purge of
+- Non-destructive: the only files this command creates are `.quetrex/project.json`,
+  `.worktreeinclude` (step 4f) and `.claude/statusline-command.sh` (step 4h, and only when
+  the repo has none — an existing one is never overwritten). The single deletion it performs anywhere is step 4h's purge of
   the `quetrex-kanban` broker whose url is the never-built `/api/mcp` endpoint — scoped to that
   one key, and to the file only when that key was all it held; `CLAUDE.md` edits only excise stale tracker
   blocks, never wholesale rewrites; `.claude/settings.json` is merged, never clobbered —
   step 4e only ever **adds** to `permissions.allow` and step 4h (`quetrex-arm`) only ever
-  adds/updates the `enabledPlugins` pin and `extraKnownMarketplaces.quetrex`, never removing
+  adds/updates the `enabledPlugins` pin, `extraKnownMarketplaces.quetrex` and the
+  `statusLine` registration (added only when absent, or repaired when it is our own
+  unguarded string — an operator's own `statusLine` is never touched), never removing
   or narrowing an entry, and never touching `permissions.deny`/`ask`. The only removals are
   user-confirmed stale old-Quetrex
   project commands/skills (step 4c) — never auto-deleted, never anything in the global
