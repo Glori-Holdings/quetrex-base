@@ -41,9 +41,17 @@ for f in "$CMDS"/*.md; do
   while IFS= read -r cmd; do
     [ -n "$cmd" ] || continue
     # "Run /x?" as a question, "do not run /x without a yes", or an option labelled "Yes — run /x"
+    # Generalised deliberately. A reviewer defeated the previous three fixed sentence
+    # shapes by re-adding the same incident as "Install it now?" / "Yes — install the
+    # Claude GitHub App", and again as a fenced block running `claude /install-github-app`.
+    # Match the SHAPE — an offer to perform, or a claim of having performed — not a phrasing.
+    SUBJ="$cmd"
+    [ "$cmd" = "install-github-app" ] && SUBJ="($cmd|GitHub App)"
     if grep -qiE "(do not run|don'?t run) \`?/?$cmd" "$f" \
-    || grep -qiE "run \`?/$cmd\`?\?" "$f" \
-    || grep -qiE "yes[^\n]{0,4}(—|-|:) *run \`?/$cmd" "$f"; then
+    || grep -qiE "(run|install|set ?up) \`?/?$SUBJ\`?[^\n]{0,20}\?" "$f" \
+    || grep -qiE "yes[^\n]{0,6}(—|-|:)[^\n]{0,10}(run|install) [^\n]{0,40}$SUBJ" "$f" \
+    || grep -qiE "offered and (accepted|declined)" "$f" \
+    || grep -qiE "^[^#]*\bclaude +/$cmd" "$f"; then
       notok "ASSERTION 1: $n presents /$cmd as an action it runs on approval — it cannot, so a yes produces nothing while reading as done"
     fi
   done <<< "$OPERATOR_ONLY"
@@ -87,8 +95,9 @@ fi
 
 # --- ASSERTION 4: assertion-count floor ---------------------------------------
 # An assertion that silently stops matching disappears instead of failing. That has happened
-# here before, so pin the number.
-EXPECTED=5
+# here before, so pin the number. Set to the ACTUAL count: pinned one low, an assertion could
+# vanish and the floor would still report ok — which is the failure it exists to catch.
+EXPECTED=6
 TOTAL=$((PASS + FAIL + 1))
 if [ "$TOTAL" -ge "$EXPECTED" ]; then
   ok "ASSERTION 4: $TOTAL assertions ran, floor is $EXPECTED"

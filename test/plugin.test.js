@@ -269,9 +269,17 @@ check('init does NOT ask about the Claude GitHub App, and records why', () => {
     !/run `?\/install-github-app`?\?/i.test(init),
     'init must never ask "Run /install-github-app?" — it cannot run it, so a yes produces nothing while reading as done',
   );
+  // Scan the WHOLE file. This used to read only init.split('## 4h.')[0], which blinded it to
+  // the back half — and that is exactly where the miss lived: the step-7 summary still listed
+  // "GitHub app — installed already / offered and accepted / offered and declined", the very
+  // line whose "read as handled" was the reported defect.
   assert.ok(
-    !/REQUIRED|Action needed/.test(init.split('## 4h.')[0] || ''),
-    'init must not present the App as required or outstanding — the pipeline does not use it',
+    !/GitHub app\b[^\n]*offered/i.test(init),
+    'the step-7 summary must not report a GitHub App interaction — none can occur',
+  );
+  assert.ok(
+    !/\bREQUIRED\b[^\n]{0,80}GitHub App|GitHub App[^\n]{0,80}\bREQUIRED\b/i.test(init),
+    'init must not present the App as required — the pipeline does not use it',
   );
   assert.match(init, /^## 4g\. \(removed\)/m,
     'the removal must be recorded in place, so the next person does not add the check back as a convenience');
