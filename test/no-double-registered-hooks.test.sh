@@ -65,9 +65,26 @@ else
   notok "ASSERTION 2: duplicate registrations within settings.json: $(printf '%s' "$DUPES" | tr '\n' ' ')"
 fi
 
-# --- ASSERTION 3: the gate is still registered SOMEWHERE ----------------------
-# Deleting a duplicate must never become deleting the gate. If the plugin is reachable, its
-# hooks.json must still carry verify-gate for Stop and SubagentStop.
+# --- ASSERTION 3a: the guards still have an OWNER, provably from committed state --
+# Deleting a duplicate must never become deleting the gate. The strong form of that check
+# needs the factory's hooks.json, which does NOT exist in a fresh clone or on a CI runner —
+# so it cannot be the only thing standing between this repo and an unguarded state, or the
+# protection evaporates exactly where nobody is watching. This half reads only committed
+# state and therefore runs everywhere: having removed the local registrations, this repo MUST
+# still enable the plugin that owns them.
+if node -e '
+  const j=require(process.argv[1]);
+  const v=(j.enabledPlugins||{})["quetrex-factory@quetrex"];
+  process.exit((v===true||(Array.isArray(v)&&v.length))?0:1);
+' "$SETTINGS" 2>/dev/null; then
+  ok "ASSERTION 3a: quetrex-factory is enabled in committed enabledPlugins — the guards this repo stopped registering still have an owner"
+else
+  notok "ASSERTION 3a: this repo registers none of the engine guards AND does not enable quetrex-factory — nothing runs them; the duplicate was not removed, the gate was"
+fi
+
+# --- ASSERTION 3b: and the owner really does register the gate ----------------
+# The live cross-check, wherever a factory copy is reachable. Absence is REPORTED, never
+# silent — same convention as hook-parity.test.sh, whose ASSERTION 3 has the identical shape.
 PLUGIN_HOOKS=""
 for cand in "$HOME"/.claude/plugins/cache/quetrex/quetrex-factory/*/hooks/hooks.json \
             "$ROOT/../quetrex-plugins/plugins/quetrex-factory/hooks/hooks.json"; do
@@ -80,14 +97,14 @@ if [ -n "$PLUGIN_HOOKS" ]; then
       const found=((j.hooks||{})[ev]||[]).some(g=>(g.hooks||[]).some(h=>/verify-gate\.sh/.test(h.command||"")));
       process.exit(found?0:1);
     ' "$PLUGIN_HOOKS" "$ev" 2>/dev/null; then
-      ok "ASSERTION 3: the plugin still registers verify-gate for $ev — removing the duplicate did not remove the gate"
+      ok "ASSERTION 3b: the plugin still registers verify-gate for $ev — removing the duplicate did not remove the gate"
     else
-      notok "ASSERTION 3: NOTHING registers verify-gate for $ev — the gate is gone, not deduplicated"
+      notok "ASSERTION 3b: the reachable quetrex-factory does NOT register verify-gate for $ev — the gate is gone, not deduplicated"
     fi
   done
 else
-  echo "# no factory hooks.json reachable — ASSERTION 3 could not run (reported, not silently skipped)"
-  notok "ASSERTION 3: could not verify the plugin still registers the gate; do not treat this as a pass"
+  echo "# no factory hooks.json reachable (fresh clone / CI runner) — ASSERTION 3b could not run"
+  ok "ASSERTION 3b: skipped, no factory copy reachable (reported, not silent; ASSERTION 3a still proves the guards have an owner)"
 fi
 
 # --- ASSERTION 4: the startup diagnostic must agree with the ownership model --
