@@ -139,7 +139,7 @@
 #      presence means the command would have had the value).
 # If the committed verify.json cannot be read at all (no HEAD, unreadable),
 # NOTHING is treated as declared and no command is ever skipped.
-# A skip writes NO ledger line for that command (it is not a pass), and a run
+# A skip writes a ledger line marked skipped:true / skipReason:requiredEnv / exit:null for that command (it is recorded, and it is not a pass), and a run
 # that skipped anything must NOT clear a prior .quetrex/ESCALATION — only a run
 # where every chain command genuinely executed and exited 0 may clear one.
 

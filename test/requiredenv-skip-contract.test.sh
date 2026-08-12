@@ -82,6 +82,35 @@ else
   notok "ASSERTION 3: a FAILING command passed GATE 3 — the skip contract widened the gate (red: $OUT)"
 fi
 
+# --- ASSERTION 3b: a describing RED dominates a later skip --------------------
+# The defect this exists to prevent, found by the review gate and reproduced with the real
+# hooks: `athead` takes the LAST entry at $head, so a skip appended AFTER a genuine failure at
+# the SAME commit erased it and GATE 3 flipped red -> green. No adversary needed — a cloud
+# build goes red with the var set, the evidence comes home, the operator opens a fresh worktree
+# (which carries no untracked .env.local, so the var is genuinely absent) and one Stop firing
+# appends the skip. ASSERTION 3 above passes only because its fixture holds the failure ALONE.
+printf '%s\n' \
+  '{"cmd":"npm run build","sha":"abc123","exit":1}' \
+  '{"cmd":"npm run build","sha":"abc123","exit":null,"skipped":true,"skipReason":"requiredEnv","missingEnv":"DEMO_DATABASE_URL"}' \
+  > "$TMP/redthenskip.jsonl"
+OUT="$(red "$TMP/redthenskip.jsonl" '["npm run build"]')"
+if printf '%s' "$OUT" | grep -q 'npm run build'; then
+  ok "ASSERTION 3b: a skip appended AFTER a failure at the same commit does not erase it"
+else
+  notok "ASSERTION 3b: a later skip ERASED a genuine failure at the same commit — a command that measurably exited non-zero passes the ship gate (red: $OUT)"
+fi
+
+# And the reverse order must still be green: a skip followed by nothing is a clean skip.
+printf '%s\n' \
+  '{"cmd":"npm run build","sha":"abc123","exit":null,"skipped":true,"skipReason":"requiredEnv","missingEnv":"X"}' \
+  > "$TMP/skiponly.jsonl"
+OUT="$(red "$TMP/skiponly.jsonl" '["npm run build"]')"
+if [ "$OUT" = "[]" ]; then
+  ok "ASSERTION 3b: a clean skip with no failure at that commit still satisfies the chain"
+else
+  notok "ASSERTION 3b: over-corrected — a clean skip is now red (red: $OUT)"
+fi
+
 # --- ASSERTION 4: the reason is load-bearing ----------------------------------
 # `skipped:true` alone must NOT satisfy the chain, or the escape hatch is "write skipped into
 # the ledger", which any stage could do for any reason.

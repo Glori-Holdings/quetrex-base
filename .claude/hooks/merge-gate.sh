@@ -1690,7 +1690,18 @@ evaluate_vector() {
     . as $all
     | [ $chain[]
         | . as $c
-        | ( [ $all[] | select(.cmd == $c) | {sha: (.sha // ""), exit: (if (.skipped == true and .skipReason == "requiredEnv") then 0 else .exit end), skipped: (.skipped // false)} ] ) as $ent
+        | ( [ $all[] | select(.cmd == $c) | {sha: (.sha // ""), rawexit: .exit, skipped: ((.skipped == true) and (.skipReason == "requiredEnv"))} ] ) as $raw
+        # A DESCRIBING RED DOMINATES A LATER SKIP. `athead` takes the LAST entry at $head, so
+        # mapping a skip to exit 0 before that selection let a skip appended AFTER a genuine
+        # failure at the SAME commit erase it — a command that measurably exited non-zero on
+        # the merged commit passed the gate. Reproduced with the real hooks: red run, then the
+        # operator clears the env value, then one Stop firing appends the skip. That is the
+        # same shape as the transported-evidence shadowing already documented above, and it
+        # breaks the invariant this gate states about itself: a red for the merged commit is never
+        # rescued. So: if ANY non-skipped entry at $head failed, the command stays red no
+        # matter what follows it.
+        | ( [ $raw[] | select(.sha == $head and $head != "" and (.skipped | not) and .rawexit != null and .rawexit != 0) ] | length > 0 ) as $redathead
+        | ( [ $raw[] | {sha: .sha, exit: (if $redathead then 1 elif .skipped then 0 else .rawexit end), skipped: .skipped} ] ) as $ent
         | ( [ $ent[] | select(.sha == $head and $head != "") ] | last ) as $athead
         | ( reduce ($ent | reverse)[] as $e ({};
               if has($e.sha) then . else .[$e.sha] = $e end) | [ .[] ] ) as $persha
