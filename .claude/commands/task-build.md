@@ -182,14 +182,55 @@ The verdict is computed, not remembered:
 #              unapproved one). This is NOT "already running".
 #   REDISPATCH pr_ready + build/tick: the documented repair path when the gates
 #              are stale (see .claude/commands/merge.md) — allowed, and loud.
+#   RECOVERABLE the recorded routine is PROVEN not to be running and attempts
+#              remain: clear the dead dispatch and fire exactly one replacement.
 #   REFUSE     stop.
-qx_actionability() {           # qx_actionability <status> <single|epic> <full|build|tick> <payload-file>
-  local status="$1" kind="$2" mode="$3" payload="$4"
-  local approved="" dispatched="" monitor=""
+#
+# THE LIVENESS RULE, and why it is shaped this way.
+#   A dispatch used to be an unconditional, permanent refusal: `in_progress` +
+#   any `dispatch.dispatchedAt` meant REFUSE in all three modes, forever, with
+#   nothing anywhere clearing the record. One container kill therefore took the
+#   task out of the product for good, and the only escape was hand-editing a
+#   git-ignored JSON file nobody had been told about.
+#   The fix is NOT a clock. Age alone must never re-fire a build: a legitimately
+#   long run would be duplicated, and two sessions racing one branch namespace is
+#   a corrupt build, not a redundant one — the exact defect the refusal exists to
+#   prevent. `dispatch.routineId` is right there and `RemoteTrigger action:"get"`
+#   answers the question authoritatively, so ASK rather than guess.
+#   So: age changes the ADVICE, evidence changes the VERDICT.
+#     - under `dispatchStaleMinutes` (default 90) → REFUSE, "it is in flight".
+#     - over it, with no probe result → still REFUSE, but the refusal now names
+#       the routine id and orders the probe. It is a next step, not a dead end.
+#     - probe says `dead`/`gone` → RECOVERABLE, bounded by `maxDispatchAttempts`
+#       (default 2 — one automatic recovery, then a human).
+#     - probe says `running` → REFUSE however old it is.
+#   `liveness` is the 5th argument precisely because `RemoteTrigger` is a TOOL,
+#   not a shell command: the probe cannot happen inside this function, so its
+#   result is passed in and the decision stays executable and testable.
+qx_actionability() {           # qx_actionability <status> <single|epic> <full|build|tick> <payload-file> [running|dead|gone|unknown]
+  local status="$1" kind="$2" mode="$3" payload="$4" liveness="${5:-unknown}"
+  local approved="" dispatched="" monitor="" routine="" attempts="" maxatt="" horizon="" age=""
   if [ -f "$payload" ]; then
     approved="$(quetrex-api json-get "$payload" scopeApprovedAt 2>/dev/null || true)"
     dispatched="$(quetrex-api json-get "$payload" dispatch.dispatchedAt 2>/dev/null || true)"
     monitor="$(quetrex-api json-get "$payload" dispatch.monitorUrl 2>/dev/null || true)"
+    routine="$(quetrex-api json-get "$payload" dispatch.routineId 2>/dev/null || true)"
+    attempts="$(quetrex-api json-get "$payload" dispatch.attempts 2>/dev/null || true)"
+    maxatt="$(quetrex-api json-get "$payload" maxDispatchAttempts 2>/dev/null || true)"
+    horizon="$(quetrex-api json-get "$payload" dispatchStaleMinutes 2>/dev/null || true)"
+  fi
+  [ -n "$attempts" ] || attempts=1        # a record written before this field existed is 1 attempt
+  [ -n "$maxatt" ]   || maxatt=2
+  [ -n "$horizon" ]  || horizon=90
+  # Age in whole minutes, or "" if there is no parseable timestamp. QX_NOW makes
+  # the clock injectable so a test is not hostage to wall time.
+  if [ -n "$dispatched" ]; then
+    age="$(node -e '
+      const t=Date.parse(process.argv[1]||"");
+      const now=process.env.QX_NOW ? Date.parse(process.env.QX_NOW) : Date.now();
+      if(Number.isNaN(t)||Number.isNaN(now)){ process.stdout.write(""); process.exit(0); }
+      process.stdout.write(String(Math.floor((now-t)/60000)));
+    ' "$dispatched" 2>/dev/null || true)"
   fi
   case "$status" in
     backlog|queued)
@@ -208,7 +249,20 @@ qx_actionability() {           # qx_actionability <status> <single|epic> <full|b
         echo "RESUME — epic already decomposed and approved: skipping the plan half and draining the DAG"; return 0
       fi
       if [ -n "$approved" ] && [ -n "$dispatched" ]; then
-        echo "REFUSE — a cloud routine for $TASK_ID is in flight (dispatched $dispatched)${monitor:+ — watch it at $monitor}. Wait for it to reach pr_ready, or rework it; do not fire a second run at the same branch namespace"; return 1
+        case "$liveness" in
+          dead|gone)
+            if [ "$attempts" -ge "$maxatt" ] 2>/dev/null; then
+              echo "REFUSE — the cloud routine for $TASK_ID (${routine:-unknown}) is not running and this task has already been dispatched $attempts time(s), which is its maxDispatchAttempts. Refusing a third fire at the same branch namespace: this needs a human. Read the run at ${monitor:-the routine list}, then either /quetrex:task-rework $TASK_ID or raise maxDispatchAttempts in $payload deliberately"; return 1
+            fi
+            echo "RECOVERABLE — the cloud routine for $TASK_ID (${routine:-unknown}) is ${liveness} (probed), so nothing is in flight despite the dispatch record from $dispatched. Clearing the dead dispatch and firing attempt $((attempts + 1)) of $maxatt at the SAME approved base and spec branch"; return 0 ;;
+          running)
+            echo "REFUSE — a cloud routine for $TASK_ID is in flight (dispatched $dispatched, probed running)${monitor:+ — watch it at $monitor}. Wait for it to reach pr_ready, or rework it; do not fire a second run at the same branch namespace"; return 1 ;;
+          *)
+            if [ -n "$age" ] && [ "$age" -gt "$horizon" ] 2>/dev/null; then
+              echo "REFUSE — a cloud routine for $TASK_ID is recorded in flight (dispatched $dispatched)${monitor:+ — watch it at $monitor}, but that is ${age}m ago, past the ${horizon}m staleness horizon, so it may be dead. This is NOT a dead end: probe it with RemoteTrigger action:\"get\" trigger_id:\"${routine:-<dispatch.routineId>}\" and re-run this guard with the answer (running|dead|gone) as its 5th argument. A dead routine returns RECOVERABLE and is re-fired once"; return 1
+            fi
+            echo "REFUSE — a cloud routine for $TASK_ID is in flight (dispatched $dispatched)${monitor:+ — watch it at $monitor}. Wait for it to reach pr_ready, or rework it; do not fire a second run at the same branch namespace"; return 1 ;;
+        esac
       fi
       echo "RESUMABLE — in_progress but NOTHING is in flight (no dispatch recorded in the payload): the scope gate was declined or abandoned. Re-entering the plan half"; return 0 ;;
     *)
@@ -218,8 +272,55 @@ qx_actionability() {           # qx_actionability <status> <single|epic> <full|b
 # ── end quetrex:exec-block qx_actionability ───────────────────────────────────
 
 # KIND: "epic" iff the persisted type is project/epic AND $TASK exposes children.
-qx_actionability "$STATUS" "$KIND" "$MODE" "$PAYLOAD" || exit 1
+# QX_LIVENESS is "unknown" on the first pass — the probe below fills it in only if
+# the guard asks for it. Never pre-probe: an in-window dispatch needs no tool call.
+QX_LIVENESS="${QX_LIVENESS:-unknown}"
+QX_VERDICT="$(qx_actionability "$STATUS" "$KIND" "$MODE" "$PAYLOAD" "$QX_LIVENESS")"; QX_RC=$?
+echo "$QX_VERDICT"
 ```
+
+**If the verdict names the staleness horizon, probe before you stop.** That refusal is
+the one that used to be permanent. It prints the routine id, and it means exactly one
+thing: call `RemoteTrigger` with `action:"get"` and that `trigger_id`, then re-run the
+guard with the answer as its 5th argument —
+
+- the run is still executing → `running` → the refusal stands, and correctly;
+- it finished/failed/was cancelled → `dead`;
+- the id 404s (the routine record is gone) → `gone`;
+
+```bash
+QX_LIVENESS=dead   # or running / gone — from the RemoteTrigger get response, never guessed
+QX_VERDICT="$(qx_actionability "$STATUS" "$KIND" "$MODE" "$PAYLOAD" "$QX_LIVENESS")"; QX_RC=$?
+echo "$QX_VERDICT"
+```
+
+On `RECOVERABLE`, clear the dead record and let Step 6A fire the replacement — the
+attempt counter is what stops this becoming a re-dispatch loop, so it is written in the
+same breath as the clear, not afterwards:
+
+```bash
+# ── quetrex:exec-block qx_clear_dead_dispatch ─────────────────────────────────
+# Executable, and executed: test/epic-tick.test.sh drives record → clear → record
+# and asserts the attempt count CARRIES, so maxDispatchAttempts actually binds.
+qx_clear_dead_dispatch() {     # qx_clear_dead_dispatch <payload>
+  node -e '
+    const fs=require("fs"); const f=process.argv[1];
+    const p=JSON.parse(fs.readFileSync(f,"utf8"));
+    const prev=p.dispatch||{};
+    p.recoveredDispatches=(p.recoveredDispatches||[]).concat([prev]);  // keep the evidence
+    p.dispatch=null;                                                   // nothing is in flight
+    p.dispatchAttempts=(Number(prev.attempts)||Number(p.dispatchAttempts)||1);
+    fs.writeFileSync(f, JSON.stringify(p,null,2)+"\n");
+  ' "$1"
+}
+# ── end quetrex:exec-block qx_clear_dead_dispatch ────────────────────────────
+
+qx_clear_dead_dispatch "$PAYLOAD"
+```
+
+The replacement dispatch reuses the pinned `approvedBaseSha` and the same
+`quetrex-spec/<TASK>` branch (Step 6A republishes it by delete-then-push), so a recovery
+never re-targets the scope the human approved and never leaves a second branch behind.
 
 Then, whatever the mode:
 
@@ -229,6 +330,10 @@ Then, whatever the mode:
   do not re-run the architect). In `build`/`tick` mode the unapproved payload still cannot
   build, and Step 5 refuses it — with the accurate reason.
 - **`REFUSE`** — print the verdict line verbatim and stop. It already names the way forward.
+- **`RECOVERABLE`** — a probed-dead routine. Clear the record as above, say plainly that the
+  previous run died and which routine id it was, and continue to the build half. Never reach
+  this verdict without an actual `RemoteTrigger get` result: a guessed `dead` is a duplicate
+  build.
 - **`RESUME`** (epic) or **`REDISPATCH`** — continue.
 
 **If `MODE` is `build` or `tick`, go to Step 5 now** — with the guard above already run.
@@ -383,15 +488,23 @@ node -e '
                                              // constant" there. This is what makes a
                                              // re-dispatch survive main moving on.
     dispatch: null,                          // {routineId,monitorUrl,specBranch,baseSha,
-                                             //  dispatchedAt} — written by 6A/6B AFTER the
-                                             // routine is actually fired. The Step 1 guard
-                                             // reads it to tell "in flight" from "wedged".
+                                             //  dispatchedAt,attempts} — written by 6A/6B
+                                             // AFTER the routine is actually fired. The
+                                             // Step 1 guard reads it to tell "in flight"
+                                             // from "wedged", and `attempts` is what bounds
+                                             // automatic recovery of a dead routine.
     children: JSON.parse(children || "[]"),  // [{label,title,desc,id,plan}] — id filled in 4c
     edges: JSON.parse(edges || "[]"),        // label pairs [child, dependsOn]
     edgeIds: [],                             // resolved id pairs, filled in 4c
     childDispatch: {},                       // child-id -> the same dispatch record, from 6B
     concurrencyCap: 4,                       // 3–5
-    tickIntervalMinutes: 3                   // 2–5; children are multi-minute
+    tickIntervalMinutes: 3,                  // 2–5; children are multi-minute
+    dispatchStaleMinutes: 90,                // past this age a dispatch is SUSPECT, never
+                                             // "dead": the tick must PROBE the routine.
+                                             // A clock alone never re-fires a build.
+    maxDispatchAttempts: 2                   // total dispatches per unit/child — i.e. ONE
+                                             // automatic recovery of a dead routine, then a
+                                             // human. This is what makes the tick terminate.
   };
   fs.mkdirSync(require("path").dirname(file), {recursive:true});
   fs.writeFileSync(file, JSON.stringify(out, null, 2) + "\n");
@@ -875,14 +988,28 @@ only proof that something is actually running. Write it into the payload **befor
 one) from a task wedged at a declined scope gate (resume it):
 
 ```bash
-node -e '
-  const fs=require("fs");
-  const [file,id,spec,sha]=process.argv.slice(1);
-  const p=JSON.parse(fs.readFileSync(file,"utf8"));
-  p.dispatch={ routineId:id, monitorUrl:"https://claude.ai/code/routines/"+id,
-               specBranch:spec, baseSha:sha, dispatchedAt:new Date().toISOString() };
-  fs.writeFileSync(file, JSON.stringify(p,null,2)+"\n");
-' "$PAYLOAD" "$ROUTINE_ID" "$SPEC_BRANCH" "$APPROVED_BASE_SHA"
+# ── quetrex:exec-block qx_record_dispatch ─────────────────────────────────────
+# Executable, and executed: test/epic-tick.test.sh drives it.
+qx_record_dispatch() {         # qx_record_dispatch <payload> <routine-id> <spec-branch> <base-sha>
+  node -e '
+    const fs=require("fs");
+    const [file,id,spec,sha]=process.argv.slice(1);
+    const p=JSON.parse(fs.readFileSync(file,"utf8"));
+    // attempts is CUMULATIVE across recoveries — dispatchAttempts survives the
+    // clear a RECOVERABLE verdict does, so the Nth fire is recorded as the Nth and
+    // maxDispatchAttempts can actually bind. Resetting it here would make the
+    // recovery path an unbounded re-dispatch loop.
+    const attempts=(Number(p.dispatchAttempts)||0)+1;
+    p.dispatchAttempts=attempts;
+    p.dispatch={ routineId:id, monitorUrl:"https://claude.ai/code/routines/"+id,
+                 specBranch:spec, baseSha:sha, dispatchedAt:new Date().toISOString(),
+                 attempts };
+    fs.writeFileSync(file, JSON.stringify(p,null,2)+"\n");
+  ' "$1" "$2" "$3" "$4"
+}
+# ── end quetrex:exec-block qx_record_dispatch ────────────────────────────────
+
+qx_record_dispatch "$PAYLOAD" "$ROUTINE_ID" "$SPEC_BRANCH" "$APPROVED_BASE_SHA"
 ```
 
 Then report the **monitor URL** — `https://claude.ai/code/routines/{id}` — to the user, along
@@ -921,22 +1048,209 @@ orphaned; the DAG simply stops *advancing* until someone runs
 `--tick` by hand. Say that in the report, so an operator who closes the laptop knows exactly
 what did and did not stop.
 
+#### What "in flight" means, and why it is NOT a board status
+
+The tick used to count in-flight children as *children whose card reads `in_progress`* and
+call the DAG finished when that count was zero and the ready set was empty. **Nothing in this
+system ever writes `in_progress` on a child.** The only writers of that status are
+`.claude/lib/dev-pipeline.md` (which a cloud routine is explicitly forbidden from running
+against the board — see `.claude/lib/cloud-build-routine.md`, "Do NOT depend on cloud
+board-MCP") and Step 4c here, which writes it on the **epic**. So the count was identically
+zero: the first tick after wave one fired reported `0 in-flight, 0 ready`, printed
+`EPIC FIXPOINT REACHED`, stopped its own `/loop`, and fell into Step 7 — which then read
+every still-building child as failed-or-blocked and told the operator to rework them. Wave
+two was never dispatched. The cap was inert for the same reason: with `in_flight ≡ 0` every
+tick could launch a full cap.
+
+The fix is to key the tick off the two things that ARE written:
+
+- **the payload `childDispatch[<id>]` record**, written by this tick in the same breath as
+  the `RemoteTrigger` call that fired the routine — it is the only evidence that anything is
+  running, and it is written by the one process that knows;
+- **statuses something actually writes** — `merged` (by `/quetrex:merge`, the reaper),
+  `needs_clarity` (by the rework path), and open-PR evidence read straight from GitHub, which
+  does not depend on any board write at all.
+
+The tick **also** sets a freshly-dispatched child to `in_progress` (step 3 below), because the
+board is what the operator watches from their phone and a building child must not sit in
+`backlog`. That write is for the human. **No decision in this tick reads it** — if the write
+fails, the tick is unaffected.
+
 **One tick** (this is all `--tick` does — do exactly this, then exit):
 
-1. **Compute the ready set** — children not yet started whose dependencies are all
-   `DONE_FOR_UNBLOCKING = {merged, deployed, complete}`:
+1. **Snapshot the board.** One line per child, tab-separated:
+   `<child-id>	<status>	<liveness>	<pr>`. `liveness` is `unknown` here (step 2 fills it
+   in only when asked); `pr` is `open` when GitHub already shows an open PR for that child.
+   Read the child ids from the payload's `children[].id` — never from memory.
 
    ```bash
-   quetrex-api is-unblocked "<child-id>"   # exit 0 = ready, 1 = still blocked
+   SNAP="$(mktemp)"
+   INTEGRATION_BRANCH="$(quetrex-api json-get "$PAYLOAD" integrationBranch)"
+   node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+            for(const c of (p.children||[])) if(c && c.id) console.log(c.id);' "$PAYLOAD" \
+   | while IFS= read -r CID; do
+       CST="$(quetrex-api GET "/api/tasks/$CID" | node -e '
+         let o; try{o=JSON.parse(require("fs").readFileSync(0,"utf8"))}catch{process.exit(1)}
+         process.stdout.write(String(o.status||""));' )" || exit 1
+       # Terminus evidence that needs no board write: an open PR whose head branch is
+       # this child. Matched with -F on "<prefix><child-id>-" so child .1 can never
+       # match child .10 — a "." is not a wildcard here and the trailing "-" is the
+       # slug separator the unit branch always carries.
+       if gh pr list --state open --base "$INTEGRATION_BRANCH" --json headRefName --jq '.[].headRefName' 2>/dev/null \
+          | grep -qF -- "$BRANCH_PREFIX$CID-"; then PRV=open; else PRV=none; fi
+       printf '%s\t%s\t%s\t%s\n' "$CID" "$CST" "unknown" "$PRV"
+     done > "$SNAP"
    ```
 
-   Prefer the server's `isBlocked` flag; the helper falls back to checking dependency
-   statuses. Read the child ids from the payload's `children[].id` — never from memory.
+   If any child cannot be read, stop the tick — the planner refuses a partial snapshot on
+   purpose (see below). A guessed status is how a merged child gets rebuilt.
 
-2. **Launch up to the cap — as cloud Routines.** Count children currently `in_progress`
-   (in-flight) and launch ready children only up to `cap − in_flight` (`concurrencyCap`,
-   3–5). For each ready child, derive its dispatch parameters from the payload — never from
-   memory, and never from the epic's own values:
+2. **Plan the tick.** Every decision — who is in flight, who is ready, how many may launch,
+   and whether the DAG has drained — is computed here, once, from the payload plus that
+   snapshot. It is a pure function, so it is testable, and `test/epic-tick.test.sh` drives it
+   over a multi-wave fixture DAG:
+
+   ```bash
+   # ── quetrex:exec-block qx_epic_tick_plan ─────────────────────────────────────
+   # Executable, and executed: test/epic-tick.test.sh sources this exact block and
+   # drives it across a multi-wave DAG, a concurrency cap, a dead routine and the
+   # drain-to-fixpoint loop. Pure function of (payload file, snapshot file, clock).
+   #
+   # ROLES, in precedence order:
+   #   SETTLED    merged|deployed|complete — satisfies a dependent
+   #   FAILED     needs_clarity — a human reworks it; dependents WAIT, never cascade
+   #   REAP       pr_ready OR an open PR — its routine finished: /quetrex:merge it
+   #   RECOVER    dispatched, PROBED dead/gone, attempts remain — refire exactly once
+   #   EXHAUSTED  dispatched, probed dead/gone, out of attempts — needs a human
+   #   IN_FLIGHT  dispatched and presumed live — occupies a concurrency slot
+   #   PROBE      dispatched, past dispatchStaleMinutes, liveness unknown — occupies a
+   #              slot AND must be probed this tick (RemoteTrigger get)
+   #   READY      never dispatched, every dependency SETTLED
+   #   BLOCKED    never dispatched, a dependency is not SETTLED
+   #
+   # TERMINATION. Each tick either launches (and a child can be launched at most
+   # maxDispatchAttempts times), reaps (which strictly increases SETTLED), or waits
+   # on IN_FLIGHT/PROBE — and a stale dispatch is forced to a decision by the
+   # horizon. Every transition is monotone, so the DAG drains and FIXPOINT is
+   # reached in finite ticks.
+   qx_epic_tick_plan() {   # qx_epic_tick_plan <payload> <board-snapshot> [now-iso]
+     node -e '
+       const fs=require("fs");
+       const [payloadFile,snapFile,nowArg]=process.argv.slice(1);
+       let p; try{ p=JSON.parse(fs.readFileSync(payloadFile,"utf8")); }
+       catch(e){ console.error("qx_epic_tick_plan: cannot read payload "+payloadFile+": "+e.message); process.exit(1); }
+       const now = nowArg ? Date.parse(nowArg) : (process.env.QX_NOW ? Date.parse(process.env.QX_NOW) : Date.now());
+       if(Number.isNaN(now)){ console.error("qx_epic_tick_plan: unparseable clock: "+nowArg); process.exit(1); }
+       const children = Array.isArray(p.children) ? p.children : [];
+       if(!children.length){ console.error("qx_epic_tick_plan: payload has no children[] — this is not a decomposed epic"); process.exit(1); }
+       const ids=[];
+       for(const c of children){
+         if(!c || !c.id){ console.error("qx_epic_tick_plan: child "+((c&&c.label)||"?")+" has no id — Step 4c never wrote the create-child identifier back. Fix the payload; do not guess one."); process.exit(1); }
+         ids.push(String(c.id));
+       }
+       const cap     = Number(p.concurrencyCap)>0      ? Number(p.concurrencyCap)      : 4;
+       const horizon = Number(p.dispatchStaleMinutes)>0? Number(p.dispatchStaleMinutes): 90;
+       const maxAtt  = Number(p.maxDispatchAttempts)>0 ? Number(p.maxDispatchAttempts) : 2;
+       let raw=""; try{ raw=fs.readFileSync(snapFile,"utf8"); }
+       catch(e){ console.error("qx_epic_tick_plan: cannot read the board snapshot "+snapFile+": "+e.message); process.exit(1); }
+       const snap=new Map();
+       for(const line of raw.split("\n")){
+         if(!line.trim()) continue;
+         const f=line.split("\t");
+         const id=(f[0]||"").trim();
+         if(!id) continue;
+         snap.set(id,{status:(f[1]||"").trim(), liveness:((f[2]||"").trim()||"unknown"), pr:((f[3]||"").trim()||"unknown")});
+       }
+       const DONE=new Set(["merged","deployed","complete"]);
+       const KNOWN=new Set(["backlog","queued","in_progress","pr_ready","merged","deployed","needs_clarity","complete"]);
+       const disp=(p.childDispatch && typeof p.childDispatch==="object")?p.childDispatch:{};
+       const deps=new Map(ids.map(i=>[i,[]]));
+       for(const e of (Array.isArray(p.edgeIds)?p.edgeIds:[])){
+         if(!Array.isArray(e)||e.length<2) continue;
+         const a=String(e[0]), b=String(e[1]);
+         if(!deps.has(a)){ console.error("qx_epic_tick_plan: edge names a child that is not in children[]: "+a); process.exit(1); }
+         if(!deps.has(b)){ console.error("qx_epic_tick_plan: edge names a dependency that is not in children[]: "+b); process.exit(1); }
+         deps.get(a).push(b);
+       }
+       const role=new Map(), note=new Map();
+       for(const id of ids){
+         const s=snap.get(id);
+         if(!s){ console.error("qx_epic_tick_plan: no board status for child "+id+" — read EVERY child from the kanban before planning a tick. Guessing one is how a merged child gets rebuilt."); process.exit(1); }
+         if(!KNOWN.has(s.status)){ console.error("qx_epic_tick_plan: child "+id+" has an unmodelled status "+JSON.stringify(s.status)); process.exit(1); }
+         const d=disp[id]||null;
+         const att=d?(Number(d.attempts)||1):0;
+         if(DONE.has(s.status)){ role.set(id,"SETTLED"); note.set(id,s.status); continue; }
+         if(s.status==="needs_clarity"){ role.set(id,"FAILED"); note.set(id,"needs a human: /quetrex:task-rework "+id); continue; }
+         if(s.status==="pr_ready" || s.pr==="open"){ role.set(id,"REAP"); note.set(id,"terminus reached ("+(s.status==="pr_ready"?"pr_ready":"open PR")+"): /quetrex:merge "+id); continue; }
+         if(!d || !d.dispatchedAt){
+           const unmet=deps.get(id).filter(x=>{ const ds=snap.get(x); return !ds || !DONE.has(ds.status); });
+           if(unmet.length){ role.set(id,"BLOCKED"); note.set(id,"waiting on "+unmet.join(",")); }
+           else { role.set(id,"READY"); note.set(id,"dependencies satisfied"); }
+           continue;
+         }
+         const t=Date.parse(d.dispatchedAt);
+         const age=Number.isNaN(t)?null:Math.floor((now-t)/60000);
+         if(s.liveness==="dead" || s.liveness==="gone"){
+           if(att>=maxAtt){ role.set(id,"EXHAUSTED"); note.set(id,"routine "+(d.routineId||"?")+" is "+s.liveness+" after "+att+" of "+maxAtt+" attempts — needs a human"); }
+           else { role.set(id,"RECOVER"); note.set(id,"routine "+(d.routineId||"?")+" is "+s.liveness+" — refiring attempt "+(att+1)+" of "+maxAtt); }
+           continue;
+         }
+         if(s.liveness==="running"){ role.set(id,"IN_FLIGHT"); note.set(id,"probed running, "+(age==null?"?":age)+"m in"); continue; }
+         if(age!=null && age>horizon){ role.set(id,"PROBE"); note.set(id,"routine "+(d.routineId||"?")+" dispatched "+age+"m ago, past the "+horizon+"m horizon"); continue; }
+         role.set(id,"IN_FLIGHT"); note.set(id,"dispatched "+(age==null?"?":age)+"m ago");
+       }
+       const n=r=>ids.filter(i=>role.get(i)===r).length;
+       const busy=n("IN_FLIGHT")+n("PROBE");
+       const headroom=Math.max(0, cap-busy);
+       const launch=[].concat(ids.filter(i=>role.get(i)==="RECOVER"), ids.filter(i=>role.get(i)==="READY")).slice(0,headroom);
+       for(const id of ids) console.log("CHILD\t"+id+"\t"+role.get(id)+"\t"+(note.get(id)||""));
+       for(const id of ids) if(role.get(id)==="PROBE") console.log("PROBE\t"+id+"\t"+((disp[id]||{}).routineId||""));
+       for(const id of ids) if(role.get(id)==="REAP")  console.log("REAP\t"+id);
+       for(const id of launch) console.log("LAUNCH\t"+id);
+       console.log("CAP="+cap);
+       console.log("IN_FLIGHT="+n("IN_FLIGHT"));
+       console.log("PROBE="+n("PROBE"));
+       console.log("READY="+n("READY"));
+       console.log("RECOVER="+n("RECOVER"));
+       console.log("BLOCKED="+n("BLOCKED"));
+       console.log("REAP="+n("REAP"));
+       console.log("SETTLED="+n("SETTLED"));
+       console.log("FAILED="+n("FAILED"));
+       console.log("EXHAUSTED="+n("EXHAUSTED"));
+       console.log("HEADROOM="+headroom);
+       console.log("LAUNCHING="+launch.length);
+       const fixpoint = busy===0 && n("REAP")===0 && n("READY")===0 && n("RECOVER")===0;
+       console.log("FIXPOINT="+(fixpoint?"yes":"no"));
+       console.log("ALL_SETTLED_DONE="+(n("SETTLED")===ids.length?"yes":"no"));
+     ' "$1" "$2" "${3:-}"
+   }
+   # ── end quetrex:exec-block qx_epic_tick_plan ────────────────────────────────
+
+   PLAN_OUT="$(qx_epic_tick_plan "$PAYLOAD" "$SNAP")" || exit 1
+   printf '%s\n' "$PLAN_OUT" | grep '^CHILD'
+   ```
+
+   The planner corroborates rather than replaces `quetrex-api is-unblocked "<child-id>"`
+   (exit 0 = ready, 1 = still blocked) — it applies the same
+   `DONE_FOR_UNBLOCKING = {merged, deployed, complete}` rule the server applies. Call the
+   helper on any child the planner calls `READY` if you want the server's own `isBlocked`
+   verdict; the two must agree, and a disagreement is a bug worth reporting, not a reason to
+   launch.
+
+3. **Probe every `PROBE` line, then re-plan.** A child past the staleness horizon is not
+   declared dead by the clock — the clock only says "ask". For each `PROBE	<child-id>	<routineId>`
+   line, call `RemoteTrigger` with `action:"get"` and that `trigger_id`, write the answer
+   (`running` / `dead` / `gone` if the id 404s) into that child's `liveness` column in `$SNAP`,
+   and run `qx_epic_tick_plan` again. Only that second plan is acted on. A child whose routine
+   is genuinely running stays `IN_FLIGHT` however old it is; only a probed-dead one becomes
+   `RECOVER`, and only while `attempts < maxDispatchAttempts`. **Never write `dead` without a
+   probe result** — a guessed `dead` is a duplicate build racing the first on one branch
+   namespace, which is the defect the in-flight refusal exists to prevent.
+
+4. **Launch every `LAUNCH` line — as cloud Routines.** The planner has already applied the
+   cap (`HEADROOM = concurrencyCap − IN_FLIGHT − PROBE`), so this step launches exactly what
+   it was handed and counts nothing itself. For each launched child, derive its dispatch
+   parameters from the payload — never from memory, and never from the epic's own values:
 
    ```bash
    # ── quetrex:exec-block qx_child_dispatch_params ──────────────────────────────
@@ -978,32 +1292,108 @@ what did and did not stop.
    The approved-base rule applies per child too: pin each child's base sha on its first
    dispatch (into `childDispatch[<child-id>].baseSha`) and reuse it on any re-dispatch — the
    integration branch moves every time a sibling merges, so re-resolving it is the same
-   permanent `transport_failure` dead end 6A documents. Record each fired routine into the
-   payload's `childDispatch[<child-id>]` with the same `{routineId,monitorUrl,specBranch,
-   baseSha,dispatchedAt}` shape, and **never fire a child that already has a live record and
-   is still `in_progress`** — that is the per-child form of Step 1's in-flight refusal.
+   permanent `transport_failure` dead end 6A documents.
 
-3. **Reap.** A child's routine terminates at an **open PR into the integration branch** and
-   publishes its gate evidence to `<branchPrefix><CHILD-ID>-gates`, exactly like a standalone
-   unit. Reaping is therefore `/quetrex:merge <child-id>`: it brings that evidence home,
-   proves it is pinned to the PR head, merges through `merge-gate.sh`, sets the child
-   `merged` and tears its branch down. Merging into the **integration branch** is the one
-   place this pipeline auto-merges — never into `main`. A merged child unblocks its
-   dependents, which the next tick picks up. A child the engine sent to `needs_clarity` stays
-   there: its **independent siblings keep running**, its **dependents WAIT** — never
-   auto-`needs_clarity` a dependent by association.
+   **Record the dispatch BEFORE touching the board.** The record is what the next tick reads
+   to know this child is running; the status write is only what the operator sees. In that
+   order, "a card says `in_progress` but no dispatch record exists" can never come out of
+   this path — and if it ever does (someone moved the card by hand), the planner treats it as
+   never-dispatched and it is launched, which is the same reading Step 1 gives a wedged single
+   unit. `attempts` is cumulative and `baseSha` is reused, so a `RECOVER` refire is bounded
+   and re-targets nothing:
 
-4. **Evaluate the terminus and print one line.** The exit condition is unchanged: the DAG
-   is at a **fixpoint** when **no child is in-flight (`in_progress`)** AND **the ready set
-   is empty**. It always terminates — each tick a child either advances toward `merged` /
-   `needs_clarity` or there is nothing left to launch. A child whose dependency is
-   `needs_clarity` is **permanently blocked until a human reworks that dependency**, so it
-   is part of the fixpoint, not a reason to keep ticking.
+   ```bash
+   # ── quetrex:exec-block qx_record_child_dispatch ──────────────────────────────
+   # Executable, and executed: test/epic-tick.test.sh drives it and then feeds the
+   # resulting payload straight back into qx_epic_tick_plan — the record written
+   # here IS the next tick's only evidence that this child is running.
+   qx_record_child_dispatch() {  # qx_record_child_dispatch <payload> <child-id> <routine-id> <spec-branch> <base-sha>
+     node -e '
+       const fs=require("fs");
+       const [file,cid,rid,spec,sha]=process.argv.slice(1);
+       const p=JSON.parse(fs.readFileSync(file,"utf8"));
+       p.childDispatch=p.childDispatch||{};
+       const prev=p.childDispatch[cid]||{};
+       const attempts=(Number(prev.attempts)||0)+1;
+       if(prev.routineId) p.childRecovered=(p.childRecovered||[]).concat([{child:cid,dispatch:prev}]);
+       p.childDispatch[cid]={ routineId:rid, monitorUrl:"https://claude.ai/code/routines/"+rid,
+                              specBranch:spec, baseSha:(prev.baseSha||sha),
+                              dispatchedAt:new Date().toISOString(), attempts };
+       fs.writeFileSync(file, JSON.stringify(p,null,2)+"\n");
+     ' "$1" "$2" "$3" "$4" "$5"
+   }
+   # ── end quetrex:exec-block qx_record_child_dispatch ─────────────────────────
 
-   - Not at the fixpoint → print `EPIC TICK: <n> in-flight, <m> ready, <k> blocked` and
-     exit the tick. The loop fires again next interval.
+   qx_record_child_dispatch "$PAYLOAD" "$CHILD_ID" "$ROUTINE_ID" "$CHILD_SPEC_BRANCH" "$CHILD_BASE_SHA"
+   # For the human watching the board from a phone — never read by the tick.
+   quetrex-api task-status "$CHILD_ID" in_progress || true
+   ```
+
+   **Never fire a child the planner did not put on a `LAUNCH` line.** That is the per-child
+   form of Step 1's in-flight refusal, and it is now a computed decision rather than a rule to
+   remember: a child with a live `childDispatch` record is `IN_FLIGHT` (or `PROBE`), and
+   neither is launchable.
+
+5. **Reap every `REAP` line.** A child's routine terminates at an **open PR into the
+   integration branch** and publishes its gate evidence to `<branchPrefix><CHILD-ID>-gates`,
+   exactly like a standalone unit. Reaping is therefore `/quetrex:merge <child-id>` — the
+   child identifier is `CODE-N.C`, the shape `quetrex-api create-child` returns, and
+   `/quetrex:merge` accepts it. It brings that evidence home, proves it is pinned to the PR
+   head, merges through `merge-gate.sh`, sets the child `merged` and tears its branch down.
+   Merging into the **integration branch** is the one place this pipeline auto-merges — never
+   into `main`. A merged child unblocks its dependents, which the next tick picks up. A child
+   the engine sent to `needs_clarity` stays there: its **independent siblings keep running**,
+   its **dependents WAIT** — never auto-`needs_clarity` a dependent by association.
+
+   The planner marks a child `REAP` on `pr_ready` **or** on an open PR seen directly on
+   GitHub. Both, deliberately: the cloud routine is forbidden from writing the board, so
+   waiting for `pr_ready` alone would strand every finished child, and the PR is the terminus
+   the routine actually produces.
+
+6. **Evaluate the terminus and print one line.** Re-plan after reaping (statuses moved) and
+   read the verdict off the planner rather than recomputing it: the DAG is at a **fixpoint**
+   when `FIXPOINT=yes` — nothing in flight, nothing awaiting a probe, nothing to reap, and
+   nothing launchable (`READY` and `RECOVER` both empty). A child whose dependency is
+   `needs_clarity` or `EXHAUSTED` is **permanently blocked until a human acts**, so it is part
+   of the fixpoint, not a reason to keep ticking.
+
+   ```bash
+   PLAN_OUT="$(qx_epic_tick_plan "$PAYLOAD" "$SNAP")" || exit 1
+   # NO eval — this was the twin of the one removed from task-rework.md, and it was
+   # reproduced: a `routineId` carrying a newline ("r1\nREAP=;touch /tmp/PWN;X=") makes the
+   # RECOVER note emit a SECOND physical line beginning `REAP=`. grep is line-based, so it
+   # matched, and eval ran it. The taint reaches here from the RemoteTrigger response via the
+   # local payload — narrower than a committed branchPrefix, but the same primitive, and the
+   # same "every fixture used a benign value so nothing exercised it" blind spot.
+   # Parsing the key/value lines directly needs no quoting scheme to be got right: a value is
+   # never part of a command, so it can never be executed. Only the known keys are accepted,
+   # and a value carrying a newline simply lands as two lines, the second matching no key.
+   IN_FLIGHT=""; READY=""; BLOCKED=""; REAP=""; SETTLED=""; FAILED=""
+   EXHAUSTED=""; PROBE=""; RECOVER=""; FIXPOINT=""; ALL_SETTLED_DONE=""
+   while IFS='=' read -r _k _v; do
+     case "$_k" in
+       IN_FLIGHT) IN_FLIGHT="$_v" ;; READY) READY="$_v" ;; BLOCKED) BLOCKED="$_v" ;;
+       REAP) REAP="$_v" ;; SETTLED) SETTLED="$_v" ;; FAILED) FAILED="$_v" ;;
+       EXHAUSTED) EXHAUSTED="$_v" ;; PROBE) PROBE="$_v" ;; RECOVER) RECOVER="$_v" ;;
+       FIXPOINT) FIXPOINT="$_v" ;; ALL_SETTLED_DONE) ALL_SETTLED_DONE="$_v" ;;
+     esac
+   done <<EOF
+$PLAN_OUT
+EOF
+   unset _k _v
+   if [ "$FIXPOINT" = "yes" ]; then
+     echo "EPIC FIXPOINT REACHED"
+   else
+     echo "EPIC TICK: $IN_FLIGHT in-flight, $READY ready, $BLOCKED blocked, $REAP to reap, $SETTLED settled"
+   fi
+   ```
+
+   - Not at the fixpoint → the line above is the whole output; exit the tick. The loop fires
+     again next interval.
    - At the fixpoint → print `EPIC FIXPOINT REACHED`, go to **Step 7**, and **stop the
-     loop**. A loop left running past the fixpoint is a defect.
+     loop**. A loop left running past the fixpoint is a defect. Carry `ALL_SETTLED_DONE`,
+     `FAILED` and `EXHAUSTED` into Step 7 — that is what tells a finished epic from a stalled
+     one, and it is the reason Step 7 no longer reads a mid-build child as a failure.
 
 ## Step 7 — Terminus + report
 
@@ -1026,9 +1416,15 @@ finds no verdict on the operator machine and denies every merge — which is why
 to happen by hand on GitHub, and why the post-merge bookkeeping (status -> `merged`, branch
 and worktree teardown) never ran.
 
-**Epic, at the fixpoint.** Partition the children:
+**Epic, at the fixpoint.** Partition the children **from the last `qx_epic_tick_plan` output**
+(`ALL_SETTLED_DONE`, and the per-child `CHILD` role lines) — never from an impression of how
+the build went. This is where the old fixpoint bug did its visible damage: it declared the
+fixpoint while wave one was still building, and this partition then reported healthy,
+mid-build children to the operator as failures needing rework. With `FIXPOINT=yes` there is
+by construction nothing in flight, so every child here is genuinely `SETTLED`, `FAILED`,
+`EXHAUSTED` or `BLOCKED` behind one of those:
 
-- **All children `merged`** → open the single **integration → main PR**
+- **All children `merged`** (`ALL_SETTLED_DONE=yes`) → open the single **integration → main PR**
   (`${BRANCH_PREFIX}<EPIC-ID>` → `main`) via the `git-workflow` agent or
   `gh pr create --base main --head "${BRANCH_PREFIX}<EPIC-ID>"`, so the merge gate has a
   PR to act on. That PR is the epic's terminus; it merges under the same `merge-gate.sh`
@@ -1056,9 +1452,12 @@ and worktree teardown) never ran.
   though every child passed — the integration tree is where cross-child breakage shows up,
   which is the entire reason this stage exists rather than trusting the children's verdicts.
 
-- **Any child `needs_clarity`, or blocked-waiting on one** → do **NOT** open the
-  integration PR. Report exactly which children **failed** and which are
-  **blocked-waiting** on a failed dependency. The user runs **`/quetrex:task-rework <child>`** on
+- **Any child `FAILED` (`needs_clarity`) or `EXHAUSTED`, or blocked-waiting on one** → do
+  **NOT** open the integration PR. Report exactly which children **failed** and which are
+  **blocked-waiting** on a failed dependency. An `EXHAUSTED` child is one whose cloud routine
+  was probed dead and had already used its `maxDispatchAttempts` — name its routine id, and
+  say that the engine deliberately stopped re-firing rather than loop. The user runs
+  **`/quetrex:task-rework <child>`** on
   each failure; on pass it auto-merges into the integration branch and **unblocks** its
   dependents. Re-running **`/quetrex:task-build <EPIC-ID>`** then resumes the dispatcher (Step 1
   resume path → Step 5) and drains the now-eligible dependents. Only when every child is
@@ -1082,6 +1481,15 @@ output inline.
   gates branch, and the loser's evidence silently overwrites the winner's.
 - `in_progress` with no recorded dispatch means **wedged, not running**. Resume it; never
   tell the operator a pipeline is running when nothing is.
+- **A dead routine is recoverable, but only on evidence.** Age (`dispatchStaleMinutes`,
+  default 90) never re-fires anything — it only obliges you to probe `dispatch.routineId`
+  with `RemoteTrigger action:"get"`. A probed `dead`/`gone` routine yields `RECOVERABLE` and
+  exactly one replacement fire, bounded by `maxDispatchAttempts` (default 2); past that the
+  answer is a human, never another fire. A guessed `dead` is a duplicate build.
+- **Nothing in the epic tick may be decided from a child's `in_progress` status** — nothing
+  writes it except the tick itself, for the operator to look at. In-flight is the
+  `childDispatch` record; done is `merged`/`deployed`/`complete`; finished-but-unreaped is
+  `pr_ready` **or** an open PR on GitHub. `qx_epic_tick_plan` computes all of it.
 - Never hardcode the cloud `environment_id`. It comes from the repo binding
   (`cloudEnvironmentId`) or `QUETREX_CLOUD_ENVIRONMENT_ID`; absent → stop with the bind-it
   instruction from Step 1a, and never guess a provisioning API.

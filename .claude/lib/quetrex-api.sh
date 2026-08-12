@@ -223,6 +223,7 @@ qapi() {
 qx_task_status() {
   local body
   body="$(node -e 'process.stdout.write(JSON.stringify({status:process.argv[1]}))' "$2")" || return 1
+  _qx_require_ref "$1" || return 1
   qapi PATCH "/api/tasks/$1" "$body" >/dev/null
 }
 
@@ -231,6 +232,7 @@ qx_task_status() {
 qx_task_ainote() {
   local body
   body="$(node -e 'process.stdout.write(JSON.stringify({aiNotes:process.argv[1]}))' "$2")" || return 1
+  _qx_require_ref "$1" || return 1
   qapi PATCH "/api/tasks/$1" "$body" >/dev/null
 }
 
@@ -239,6 +241,7 @@ qx_task_ainote() {
 qx_task_comment() {
   local body
   body="$(node -e 'process.stdout.write(JSON.stringify({body:process.argv[1]}))' "$2")" || return 1
+  _qx_require_ref "$1" || return 1
   qapi POST "/api/tasks/$1/comments" "$body" >/dev/null
 }
 
@@ -247,6 +250,7 @@ qx_task_comment() {
 qx_task_type() {
   local body
   body="$(node -e 'process.stdout.write(JSON.stringify({type:process.argv[1]}))' "$2")" || return 1
+  _qx_require_ref "$1" || return 1
   qapi PATCH "/api/tasks/$1" "$body" >/dev/null
 }
 
@@ -255,19 +259,175 @@ qx_task_type() {
 #   new child's human identifier (CODE-N.C) on stdout; returns 1 on failure.
 #   Requires QX_PROJECT_CODE (resolve_project). EPIC_ID is the parent's human id.
 # shellcheck disable=SC2329,SC2016
-qx_create_child() {
-  local body resp
-  body="$(node -e '
-    const [parentTaskId, projectCode, title, description] = process.argv.slice(1);
-    process.stdout.write(JSON.stringify({ parentTaskId, projectCode, title, description }));
-  ' "$1" "$QX_PROJECT_CODE" "$2" "$3")" || return 1
-  resp="$(qapi POST /api/tasks "$body")" || return 1
+# _qx_require_ref REF  -> 0 if REF is a task reference and nothing else.
+#   SEC-EPIC-2b. Every helper below interpolates its argument into the request PATH, and curl
+#   performs RFC 3986 dot-segment removal BEFORE sending — so `../admin/secrets` leaves as
+#   `GET /api/admin/secrets`, carrying the bearer token to a caller-chosen endpoint. qapi is
+#   built so the token never reaches argv or a log; that is worth nothing if the PATH is
+#   attacker-chosen. This predates the epic work (it was already reachable through
+#   qx_is_unblocked on main) and is closed here for every call site at once.
+#   A ref is a human identifier (SMA-1, or a child's SMA-1.2) or a UUID. Nothing else.
+#   The check is on the WHOLE value: grep -E '^...$' anchors PER LINE, so an embedded newline
+#   ("SMA-1\n../admin/secrets") satisfied a naive anchored match. Control characters are
+#   rejected outright rather than relying on curl's parser to refuse them downstream.
+_qx_require_ref() {
+  local ref="${1-}"
+  case "$ref" in
+    *[![:print:]]*) echo "quetrex-api: task reference contains a control character — refusing" >&2; return 1 ;;
+  esac
+  case "$ref" in
+    *$'\n'*|*$'\r'*|*/*|*..*) echo "quetrex-api: refusing a task reference that is not an identifier or a UUID: '$ref'" >&2; return 1 ;;
+  esac
+  if printf '%s' "$ref" | grep -qxE '[A-Za-z][A-Za-z0-9]*-[0-9]+(\.[0-9]+)?|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'; then
+    return 0
+  fi
+  echo "quetrex-api: refusing a task reference that is not an identifier or a UUID: '$ref'" >&2
+  return 1
+}
+
+_qx_trim() {
+  local s="${1-}"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+_qx_task_json() {
+  local ref json
+  ref="$(_qx_trim "${1-}")"
+  if [ -z "$ref" ]; then
+    return 1
+  fi
+  _qx_require_ref "$ref" || return 1
+  json="$(qapi GET "/api/tasks/$ref")" || return 1
+  printf '%s' "$json"
+}
+
+_qx_task_uuid() {
+  local ref json
+  ref="$(_qx_trim "${1-}")"
+  if [ -z "$ref" ]; then
+    echo "quetrex-api: missing task id" >&2
+    return 1
+  fi
+  json="$(_qx_task_json "$ref")" || {
+    echo "quetrex-api: could not read task '$ref'" >&2
+    return 1
+  }
   node -e '
     let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(1); }
-    if (o.identifier) { process.stdout.write(String(o.identifier)); process.exit(0); }
-    if (o.code && o.number != null) { process.stdout.write(`${o.code}-${o.number}`); process.exit(0); }
-    process.exit(1);
-  ' "$resp"
+    const id = typeof o.id === "string" ? o.id : "";
+    if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id)) {
+      process.exit(1);
+    }
+    process.stdout.write(id);
+  ' "$json" || {
+    echo "quetrex-api: task '$ref' came back without a usable id" >&2
+    return 1
+  }
+}
+
+qx_create_child() {
+  local parent_ref title desc parent_json parent_meta parent_uuid parent_code parent_child body resp ident
+
+  parent_ref="$(_qx_trim "${1-}")"
+  title="$(_qx_trim "${2-}")"
+  desc="${3-}"
+
+  if [ -z "$parent_ref" ]; then
+    echo "quetrex-api create-child: missing epic id (argument 1). Refusing to create anything — an empty parent makes the server create a TOP-LEVEL task, and a task cannot be deleted." >&2
+    return 1
+  fi
+  if [ -z "$title" ]; then
+    echo "quetrex-api create-child: missing child title (argument 2). Refusing to create anything." >&2
+    return 1
+  fi
+  if [ -z "${QX_PROJECT_CODE:-}" ]; then
+    echo "Run /quetrex:init" >&2
+    return 1
+  fi
+
+  # Prove the parent exists and get the id the API actually links by.
+  parent_json="$(_qx_task_json "$parent_ref")" || {
+    echo "quetrex-api create-child: parent task '$parent_ref' could not be read. Refusing to create a child that would land as a top-level task." >&2
+    return 1
+  }
+
+  # uuid US projectCode US childNumber ("" when top-level) US identifier, where
+  # US is \037. NOT tab: tab is IFS *whitespace*, so bash collapses a run of
+  # them into one delimiter and drops empty fields — a top-level parent (empty
+  # childNumber) would shift `identifier` into `parent_child` and trip the
+  # grandchild guard on every single valid parent. \037 is non-whitespace, so
+  # every field position is preserved exactly, empty or not.
+  parent_meta="$(node -e '
+    let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(1); }
+    const id = typeof o.id === "string" ? o.id : "";
+    if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id)) {
+      process.exit(2);
+    }
+    process.stdout.write([
+      id,
+      o.projectCode == null ? "" : String(o.projectCode),
+      o.childNumber == null ? "" : String(o.childNumber),
+      o.identifier == null ? "" : String(o.identifier),
+    ].join("\u001f"));
+  ' "$parent_json")" || {
+    echo "quetrex-api create-child: parent task '$parent_ref' came back without a usable UUID id. Refusing to create a child." >&2
+    return 1
+  }
+
+  IFS=$'\037' read -r parent_uuid parent_code parent_child ident <<<"$parent_meta"
+
+  # One level only — an epic decomposes once; children have no children.
+  if [ -n "$parent_child" ]; then
+    echo "quetrex-api create-child: '${ident:-$parent_ref}' is itself a child (childNumber=$parent_child). Epics decompose ONE level — no grandchildren. Refusing to create anything." >&2
+    return 1
+  fi
+
+  # A cross-project parent is a 404 at the server; say what actually happened.
+  if [ -n "$parent_code" ] && [ "$parent_code" != "$QX_PROJECT_CODE" ]; then
+    echo "quetrex-api create-child: parent '${ident:-$parent_ref}' belongs to project $parent_code, but this repo is bound to $QX_PROJECT_CODE. Refusing to create anything." >&2
+    return 1
+  fi
+
+  # parentTaskId is the parent's UUID — never its human identifier.
+  body="$(node -e '
+    const [parentTaskId, projectCode, title, description] = process.argv.slice(1);
+    const b = { parentTaskId, projectCode, title };
+    if (description) { b.description = description; }
+    process.stdout.write(JSON.stringify(b));
+  ' "$parent_uuid" "$QX_PROJECT_CODE" "$title" "$desc")" || return 1
+
+  resp="$(qapi POST /api/tasks "$body")" || return 1
+
+  # Trust nothing: a 201 proves a task was created, not that it was created as
+  # a CHILD. Print the identifier only if the link is really there.
+  node -e '
+    let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(1); }
+    const parentUuid = process.argv[2];
+    const parentRef = process.argv[3];
+    const code = o.projectCode || o.code || "";
+    const ident = o.identifier
+      || (code && o.number != null
+        ? `${code}-${o.number}${o.childNumber != null ? "." + o.childNumber : ""}`
+        : "");
+    const linked = typeof o.parentTaskId === "string"
+      && o.parentTaskId.toLowerCase() === parentUuid.toLowerCase();
+    if (!linked || o.childNumber == null) {
+      process.stderr.write(
+        `quetrex-api create-child: the server created ${ident || "a task"} as a TOP-LEVEL task ` +
+        `(parentTaskId=${JSON.stringify(o.parentTaskId ?? null)}, childNumber=${JSON.stringify(o.childNumber ?? null)}) ` +
+        `instead of a child of ${parentRef}. A task cannot be deleted — reconcile the board before retrying.\n`);
+      process.exit(3);
+    }
+    if (!/^[A-Za-z][A-Za-z0-9]*-\d+\.\d+$/.test(ident)) {
+      process.stderr.write(
+        `quetrex-api create-child: the created child has no CODE-N.C identifier (got ${JSON.stringify(ident)}). ` +
+        `The dispatcher and /quetrex:merge key off that shape.\n`);
+      process.exit(4);
+    }
+    process.stdout.write(ident + "\n");
+  ' "$resp" "$parent_uuid" "${ident:-$parent_ref}"
 }
 
 # qx_add_dep TASK_ID DEPENDS_ON_ID  -> POST /api/tasks/$ID/dependencies {dependsOnTaskId}
@@ -275,9 +435,31 @@ qx_create_child() {
 #   graph before any write (see /quetrex:task-build).
 # shellcheck disable=SC2329
 qx_add_dep() {
-  local body
-  body="$(node -e 'process.stdout.write(JSON.stringify({dependsOnTaskId:process.argv[1]}))' "$2")" || return 1
-  qapi POST "/api/tasks/$1/dependencies" "$body" >/dev/null
+  local task_ref dep_ref task_uuid dep_uuid body
+
+  task_ref="$(_qx_trim "${1-}")"
+  dep_ref="$(_qx_trim "${2-}")"
+
+  if [ -z "$task_ref" ]; then
+    echo "quetrex-api add-dep: missing task id (argument 1). Refusing to call the API." >&2
+    return 1
+  fi
+  if [ -z "$dep_ref" ]; then
+    echo "quetrex-api add-dep: missing dependency id (argument 2). Refusing to call the API." >&2
+    return 1
+  fi
+
+  task_uuid="$(_qx_task_uuid "$task_ref")" || return 1
+  dep_uuid="$(_qx_task_uuid "$dep_ref")" || return 1
+
+  if [ "$task_uuid" = "$dep_uuid" ]; then
+    echo "quetrex-api add-dep: '$task_ref' cannot depend on itself." >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC2016
+  body="$(node -e 'process.stdout.write(JSON.stringify({dependsOnTaskId:process.argv[1]}))' "$dep_uuid")" || return 1
+  qapi POST "/api/tasks/$task_uuid/dependencies" "$body" >/dev/null
 }
 
 # qx_is_unblocked TASK_ID  -> exit 0 if ready to start, 1 if still blocked.
@@ -287,10 +469,20 @@ qx_add_dep() {
 #   after each child auto-merge to refill the ready set.
 # shellcheck disable=SC2329
 qx_is_unblocked() {
-  local task
-  task="$(qapi GET "/api/tasks/$1")" || return 1
+  local ref task rc
+  ref="$(_qx_trim "${1-}")"
+  if [ -z "$ref" ]; then
+    echo "quetrex-api is-unblocked: missing task id — readiness UNDETERMINED." >&2
+    return 2
+  fi
+  _qx_require_ref "$ref" || return 1
+  task="$(qapi GET "/api/tasks/$ref")" || {
+    echo "quetrex-api is-unblocked: could not read '$ref' — readiness UNDETERMINED (do not dispatch)." >&2
+    return 2
+  }
   node -e '
-    let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(1); }
+    let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(2); }
+    if (o == null || typeof o !== "object") { process.exit(2); }
     const DONE = new Set(["merged", "deployed", "complete"]);
     if (typeof o.isBlocked === "boolean") { process.exit(o.isBlocked ? 1 : 0); }
     const deps = Array.isArray(o.dependencies) ? o.dependencies : [];
@@ -300,6 +492,11 @@ qx_is_unblocked() {
     }
     process.exit(0);
   ' "$task"
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "quetrex-api is-unblocked: '$ref' came back in an unreadable shape — readiness UNDETERMINED (do not dispatch)." >&2
+  fi
+  return "$rc"
 }
 
 # ---------------------------------------------------------------------------
