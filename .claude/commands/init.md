@@ -1103,7 +1103,6 @@ Summarize for the user:
 - **Worktree environment** — the `.worktreeinclude` entries written (or *"already
   current"*), and the note that they are git-ignored paths copied into worktrees, never
   committed.
-- **GitHub app** — installed already / offered and accepted / offered and declined.
 - **Engine pin** — the `enabledPlugins` written (`quetrex@quetrex: true` and the concrete
   `quetrex-factory@quetrex: <version>` pin), or *"already current"*; if the marketplace was
   unreachable, the note to run `/quetrex:update` once online to write the concrete factory pin.
@@ -1150,4 +1149,3 @@ Summarize for the user:
   defaults to `claude/` in step 3d, is recorded in the binding, and is used for this
   command's own adoption branch and by every downstream command.
 - Quetrex never asks about the Claude GitHub App: it is not used, not checked, and not reported. See 4g for why.
-  it.
