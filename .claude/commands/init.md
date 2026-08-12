@@ -1,5 +1,5 @@
 ---
-description: Link this repo to a Quetrex project (writes ./.quetrex/project.json with its branchPrefix) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, enable the quetrex-factory engine in enabledPlugins (never version-pinned) so its build gates run locally and in cloud routines, union in the permissions the pipeline needs, generate .worktreeinclude, offer /install-github-app, offer to import local env creds into the vault, open a PR). Usage: /quetrex:init [project name]
+description: Link this repo to a Quetrex project (writes ./.quetrex/project.json with its branchPrefix) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, enable the quetrex-factory engine in enabledPlugins (never version-pinned) so its build gates run locally and in cloud routines, union in the permissions the pipeline needs, generate .worktreeinclude, offer to import local env creds into the vault, open a PR). Usage: /quetrex:init [project name]
 argument-hint: "[project name — only used when the repo is not yet linked]"
 ---
 
@@ -16,8 +16,7 @@ plugin in `enabledPlugins` (step 4h) — the build engine that ships the
 `verify-gate.sh`/`merge-gate.sh`/`secret-scan.sh` hooks and the fat pipeline agents, so
 they run **both locally and in cloud routines** with no per-project copy required. It
 also **unions in** the permissions the pipeline needs (4e), writes a `.worktreeinclude`
-so worktrees are actually runnable (4f), and resolves the **required** Claude GitHub App
-step (4g) — required because without it PR-triggered review never fires and nothing says so. It
+so worktrees are actually runnable (4f). It
 never overwrites or silently deletes existing `.claude/`,
 `CLAUDE.md` body content, commands, other settings/hooks, or any git/Claude history, and
 it never removes or narrows a permission the repo already had. The **only** removals are
@@ -712,46 +711,34 @@ worktree) and never list a directory of build output.
 
 ---
 
-## 4g. Install the Claude GitHub App — REQUIRED, and the easiest thing to forget
+## 4g. (removed) — Quetrex does not use the Claude GitHub App
 
-**Do not let a new project finish adoption without resolving this.** Two things silently do
-not work without the App installed **on this repository**:
+**Deliberately absent. Do not reintroduce a check, a prompt, or a mention.**
 
-1. **PR-triggered review.** A routine that reviews each PR is delivered by GitHub webhooks,
-   and the docs are explicit that cloning access is not enough: *"Running `/web-setup` in
-   the CLI grants repository access for cloning, but it does not install the Claude GitHub
-   App and does not enable webhook delivery. GitHub triggers require installing the Claude
-   GitHub App."* So without it, PRs are simply never reviewed — and nothing errors. That
-   silence is the failure mode.
-2. **Auto-fix on a PR** (responding to failing checks / review comments) also requires it.
+Init used to detect the app and ask whether to install it. That is removed, on the operator's
+call, for a reason worth recording so nobody adds it back as a convenience:
 
-Cloud *builds* still work without it — a routine can clone and push using the connected
-GitHub account. It is the **event-driven** half that needs the App.
+- **The model cannot run `/install-github-app`.** It is a native interactive command driving a
+  GitHub OAuth flow in the operator's own browser. Asking *"Run it?"* and taking a **yes**
+  produced nothing while reading as handled. It happened in the field; the operator's words
+  were *"my partners would have thought it was taken care of and issues would have happened."*
+- **The install then asks a second question with a genuinely harmful answer.** It offers to set
+  up GitHub Actions workflows — which creates a **third execution location**, a GitHub runner.
+  A runner has no Claude login, so it demands its own `ANTHROPIC_API_KEY`. That is the entire
+  origin of this project's "we need an API key" problem, and the workflow it produces was
+  already deleted once for exactly that. A prompt where the wrong answer breaks the
+  architecture is a prompt that should not be asked.
+- **Quetrex gains nothing from it.** The reviewer, QA and security-reviewer all run inside the
+  cloud routine and publish to `<prefix><TASK>-gates`; `merge-gate.sh` reads those artifacts.
+  GitHub-side PR review is additive, not load-bearing, and the app without workflows delivers
+  none of it anyway.
 
-Detect it, and if it is missing, say so as an unfinished setup step rather than an optional
-extra:
-
-```bash
-SLUG="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null | sed -E 's#.*[:/]([^/]+/[^/]+?)(\.git)?$#\1#')"
-if [ -n "$SLUG" ] && gh api "repos/$SLUG/installation" >/dev/null 2>&1; then
-  echo "Claude GitHub App: installed on $SLUG — PR-triggered review can be wired."
-else
-  echo "Claude GitHub App: NOT installed on ${SLUG:-this repo} — PR review will never fire."
-fi
-```
-
-When it is missing, report it in the step-7 summary as an **outstanding action**, in these
-terms — one line, no jargon:
-
-> **Action needed:** install the Claude GitHub App on `<owner/repo>` (needs repo admin) —
-> run `/install-github-app`. Until then, pull requests in this repo are never reviewed
-> automatically, and nothing will warn you about it.
-
-Ask once, and **do not run `/install-github-app` without an explicit yes**. Adoption still
-completes if they decline — but it is recorded as outstanding, not as "optional", and
-`/quetrex:doctor` keeps reporting it until it is done.
+If an operator wants GitHub-side review on a repo real people push to, that is their decision
+to make outside Quetrex. Init does not raise it, `/quetrex:doctor` does not check for it, and
+neither reports it as outstanding.
 
 ---
+
 
 ## 4h. Arm the repo for cloud execution — `quetrex-arm`
 
@@ -1116,7 +1103,6 @@ Summarize for the user:
 - **Worktree environment** — the `.worktreeinclude` entries written (or *"already
   current"*), and the note that they are git-ignored paths copied into worktrees, never
   committed.
-- **GitHub app** — installed already / offered and accepted / offered and declined.
 - **Engine pin** — the `enabledPlugins` written (`quetrex@quetrex: true` and the concrete
   `quetrex-factory@quetrex: <version>` pin), or *"already current"*; if the marketplace was
   unreachable, the note to run `/quetrex:update` once online to write the concrete factory pin.
@@ -1162,5 +1148,4 @@ Summarize for the user:
 - Never hardcode a branch prefix, and never ask the user to pick one: `branchPrefix`
   defaults to `claude/` in step 3d, is recorded in the binding, and is used for this
   command's own adoption branch and by every downstream command.
-- `/install-github-app` is **asked about once**, never run unprompted, and adoption never blocks on
-  it.
+- Quetrex never asks about the Claude GitHub App: it is not used, not checked, and not reported. See 4g for why.

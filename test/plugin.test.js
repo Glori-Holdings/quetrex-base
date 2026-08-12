@@ -247,15 +247,44 @@ check('no shipped file still prescribes a feature/ branch prefix', () => {
   assert.deepStrictEqual(offenders, [], 'these still prescribe feature/ as the branch prefix:\n  ' + offenders.join('\n  '));
 });
 
-check('init states the Claude GitHub App as required, with the reason', () => {
+// INVERTED, deliberately, and recorded rather than quietly deleted. This assertion used to
+// REQUIRE that init present the Claude GitHub App as required/outstanding. That behavior was
+// removed on the operator's call, so the assertion now pins the opposite. Two reasons, both
+// measured in the field:
+//
+//   1. The model cannot run `/install-github-app` — it is a native interactive command driving
+//      a GitHub OAuth flow in the operator's own browser. init asked "Run it?", the operator
+//      answered yes, and NOTHING happened while the summary read as handled.
+//   2. That install flow then asks whether to set up GitHub Actions workflows, and yes there
+//      creates a third execution location — a runner with no Claude login, demanding its own
+//      ANTHROPIC_API_KEY. This project already deleted exactly that workflow once. A prompt
+//      whose wrong answer breaks the architecture should not be asked at all.
+//
+// Quetrex's gates run inside the cloud routine and publish to <prefix><TASK>-gates, which is
+// what merge-gate.sh reads. GitHub-side review is additive, and the app without workflows
+// delivers none of it anyway.
+check('init does NOT ask about the Claude GitHub App, and records why', () => {
   const init = read('.claude/commands/init.md');
-  assert.match(init, /GitHub App/, 'init must cover the Claude GitHub App');
-  assert.match(init, /does not enable webhook delivery|never reviewed/,
-    'init must say WHY the App matters: without it PR-triggered review never fires and nothing errors');
   assert.ok(
-    /REQUIRED|Action needed/.test(init),
-    'init must present the App as required/outstanding, not as an optional extra — it is the easiest step to forget',
+    !/run `?\/install-github-app`?\?/i.test(init),
+    'init must never ask "Run /install-github-app?" — it cannot run it, so a yes produces nothing while reading as done',
   );
+  // Scan the WHOLE file. This used to read only init.split('## 4h.')[0], which blinded it to
+  // the back half — and that is exactly where the miss lived: the step-7 summary still listed
+  // "GitHub app — installed already / offered and accepted / offered and declined", the very
+  // line whose "read as handled" was the reported defect.
+  assert.ok(
+    !/GitHub app\b[^\n]*offered/i.test(init),
+    'the step-7 summary must not report a GitHub App interaction — none can occur',
+  );
+  assert.ok(
+    !/\bREQUIRED\b[^\n]{0,80}GitHub App|GitHub App[^\n]{0,80}\bREQUIRED\b/i.test(init),
+    'init must not present the App as required — the pipeline does not use it',
+  );
+  assert.match(init, /^## 4g\. \(removed\)/m,
+    'the removal must be recorded in place, so the next person does not add the check back as a convenience');
+  assert.match(init, /third execution location/,
+    'the removal notice must name the real hazard: a runner with no Claude login demanding its own API key');
 });
 
 // --- 1. plugin.json manifest -----------------------------------------------
