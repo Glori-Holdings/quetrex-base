@@ -532,6 +532,31 @@ for cmd in "${CHAIN[@]}"; do
     SKIP_LINES="${SKIP_LINES}VERIFY SKIPPED: \`${cmd}\` not run in ${ROOT} — required env var ${MISSING_ENV_VAR} is unavailable in this checkout (declared in .env.example, unset here). BLOCKS nothing; the command is never proven and never counted as a pass.
 "
     SKIPPED_CMDS="${SKIPPED_CMDS:+$SKIPPED_CMDS, }\`${cmd}\`"
+    # RECORD THE SKIP IN THE LEDGER. This `continue` used to return before the ledger
+    # append below, so a declared-env skip left NO entry at all — and merge-gate's GATE 3
+    # requires an entry per chain command, reading absence as "never ran, deny". The two
+    # hooks therefore disagreed about what a sanctioned skip means: this one says "BLOCKS
+    # nothing", that one says "unprovable". Measured consequence in quetrex-demo, whose
+    # verify.json declares DEMO_DATABASE_URL for `npm run build`: with the var unset, that
+    # command was unprovable FOREVER, so no PR in the repo could pass GATE 3 — every
+    # ledger in its history carries lint and test and never build.
+    #
+    # The skip is a legitimate, human-confirmed state (the requiredEnv map is committed and
+    # `/quetrex:init` only writes it after an explicit confirmation), so it belongs in the
+    # evidence rather than in a log nobody parses. It is recorded as skipped — NOT as
+    # exit 0 — so nothing can mistake it for a pass: `exit` stays null and `skipped` is
+    # true. merge-gate decides what a skip is worth; this hook's job is to state it.
+    if [ -n "${LEDGER:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
+      node -e '
+        const fs=require("fs");
+        const [ledger,cmd,sha,cwd,varname,ts]=process.argv.slice(1);
+        fs.appendFileSync(ledger, JSON.stringify({
+          ts, cmd, cwd, sha, exit:null, skipped:true, skipReason:"requiredEnv",
+          missingEnv:varname,
+          tail:"SKIPPED: required env var "+varname+" is unavailable in this checkout"
+        })+"\n");
+      ' "$LEDGER" "$cmd" "$HEAD_SHA" "$ROOT" "$MISSING_ENV_VAR" "$ts" 2>/dev/null || true
+    fi
     continue
   fi
   now=$(date +%s)

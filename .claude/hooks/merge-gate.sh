@@ -1690,7 +1690,7 @@ evaluate_vector() {
     . as $all
     | [ $chain[]
         | . as $c
-        | ( [ $all[] | select(.cmd == $c) | {sha: (.sha // ""), exit: .exit} ] ) as $ent
+        | ( [ $all[] | select(.cmd == $c) | {sha: (.sha // ""), exit: (if (.skipped == true and .skipReason == "requiredEnv") then 0 else .exit end), skipped: (.skipped // false)} ] ) as $ent
         | ( [ $ent[] | select(.sha == $head and $head != "") ] | last ) as $athead
         | ( reduce ($ent | reverse)[] as $e ({};
               if has($e.sha) then . else .[$e.sha] = $e end) | [ .[] ] ) as $persha
