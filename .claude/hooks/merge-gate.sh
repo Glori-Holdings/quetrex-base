@@ -1700,9 +1700,16 @@ evaluate_vector() {
         # breaks the invariant this gate states about itself: a red for the merged commit is never
         # rescued. So: if ANY non-skipped entry at $head failed, the command stays red no
         # matter what follows it.
-        | ( [ $raw[] | select(.sha == $head and $head != "" and (.skipped | not) and .rawexit != null and .rawexit != 0) ] | length > 0 ) as $redathead
-        | ( [ $raw[] | {sha: .sha, exit: (if $redathead then 1 elif .skipped then 0 else .rawexit end), skipped: .skipped} ] ) as $ent
-        | ( [ $ent[] | select(.sha == $head and $head != "") ] | last ) as $athead
+        | ( [ $raw[] | select((.skipped | not) and .rawexit != null and .rawexit != 0) | .sha ] | unique ) as $redshas
+        | ( [ $raw[] | . as $e | {sha: $e.sha, exit: (if ($redshas | index($e.sha)) then 1 elif $e.skipped then 0 else $e.rawexit end), skipped: $e.skipped} ] ) as $ent
+        # A SKIP AT $head MUST NOT SHORTCUT THE WALK. If any sha carries a genuine failure,
+        # a clean skip at $head cannot stand in as the describing answer — otherwise a red at
+        # an artifact-only-range ANCESTOR (which GATE 3 treats as describing) is shadowed
+        # entirely and never reaches the bash walk below that would consult it. Leaving
+        # $athead null hands the decision to that walk, which owns the ancestor rule; it does
+        # NOT deny by itself. With no red anywhere, a clean skip still answers directly.
+        | ( ( [ $ent[] | select(.sha == $head and $head != "") ] | last ) as $last
+            | if ($last != null and $last.skipped and ($redshas | length) > 0) then null else $last end ) as $athead
         | ( reduce ($ent | reverse)[] as $e ({};
               if has($e.sha) then . else .[$e.sha] = $e end) | [ .[] ] ) as $persha
         | { cmd: $c, athead: $athead, persha: $persha }

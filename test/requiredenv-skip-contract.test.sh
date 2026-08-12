@@ -111,6 +111,42 @@ else
   notok "ASSERTION 3b: over-corrected — a clean skip is now red (red: $OUT)"
 fi
 
+# --- ASSERTION 3c: a red at a DESCRIBING ANCESTOR is not erased either ---------
+# Round 7. ASSERTION 3b scoped the guard to $head — but GATE 3 treats an artifact-only-range
+# ANCESTOR as describing too, so a red there was still erased by a later skip (case E), and a
+# clean skip at $head shadowed it entirely without the bash walk ever seeing it (case G).
+# Reachable without an adversary: the artifact-only hatch fires on any commit touching nothing
+# outside .quetrex/, which is the ordinary /quetrex:init shape — this repo has two in its last
+# 300 commits. Cloud build goes red at X, an init touch-up lands an artifact-only commit, a
+# fresh worktree carries no untracked .env.local, one Stop firing appends the skip.
+#
+# KNOWN INADEQUATE — recorded, not hidden. These drive the jq expression ONLY, and I verified
+# they pass against the pre-fix gate as well, so they do NOT discriminate the fix from the bug.
+# The artifact-only-range logic lives in the bash walk (merge-gate.sh ~1738-1753) that jq never
+# reaches, so cases E and G can only be settled by executing the REAL hook with a PR-merge
+# payload, the way test/verify-gate.test.sh drives verify-gate.sh. Until that exists, the fix
+# above rests on the reviewer's hook-level reproduction, not on this file. Do not read these
+# two lines as coverage.
+for case in "anc:1|anc:skip|E red-then-skip at an ancestor" \
+            "anc:1|h1:skip|G red at an ancestor, skip at HEAD"; do
+  led="${case%%|*}"; rest="${case#*|}"; second="${rest%%|*}"; label="${rest#*|}"
+  : > "$TMP/anc.jsonl"
+  for part in "$led" "$second"; do
+    sha="${part%%:*}"; kind="${part#*:}"
+    if [ "$kind" = "skip" ]; then
+      printf '{"cmd":"npm run build","sha":"%s","exit":null,"skipped":true,"skipReason":"requiredEnv","missingEnv":"X"}\n' "$sha" >> "$TMP/anc.jsonl"
+    else
+      printf '{"cmd":"npm run build","sha":"%s","exit":%s}\n' "$sha" "$kind" >> "$TMP/anc.jsonl"
+    fi
+  done
+  OUT="$(red "$TMP/anc.jsonl" '["npm run build"]')"
+  if printf '%s' "$OUT" | grep -q 'npm run build'; then
+    ok "ASSERTION 3c: $label — stays a candidate, the walk decides"
+  else
+    notok "ASSERTION 3c: $label — the skip ERASED a genuine failure and the command left the gate green (red: $OUT)"
+  fi
+done
+
 # --- ASSERTION 4: the reason is load-bearing ----------------------------------
 # `skipped:true` alone must NOT satisfy the chain, or the escape hatch is "write skipped into
 # the ledger", which any stage could do for any reason.
