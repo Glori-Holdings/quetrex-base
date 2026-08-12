@@ -547,15 +547,15 @@ for cmd in "${CHAIN[@]}"; do
     # exit 0 — so nothing can mistake it for a pass: `exit` stays null and `skipped` is
     # true. merge-gate decides what a skip is worth; this hook's job is to state it.
     if [ -n "${LEDGER:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
-      node -e '
-        const fs=require("fs");
-        const [ledger,cmd,sha,cwd,varname,ts]=process.argv.slice(1);
-        fs.appendFileSync(ledger, JSON.stringify({
-          ts, cmd, cwd, sha, exit:null, skipped:true, skipReason:"requiredEnv",
-          missingEnv:varname,
-          tail:"SKIPPED: required env var "+varname+" is unavailable in this checkout"
-        })+"\n");
-      ' "$LEDGER" "$cmd" "$HEAD_SHA" "$ROOT" "$MISSING_ENV_VAR" "$ts" 2>/dev/null || true
+      # jq, not node, and NOT swallowed. Every other ledger append in this file uses jq, and
+      # should_skip_for_env has already proven jq present to read requiredEnv at all. A
+      # `node -e ... || true` here vanished silently in an armed repo without node — and the
+      # skip entry vanishing is exactly the deadlock this change exists to close.
+      jq -cn \
+        --arg ts "$ts" --arg cmd "$cmd" --arg cwd "$ROOT" \
+        --arg sha "$HEAD_SHA" --arg v "$MISSING_ENV_VAR" \
+        '{ts:$ts,cmd:$cmd,cwd:$cwd,sha:$sha,exit:null,skipped:true,skipReason:"requiredEnv",missingEnv:$v,tail:("SKIPPED: required env var "+$v+" is unavailable in this checkout")}' \
+        >> "$LEDGER"
     fi
     continue
   fi
