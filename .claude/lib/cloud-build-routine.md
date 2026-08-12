@@ -212,17 +212,24 @@ test suite, so an edit here is an edit to tested behaviour:
     git -c user.name='quetrex-bot' -c user.email='quetrex-bot@users.noreply.github.com' \
       commit -q -m "chore(gates): {{TASK}} gate artifacts for $HEAD_SHA" \
       || { echo "transport_failure: cannot commit the gate artifacts" >&2; exit 1; }
-    # Idempotent AND hook-legal. `git push -f` / `--force` is DENIED outright by
-    # deny-guard.sh, which the engine you installed in step 1 ships, so the old
-    # `push -f` here dies the moment a task is built twice and the gates branch
-    # already exists. Delete-then-push needs no remote-tracking ref (this branch
-    # was just created locally, so `--force-with-lease` would fail "stale info").
-    # The delete SPELLS THE BRANCH NAME OUT rather than passing the variable:
-    # that same deny-guard.sh treats a remote ref delete as catastrophic and
-    # permits it only in the disposable quetrex-spec/* and *-gates namespaces.
-    # A PreToolUse hook is handed the command BEFORE the shell expands it, so a
-    # bare variable is opaque to that rule and the delete is denied. Same value,
-    # written where the guard can read the namespace.
+    # WHAT THIS BRANCH IS, and why replacing it is safe. `<prefix><TASK>-gates` is a
+    # DISPOSABLE evidence branch. It holds only this run's gate artifacts, it is
+    # never merged, and `/quetrex:merge` deletes it as soon as it has read them. It
+    # carries no source code and nothing else depends on it. Rebuilding a task
+    # legitimately republishes it, so the publication has to be idempotent.
+    #
+    # Replacing it is a delete-then-push rather than a force-push because this
+    # branch was just created locally and has no remote-tracking ref, so
+    # `--force-with-lease` would fail "stale info". Both the delete and the push
+    # name the branch literally rather than passing a variable, because the
+    # operator's own safety hooks read a command before the shell expands it and a
+    # destructive operation should be legible to them — an unexpanded variable
+    # hides which ref is being removed from the human and the tooling alike.
+    #
+    # If your own judgement says this delete is unsafe, DO NOT work around it and
+    # do not rephrase it. Stop and report `transport_failure` naming this step. A
+    # refused publication costs one re-dispatch; a mis-targeted ref delete does not
+    # come back.
     if git ls-remote --exit-code --heads origin "$GATES_BRANCH" >/dev/null 2>&1; then
       git push --quiet origin --delete "{{BRANCH_PREFIX}}{{TASK}}-gates" || exit 1
     fi

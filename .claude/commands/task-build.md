@@ -785,16 +785,17 @@ Publish it — idempotently, and never with a force-push:
 # construction (it carries only the plan JSON for one dispatch), so replacing it
 # wholesale is the correct semantic, not a workaround.
 #
-# WHY THE DELETE SPELLS THE NAMESPACE OUT INSTEAD OF USING "$SPEC_BRANCH".
-# deny-guard.sh treats a remote ref DELETE as catastrophic — it removes the
-# ref outright, which is less recoverable than the force-push it already
-# denies — and permits it only for the two namespaces this pipeline
-# republishes by construction: quetrex-spec/* and *-gates. A PreToolUse hook
-# is handed the command text BEFORE the shell expands it, so `--delete
-# "$SPEC_BRANCH"` is indistinguishable from `--delete "$BASE_BRANCH"` and is
-# refused. `quetrex-spec/$TASK_ID` is the SAME VALUE (that is exactly how
-# SPEC_BRANCH was defined above) written so the guard can see the namespace.
-# Do not "simplify" it back to the variable — the dispatch dies at the deny.
+# WHY THE DELETE NAMES THE BRANCH LITERALLY.
+# A remote ref delete removes the ref outright, so which ref is being removed
+# should be legible to the human reading the command and to the tooling that
+# inspects it — and a PreToolUse hook is handed the command text BEFORE the
+# shell expands it, so `--delete "$SPEC_BRANCH"` shows a reader nothing about
+# the target. `quetrex-spec/$TASK_ID` is the same value SPEC_BRANCH was defined
+# from, written so the target is visible rather than inferred. Keep it that way
+# for the same reason you would not hide a destructive path behind a variable.
+#
+# If your own judgement says this delete is unsafe, do NOT rephrase it to get it
+# through. Stop and report `transport_failure` naming this step.
 if git -C "$TMP_WT" ls-remote --exit-code --heads origin "$SPEC_BRANCH" >/dev/null 2>&1; then
   git -C "$TMP_WT" push --quiet origin --delete "quetrex-spec/$TASK_ID" || exit 1
 fi
@@ -973,10 +974,18 @@ never an afterthought. Make exactly these three calls, in exactly this order:
 3. `action:"update"` on that same id with `{"enabled": false}` — **immediately**, before you
    report anything to the user. This is what cancels the still-pending `run_once_at`.
 
-Then **confirm the disarm from the tool's own response**: `next_run_at` must come back null
-or absent. If it still carries a timestamp, repeat step 3 — a second build is already
-scheduled and every second you spend reporting instead of disarming is a second closer to it
-firing. Never report a dispatch as successful while `next_run_at` is set.
+Then **confirm the disarm the way the API actually reports it**: check `enabled` is `false`.
+
+Do NOT wait for `next_run_at` to clear. It does not. This instruction previously said the
+field "must come back null or absent" and told you to repeat step 3 until it did — measured
+against the live API, a disabled routine still returns a future `next_run_at`, and every
+historical trigger on this account shows the same disabled-with-future-timestamp shape. So the
+old instruction was an infinite loop written as a safety check: a dispatcher following it
+literally never reports, and the field it was watching was never the gate.
+
+`enabled: false` is the gate. If you want positive proof rather than a field read, call
+`action:"list_runs"` on the routine — exactly one run session means the schedule did not fire
+a second time. That is the property that actually matters, and it is observable.
 
 Disabling the routine does not touch the run already in flight; it only prevents the
 schedule from firing again. There is nothing to re-enable afterwards — a routine is fired
