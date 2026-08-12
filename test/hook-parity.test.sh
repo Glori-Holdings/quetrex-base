@@ -71,9 +71,19 @@ do
 done
 
 if [ -n "$FACTORY" ]; then
-  echo "# comparing against published copies at: $FACTORY"
+  echo "# comparing published copies at $FACTORY against main's hooks"
+  TMPMAIN="$(mktemp -d)"; trap 'rm -rf "$TMPMAIN"' EXIT
   for n in $FLOOR; do
-    a="$HOOKS/$n.sh"; b="$FACTORY/$n.sh"
+    git -C "$ROOT" show "main:.claude/hooks/$n.sh" > "$TMPMAIN/$n.sh" 2>/dev/null || cp "$HOOKS/$n.sh" "$TMPMAIN/$n.sh"
+  done
+  for n in $FLOOR; do
+    # COMPARE AGAINST main, NOT THE WORKING TREE. The invariant is "what ships equals what is
+    # on main" — armed repos and cloud routines run the published copy, so it must never LEAD
+    # main. A feature branch that legitimately changes a hook is ahead of both, and comparing
+    # the working tree here failed every such branch and, worse, tempted a premature republish
+    # (which then made the published copy lead main — the exact hazard, inverted). Publishing
+    # is part of landing on main, not part of the branch.
+    a="$TMPMAIN/$n.sh"; b="$FACTORY/$n.sh"
     if [ ! -f "$b" ]; then
       notok "ASSERTION 3: $n.sh is NOT published in quetrex-factory — armed repos run without it"
     elif cmp -s "$a" "$b"; then
