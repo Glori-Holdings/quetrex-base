@@ -1691,17 +1691,21 @@ evaluate_vector() {
     | [ $chain[]
         | . as $c
         | ( [ $all[] | select(.cmd == $c) | {sha: (.sha // ""), rawexit: .exit, skipped: ((.skipped == true) and (.skipReason == "requiredEnv"))} ] ) as $raw
-        # A DESCRIBING RED DOMINATES A LATER SKIP. `athead` takes the LAST entry at $head, so
-        # mapping a skip to exit 0 before that selection let a skip appended AFTER a genuine
-        # failure at the SAME commit erase it — a command that measurably exited non-zero on
-        # the merged commit passed the gate. Reproduced with the real hooks: red run, then the
-        # operator clears the env value, then one Stop firing appends the skip. That is the
-        # same shape as the transported-evidence shadowing already documented above, and it
-        # breaks the invariant this gate states about itself: a red for the merged commit is never
-        # rescued. So: if ANY non-skipped entry at $head failed, the command stays red no
-        # matter what follows it.
+        # A DESCRIBING RED DOMINATES A LATER SKIP AT THE SAME SHA. `athead` takes the LAST
+        # entry at $head, so mapping a skip to exit 0 before that selection let a skip appended
+        # AFTER a genuine failure at the SAME commit erase it — a command that measurably
+        # exited non-zero on the merged commit passed the gate. Reproduced with the real hooks:
+        # red run, then the operator clears the env value, then one Stop firing appends the
+        # skip. That is the same shape as the transported-evidence shadowing already documented
+        # above, and it breaks the invariant this gate states about itself: a red for the merged
+        # commit is never rescued. So: if a SKIP shares a sha with a genuine non-skipped
+        # failure, that skip stays red no matter what follows it. A non-skipped entry is always
+        # real evidence from an actual run — it is NEVER overridden by another shas history, or
+        # this gate would deny every future genuine green for a command that failed even once
+        # anywhere in the ledger (reproduced: red exit 1, then a genuine re-run at the SAME sha
+        # exits 0 — that second run is real proof and must not be buried).
         | ( [ $raw[] | select((.skipped | not) and .rawexit != null and .rawexit != 0) | .sha ] | unique ) as $redshas
-        | ( [ $raw[] | . as $e | {sha: $e.sha, exit: (if ($redshas | index($e.sha)) then 1 elif $e.skipped then 0 else $e.rawexit end), skipped: $e.skipped} ] ) as $ent
+        | ( [ $raw[] | . as $e | {sha: $e.sha, exit: (if $e.skipped then (if ($redshas | index($e.sha)) then 1 else 0 end) else $e.rawexit end), skipped: $e.skipped} ] ) as $ent
         # A SKIP AT $head MUST NOT SHORTCUT THE WALK. If any sha carries a genuine failure,
         # a clean skip at $head cannot stand in as the describing answer — otherwise a red at
         # an artifact-only-range ANCESTOR (which GATE 3 treats as describing) is shadowed
@@ -1710,8 +1714,18 @@ evaluate_vector() {
         # NOT deny by itself. With no red anywhere, a clean skip still answers directly.
         | ( ( [ $ent[] | select(.sha == $head and $head != "") ] | last ) as $last
             | if ($last != null and $last.skipped and ($redshas | length) > 0) then null else $last end ) as $athead
-        | ( reduce ($ent | reverse)[] as $e ({};
-              if has($e.sha) then . else .[$e.sha] = $e end) | [ .[] ] ) as $persha
+        # THE WALKS OWN CANDIDATE LIST MUST HONOR THE SAME DEFERRAL. Nulling $athead above
+        # sends the decision to the bash walk below, which picks the FIRST persha candidate
+        # connected to $head by an artifact-only range and stops there. But $head trivially
+        # satisfies that check against itself (an empty range is vacuously artifact-only), so if
+        # $head own skip entry were still in $persha, the walk would immediately re-accept the
+        # very skip $athead just refused to trust — never reaching the ancestor red that
+        # $athead-nulling exists to surface. So: whenever a genuine red exists anywhere for this
+        # command, drop skip entries from $persha too; the walk must be forced past them onto
+        # real (non-skip) evidence — either the connected ancestor red, or nothing at all.
+        | ( ( reduce ($ent | reverse)[] as $e ({};
+              if has($e.sha) then . else .[$e.sha] = $e end) | [ .[] ] )
+            | if ($redshas | length) > 0 then [ .[] | select(.skipped | not) ] else . end ) as $persha
         | { cmd: $c, athead: $athead, persha: $persha }
         | select(.athead == null or .athead.exit != 0) ]
   ' "$LEDGER" 2>/dev/null)
