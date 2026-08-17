@@ -36,24 +36,48 @@ notok() { FAIL=$((FAIL+1)); echo "NOT OK - $1"; }
 
 [ -f "$SETTINGS" ] || { echo "NOT OK - settings not found: $SETTINGS"; exit 1; }
 
-# Plugin-owned script basenames, committed so ASSERTION 1 runs in a fresh clone and
-# in CI where no plugin cache exists. ASSERTION 2 recomputes this from the real
-# hooks.json files wherever they are reachable and fails on drift, so the list
-# cannot rot into decoration.
+# Plugin-owned script basenames, PER OWNING PLUGIN, committed so ASSERTION 1 runs
+# in a fresh clone and in CI where no plugin cache exists. ASSERTION 2 recomputes
+# these from the real hooks.json files wherever they are reachable and fails on
+# drift, so the lists cannot rot into decoration.
 #
 # auto-format.sh is listed deliberately: factory ships the same role as format.sh
 # under a different basename, so matching on filename alone would miss it.
-OWNED='deny-guard.sh
+FACTORY_OWNED='deny-guard.sh
 secret-scan.sh
 enforce-branch.sh
 merge-gate.sh
 verify-gate.sh
 format.sh
 auto-format.sh
-right-size-router.sh
-session-state.sh
+right-size-router.sh'
+QUETREX_OWNED='session-state.sh
 quetrex-update-check.sh
 edit-gate.sh'
+
+# WHICH PLUGINS ARE ACTUALLY ENABLED HERE. This is the whole point, and getting it
+# wrong inverts the test into a hazard. A script is only a DUPLICATE if the plugin
+# that owns it is enabled in THIS repo. In a repo with the plugin disabled, that
+# same registration is not a duplicate — it is the only safety floor there is, and
+# a test that demanded its removal would be telling the operator to disarm the repo.
+# dealerq-2026 is exactly that shape today: factory disabled, hooks unwired, no
+# floor at all. Never let this file argue for more of that.
+enabled() {  # enabled <plugin-key>  -> 0 if truthy in enabledPlugins
+  node -e '
+    const fs=require("fs");
+    let j; try { j=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); } catch(e) { process.exit(1); }
+    const v=((j||{}).enabledPlugins||{})[process.argv[2]];
+    process.exit((v===true||(Array.isArray(v)&&v.length))?0:1);
+  ' "$SETTINGS" "$1" 2>/dev/null
+}
+
+OWNED=""
+if enabled "quetrex-factory@quetrex"; then OWNED="$FACTORY_OWNED"; FACTORY_ON=yes; else FACTORY_ON=no; fi
+if enabled "quetrex@quetrex"; then OWNED="$(printf '%s\n%s' "$OWNED" "$QUETREX_OWNED" | grep -v '^$')"; QUETREX_ON=yes; else QUETREX_ON=no; fi
+echo "# enabled here: quetrex-factory=$FACTORY_ON quetrex=$QUETREX_ON"
+
+NO_PLUGIN_ENABLED=0
+[ -z "$OWNED" ] && NO_PLUGIN_ENABLED=1
 
 # Every hook command this repo's settings register, across every event.
 CMDS="$(node -e '
@@ -67,17 +91,21 @@ CMDS="$(node -e '
   process.stdout.write(out.join("\n"));
 ' "$SETTINGS" 2>/dev/null)"
 
-# --- ASSERTION 1: no plugin-owned script is registered here ------------------
-DUPES=0
-while IFS= read -r script; do
-  [ -n "$script" ] || continue
-  hits="$(printf '%s' "$CMDS" | grep -F -- "$script" || true)"
-  if [ -n "$hits" ]; then
-    DUPES=$((DUPES+1))
-    notok "ASSERTION 1: $script is registered by .claude/settings.json AND owned by an enabled plugin — it will run TWICE per event: $(printf '%s' "$hits" | tr '\n' ' ')"
-  fi
-done <<< "$OWNED"
-[ "$DUPES" -eq 0 ] && ok "ASSERTION 1: this repo registers none of the $(printf '%s' "$OWNED" | grep -c .) plugin-owned hook scripts"
+# --- ASSERTION 1: no ENABLED-plugin-owned script is registered here ----------
+if [ "$NO_PLUGIN_ENABLED" -eq 1 ]; then
+  ok "ASSERTION 1: no Quetrex plugin is enabled here, so nothing it ships can be a duplicate — this repo's own registrations are its only floor and must NOT be removed"
+else
+  DUPES=0
+  while IFS= read -r script; do
+    [ -n "$script" ] || continue
+    hits="$(printf '%s' "$CMDS" | grep -F -- "$script" || true)"
+    if [ -n "$hits" ]; then
+      DUPES=$((DUPES+1))
+      notok "ASSERTION 1: $script is registered by .claude/settings.json AND owned by an ENABLED plugin — it will run TWICE per event: $(printf '%s' "$hits" | tr '\n' ' ')"
+    fi
+  done <<< "$OWNED"
+  [ "$DUPES" -eq 0 ] && ok "ASSERTION 1: this repo registers none of the $(printf '%s' "$OWNED" | grep -c .) scripts owned by the plugins enabled here"
+fi
 
 # --- ASSERTION 2: the owned list still matches the real plugins --------------
 # Recompute from whatever plugin copies are reachable. Absence is reported, never
@@ -102,10 +130,14 @@ if [ -n "$FOUND" ]; then
         }
     process.stdout.write([...s].sort().join("\n"));
   ' "$FOUND" 2>/dev/null)"
+  # Compare against the FULL committed catalogue, never the enabled-filtered $OWNED.
+  # Drift in what factory ships is a fact about factory, not about whether this
+  # particular repo happens to enable it — checking the filtered list would report
+  # phantom drift in every repo with the plugin switched off.
   MISSING=""
   while IFS= read -r s; do
     [ -n "$s" ] || continue
-    printf '%s\n' "$OWNED" | grep -qxF "$s" || MISSING="$MISSING $s"
+    printf '%s\n%s' "$FACTORY_OWNED" "$QUETREX_OWNED" | grep -qxF "$s" || MISSING="$MISSING $s"
   done <<< "$LIVE"
   if [ -z "$MISSING" ]; then
     ok "ASSERTION 2: every script the live quetrex-factory registers is in the committed owned-list (checked against $(basename "$(dirname "$(dirname "$FOUND")")"))"
