@@ -261,8 +261,16 @@ NAMES_VAR5="$(printf '%s\n' "$OUT5" | grep -c 'QX_INTEG_DATABASE_URL')"
   || fail "RUNG5: expected exactly 1 VERIFY SKIPPED line, got $SKIPS5 (out: [$OUT5])"
 [ "$NAMES_VAR5" -ge 1 ] && pass "RUNG5: the skip line names QX_INTEG_DATABASE_URL" \
   || fail "RUNG5: the skip line never names the variable (out: [$OUT5])"
-[ "$LEDGER5" = 0 ] && pass "RUNG5: the ledger has 0 lines for the skipped command (skip containment)" \
-  || fail "RUNG5: expected 0 ledger lines for npm run build, got $LEDGER5"
+# CONTRACT CHANGED, recorded rather than re-anchored. This required ZERO ledger lines for
+# a skipped command. That absence was the deadlock: merge-gate's GATE 3 demands an entry
+# per chain command and read "no entry" as "never ran -> deny", so in this very fixture
+# shape the command was unprovable forever and no PR could merge. The skip is now RECORDED
+# as skipped:true / skipReason:"requiredEnv" / exit:null — never as a pass — and GATE 3
+# accepts exactly that shape and nothing else. Containment still holds: it is one line, it
+# is not an exit 0, and any other skipReason stays red (see
+# test/requiredenv-skip-contract.test.sh).
+[ "$LEDGER5" = 1 ] && pass "RUNG5: the ledger has exactly 1 RECORDED skip line for the skipped command (not a pass, not an absence)" \
+  || fail "RUNG5: expected exactly 1 recorded skip line for npm run build, got $LEDGER5"
 
 # --- CONTAINMENT, re-proved, not assumed --------------------------------
 [ -f "$FIX/.quetrex/ESCALATION" ] && pass "RUNG5 CONTAINMENT: a skip-only run does not clear a pre-seeded ESCALATION" \

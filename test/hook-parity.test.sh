@@ -71,9 +71,29 @@ do
 done
 
 if [ -n "$FACTORY" ]; then
-  echo "# comparing against published copies at: $FACTORY"
+  echo "# comparing published copies at $FACTORY against main's hooks"
+  TMPMAIN="$(mktemp -d)"; trap 'rm -rf "$TMPMAIN"' EXIT
+  BASELINE_OK=1
   for n in $FLOOR; do
-    a="$HOOKS/$n.sh"; b="$FACTORY/$n.sh"
+    # NO SILENT FALLBACK TO THE WORKING TREE. This used to `|| cp "$HOOKS/$n.sh"`, so in a
+    # single-branch clone (where `main` does not resolve) the baseline BECAME the branch — and
+    # the test reported 16/16 PASS on a published copy that leads main, while printing
+    # "comparing against main's hooks". Fail-closed: if no baseline resolves, say so and stop.
+    if ! git -C "$ROOT" show "origin/main:.claude/hooks/$n.sh" > "$TMPMAIN/$n.sh" 2>/dev/null \
+    && ! git -C "$ROOT" show "main:.claude/hooks/$n.sh" > "$TMPMAIN/$n.sh" 2>/dev/null; then
+      notok "ASSERTION 3: cannot resolve a main baseline for $n.sh (no origin/main, no main) — refusing to compare the published copy against the working tree, which would pass a copy that LEADS main"
+      BASELINE_OK=0
+    fi
+  done
+  for n in $FLOOR; do
+    # COMPARE AGAINST main, NOT THE WORKING TREE. The invariant is "what ships equals what is
+    # on main" — armed repos and cloud routines run the published copy, so it must never LEAD
+    # main. A feature branch that legitimately changes a hook is ahead of both, and comparing
+    # the working tree here failed every such branch and, worse, tempted a premature republish
+    # (which then made the published copy lead main — the exact hazard, inverted). Publishing
+    # is part of landing on main, not part of the branch.
+    [ "$BASELINE_OK" = "1" ] || continue
+    a="$TMPMAIN/$n.sh"; b="$FACTORY/$n.sh"
     if [ ! -f "$b" ]; then
       notok "ASSERTION 3: $n.sh is NOT published in quetrex-factory — armed repos run without it"
     elif cmp -s "$a" "$b"; then
