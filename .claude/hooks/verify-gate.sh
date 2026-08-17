@@ -12,13 +12,17 @@
 # blocks one final time telling the agent to STOP self-healing and surface to
 # the user — so red code can never be silently reported as done.
 #
-# NON-NEGOTIABLE: there is NO way for red to pass and NO way to skip a fresh
-# verification and coast on a stale-green ledger. Specifically:
-#   - There is NO fast-skip. Every Stop/SubagentStop runs the chain and writes a
-#     fresh ledger cycle. A clean working tree does NOT let a prior green stand
-#     in for the current state (a green ledger line can be stale — from an older
-#     commit, or written before the current change landed). Correctness beats the
-#     cost of a rebuild; the right-size router already trims orchestration.
+# NON-NEGOTIABLE: there is NO way for red to pass and NO way to skip a
+# verification that could tell us something new. Specifically:
+#   - There is a NARROW, PROVEN fast-skip, nothing looser (see FAST-SKIP
+#     below). A clean tree alone does NOT stand in for the current state (a
+#     green ledger line can be stale) — that hole is why "NO fast-skip" used
+#     to be the rule. It fires ONLY when re-running is PROVABLY incapable of
+#     new information: tree clean, EVERY chain command has a genuine
+#     (non-skipped, latest-wins) exit:0 ledger entry pinned to the CURRENT
+#     HEAD, and no ESCALATION marker. Any miss — including a red at HEAD,
+#     itself evidence, not a reason to skip — runs the FULL chain as before.
+#     A skip writes NO ledger line, only one labelled stdout line on allow.
 #   - There is NO env-error laundering. A command that exits non-zero is RED,
 #     full stop — including exit 127 / "command not found" / ENOENT / "No such
 #     file or directory". A real test or build failure that happens to mention a
@@ -62,6 +66,7 @@
 #
 # The ONLY conditions that allow finish without a block:
 #   - not a git repo / no verify chain resolvable anywhere (nothing to gate), or
+#   - the FAST-SKIP fires (see "FAST-SKIP" below), or
 #   - the chain resolved AND every command either exited 0 or was declaratively
 #     SKIPPED for a genuinely-absent required env var (PROVEN green by exit
 #     codes; a skip is never itself a pass — see "DECLARATIVE ENV SKIP").
@@ -360,6 +365,50 @@ resolve_from_verify_json || resolve_from_claude_md || resolve_autodetect || {
   # No chain resolvable anywhere -> nothing to gate.
   exit 0
 }
+
+# --- FAST-SKIP: a commit already fully, genuinely proven is not re-proven --
+# Re-running the exact same chain against the exact same tree at the exact
+# same commit cannot produce new information. NOT declarative like requiredEnv
+# below — fires only when ALL THREE hold (cheapest-first, so a dirty tree
+# never pays for a ledger read):
+#   1. `git status --porcelain` is EMPTY (ignored files are outside its view —
+#      a real, documented limitation, not a claim of byte-for-byte identity);
+#   2. for $HEAD_SHA, the ledger's LATEST entry per (cmd, sha) — latest wins,
+#      so a later real failure at the same sha is never shadowed by an
+#      earlier pass, same dominance rule as merge-gate GATE 3 — is a genuine
+#      (non-skipped) exit:0 for EVERY command in $CHAIN. Missing, skipped, or
+#      red (even one) fails this and the full chain runs, same as always; a
+#      red at HEAD is evidence, never a reason to skip;
+#   3. no .quetrex/ESCALATION marker exists.
+# Recorded, never silent: one labelled stdout line on the allow path (plain
+# text, never JSON — same reason as the SKIP_LINES print further down). No
+# ledger line is ever written for a run that didn't happen — the existing
+# entries already ARE the proof, and merge-gate's GATE 3 reads them directly.
+FAST_SKIP=0
+if [ -z "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ] \
+   && [ ! -e "$ESCALATION" ] \
+   && [ -n "$HEAD_SHA" ] \
+   && [ -f "$LEDGER" ] \
+   && command -v jq >/dev/null 2>&1; then
+  CHAIN_JSON_FOR_SKIP=$(printf '%s\n' "${CHAIN[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))' 2>/dev/null)
+  if [ -n "$CHAIN_JSON_FOR_SKIP" ]; then
+    ALL_GREEN=$(jq -sc --argjson chain "$CHAIN_JSON_FOR_SKIP" --arg head "$HEAD_SHA" '
+      . as $all
+      | [ $chain[] as $c
+          | ( [ $all[] | select(type == "object" and (.cmd? // null) == $c and (.sha? // null) == $head) ] | last ) as $latest
+          | ($latest != null and ($latest.skipped != true) and $latest.exit == 0)
+        ]
+      | all
+    ' "$LEDGER" 2>/dev/null)
+    [ "$ALL_GREEN" = "true" ] && FAST_SKIP=1
+  fi
+fi
+
+if [ "$FAST_SKIP" -eq 1 ]; then
+  printf 'VERIFY SKIPPED (fast-skip): commit %s already has a complete green ledger entry for every command in the resolved chain, in %s (branch %s), and the working tree is clean — re-running would prove nothing new. 0 commands executed.\n' \
+    "$HEAD_SHA" "$ROOT" "${CUR_BRANCH:-<detached>}"
+  exit 0
+fi
 
 mkdir -p "$QDIR"
 

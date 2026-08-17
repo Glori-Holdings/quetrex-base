@@ -1090,17 +1090,20 @@ if [ "$HOOK" -ef "$REPO_ROOT/.claude/hooks/verify-gate.sh" ]; then
   OLD_HOOK_LINES="$(git -C "$REPO_ROOT" show 63bb114:.claude/hooks/verify-gate.sh 2>/dev/null | wc -l | tr -d ' ')"
   case "$OLD_HOOK_LINES" in ''|0|*[!0-9]*) OLD_HOOK_LINES=724 ;; esac
   DELTA=$((OLD_HOOK_LINES - HOOK_LINES))
-  # THRESHOLD LOWERED 50 -> 30, deliberately. This is a size PROXY for a deletion, not
-  # the load-bearing check — that is the four `needle` greps above, which assert the
-  # removed constructs are absent and still pass. A later commit legitimately ADDED lines
-  # here: the requiredEnv skip now records a ledger entry, because leaving no entry was
-  # read by merge-gate's GATE 3 as "never ran -> deny", making the command unprovable
-  # forever in any repo declaring requiredEnv. Holding a shrink-only proxy would mean the
+  # THRESHOLD LOWERED AGAIN, 30 -> -30, deliberately. This is a size PROXY for a
+  # deletion, not the load-bearing check — that is the four `needle` greps above,
+  # which assert the removed constructs are absent and still pass regardless of
+  # this number. It was lowered 50 -> 30 for the requiredEnv skip's ledger entry
+  # (merge-gate GATE 3 needs one to tell "never ran" from "declaratively
+  # skipped"), and is lowered again here for the FAST-SKIP feature (a bounded,
+  # single, well-commented addition — NOT the ~100-line main-checkout deferral
+  # this proxy exists to keep out; a reintroduction of THAT would still fail
+  # this bound by a wide margin). Holding a shrink-only proxy would mean the
   # file could never grow again for any reason, including a fix.
-  if [ "$DELTA" -ge 30 ]; then
-    pass "AC10: verify-gate.sh is at least 30 lines shorter than at 63bb114 (delta $DELTA)"
+  if [ "$DELTA" -ge -30 ]; then
+    pass "AC10: verify-gate.sh is within the -30-line growth bound of 63bb114 (delta $DELTA)"
   else
-    fail "AC10: verify-gate.sh is only $DELTA lines shorter than at 63bb114 (need >= 30)"
+    fail "AC10: verify-gate.sh is $DELTA lines vs 63bb114 (need >= -30) — looks like the deferral crept back in"
   fi
 else
   skip "AC10: line-delta-vs-63bb114 check not applicable — \$HOOK ($HOOK) is not quetrex-base's own copy"
@@ -1574,6 +1577,264 @@ if [ "$TRUE_ALONE_RAN" = "0" ]; then
   pass "ADV-L: the ledger has no line for bare \`true\` — verifyQuick's rejected chain never ran on its own"
 else
   fail "ADV-L: the ledger shows verifyQuick's \`true\` ran — the non-subset chain was trusted"
+fi
+
+# =============================================================================
+# AC-FASTSKIP — a commit that is ALREADY fully, genuinely proven green (clean
+# tree, every chain command has a non-skipped exit:0 ledger entry pinned to
+# the CURRENT HEAD sha, no ESCALATION marker) is not re-proven on the next
+# Stop/SubagentStop. Any ONE of those three conditions failing — a dirty
+# tree, a stale/incomplete/red ledger at HEAD, or an ESCALATION marker — must
+# still run the FULL chain exactly as before; re-running is never itself the
+# wrong answer, only a redundant one. Each chain command below appends one
+# line to a marker file OUTSIDE the fixture repo, so whether the chain
+# genuinely re-executed is directly observable as a line count rather than
+# inferred from the hook's own claims — the marker file lives under $TMPROOT,
+# a sibling of every fixture repo, so it never itself dirties any fixture's
+# git status.
+# =============================================================================
+mk_fastskip_repo() {  # mk_fastskip_repo <path> -- a repo where .quetrex/* is
+  # gitignored except verify.json, matching quetrex-base's OWN .gitignore, so
+  # the ledger/log/attempts files this hook writes never show up as untracked
+  # and a genuinely clean tree is achievable after a real run.
+  local d="$1"
+  git_init_repo "$d"
+  mkdir -p "$d/.quetrex"
+  cat > "$d/.gitignore" <<'GIEOF'
+.quetrex/*
+!.quetrex/verify.json
+GIEOF
+  git -C "$d" add .gitignore
+  git -C "$d" commit -q -m "chore: ignore quetrex runtime artifacts"
+}
+
+# -----------------------------------------------------------------------
+# FASTSKIP-1 — clean tree + a complete genuine green ledger at HEAD -> SKIPS,
+# prints exactly one labelled line naming the proven commit, and the chain
+# does NOT execute a second time.
+# -----------------------------------------------------------------------
+FFS1="$TMPROOT/fastskip1"
+mk_fastskip_repo "$FFS1"
+M_FS1="$TMPROOT/fastskip1-marker"
+jq -cn --arg c "echo ran >> $M_FS1" '{verify: [$c]}' > "$FFS1/.quetrex/verify.json"
+git -C "$FFS1" add .quetrex/verify.json
+git -C "$FFS1" commit -q -m "chore: fastskip1 verify chain"
+SHA_FS1="$(git -C "$FFS1" rev-parse HEAD)"
+
+CODE_FS1_RUN1=0
+run_hook "$FFS1" "Stop" >/dev/null 2>&1 || CODE_FS1_RUN1=$?
+if [ "$CODE_FS1_RUN1" -eq 0 ] && [ "$(line_count "$M_FS1")" = "1" ]; then
+  pass "FASTSKIP-1 SETUP: the chain genuinely ran on the first Stop (marker=1)"
+else
+  fail "FASTSKIP-1 SETUP: expected exit 0 + marker=1 after the first run, got exit $CODE_FS1_RUN1 marker=$(line_count "$M_FS1")"
+fi
+if [ -z "$(git -C "$FFS1" status --porcelain 2>/dev/null)" ]; then
+  pass "FASTSKIP-1 SETUP: the tree is clean after the first run (ledger/log/attempts are gitignored)"
+else
+  fail "FASTSKIP-1 SETUP: tree is not clean after the first run [$(git -C "$FFS1" status --porcelain 2>/dev/null)]"
+fi
+
+OUT_FS1_RUN2="$(run_hook "$FFS1" "Stop" 2>&1)"; CODE_FS1_RUN2=$?
+if [ "$CODE_FS1_RUN2" -eq 0 ] && [ "$(count_block_decisions "$OUT_FS1_RUN2")" = "0" ]; then
+  pass "FASTSKIP-1: second run on the same clean/green commit allows finish with no block"
+else
+  fail "FASTSKIP-1: expected exit 0 + 0 blocks on the second run, got exit $CODE_FS1_RUN2 (out: [$OUT_FS1_RUN2])"
+fi
+if printf '%s' "$OUT_FS1_RUN2" | grep -q "^VERIFY SKIPPED (fast-skip):.*$SHA_FS1"; then
+  pass "FASTSKIP-1: prints one labelled fast-skip line naming the proven commit"
+else
+  fail "FASTSKIP-1: no labelled fast-skip line naming $SHA_FS1 in [$OUT_FS1_RUN2]"
+fi
+if [ "$(line_count "$M_FS1")" = "1" ]; then
+  pass "FASTSKIP-1: the chain did NOT execute a second time (marker still 1)"
+else
+  fail "FASTSKIP-1: the chain ran again on a fast-skip-eligible commit (marker=$(line_count "$M_FS1"))"
+fi
+
+# -----------------------------------------------------------------------
+# FASTSKIP-2 — clean tree, but the green ledger evidence is pinned to an
+# OLDER sha than the current HEAD -> the chain runs (a stale green must
+# never authorize a newer commit).
+# -----------------------------------------------------------------------
+FFS2="$TMPROOT/fastskip2"
+mk_fastskip_repo "$FFS2"
+M_FS2="$TMPROOT/fastskip2-marker"
+jq -cn --arg c "echo ran >> $M_FS2" '{verify: [$c]}' > "$FFS2/.quetrex/verify.json"
+git -C "$FFS2" add .quetrex/verify.json
+git -C "$FFS2" commit -q -m "chore: fastskip2 verify chain"
+
+run_hook "$FFS2" "Stop" >/dev/null 2>&1
+COUNT_FS2_A="$(line_count "$M_FS2")"
+
+# Land a NEW commit -> a genuinely different HEAD with no ledger evidence yet.
+echo "more" >> "$FFS2/README.md"
+git -C "$FFS2" add README.md
+git -C "$FFS2" commit -q -m "chore: advance HEAD past the proven commit"
+
+OUT_FS2_RUN2="$(run_hook "$FFS2" "Stop" 2>&1)"
+if [ "$(line_count "$M_FS2")" = "$((COUNT_FS2_A + 1))" ]; then
+  pass "FASTSKIP-2: green evidence pinned to an OLDER sha does not authorize the new HEAD -- the chain re-ran"
+else
+  fail "FASTSKIP-2: expected the chain to run again at the new HEAD (marker $COUNT_FS2_A -> $((COUNT_FS2_A + 1))), got $(line_count "$M_FS2")"
+fi
+if printf '%s' "$OUT_FS2_RUN2" | grep -q '^VERIFY SKIPPED (fast-skip)'; then
+  fail "FASTSKIP-2: incorrectly printed a fast-skip line for a commit with no evidence of its own"
+else
+  pass "FASTSKIP-2: no fast-skip line printed"
+fi
+
+# -----------------------------------------------------------------------
+# FASTSKIP-3 — clean tree, but the ledger at HEAD is missing evidence for
+# ONE of the chain's two commands -> the chain runs (partial evidence is
+# not complete evidence).
+# -----------------------------------------------------------------------
+FFS3="$TMPROOT/fastskip3"
+mk_fastskip_repo "$FFS3"
+M_FS3A="$TMPROOT/fastskip3-marker-a"
+M_FS3B="$TMPROOT/fastskip3-marker-b"
+jq -cn --arg a "echo ran >> $M_FS3A" --arg b "echo ran >> $M_FS3B" '{verify: [$a, $b]}' > "$FFS3/.quetrex/verify.json"
+git -C "$FFS3" add .quetrex/verify.json
+git -C "$FFS3" commit -q -m "chore: fastskip3 two-command verify chain"
+SHA_FS3="$(git -C "$FFS3" rev-parse HEAD)"
+
+# Hand-seed the ledger with ONLY the first command's green entry at HEAD --
+# the second command has NO entry at all, so the evidence is incomplete.
+jq -cn --arg ts "2026-01-01T00:00:00Z" --arg cmd "echo ran >> $M_FS3A" --arg cwd "$FFS3" --arg sha "$SHA_FS3" \
+  '{ts:$ts,cmd:$cmd,cwd:$cwd,sha:$sha,exit:0,tail:"ok"}' > "$FFS3/.quetrex/verify-ledger.jsonl"
+
+OUT_FS3="$(run_hook "$FFS3" "Stop" 2>&1)"
+if [ "$(line_count "$M_FS3B")" -ge 1 ]; then
+  pass "FASTSKIP-3: the second (never-proven) command genuinely ran"
+else
+  fail "FASTSKIP-3: the second command never ran -- an incomplete ledger was treated as fully proven"
+fi
+if printf '%s' "$OUT_FS3" | grep -q '^VERIFY SKIPPED (fast-skip)'; then
+  fail "FASTSKIP-3: incorrectly fast-skipped a commit with an incomplete ledger"
+else
+  pass "FASTSKIP-3: no fast-skip line printed"
+fi
+
+# -----------------------------------------------------------------------
+# FASTSKIP-4 — clean tree, ledger at HEAD where one chain command genuinely
+# fails -> BLOCKS on the re-run; a red is evidence, never a reason to skip.
+# -----------------------------------------------------------------------
+FFS4="$TMPROOT/fastskip4"
+mk_fastskip_repo "$FFS4"
+M_FS4="$TMPROOT/fastskip4-marker"
+jq -cn --arg good "echo ran >> $M_FS4" --arg bad "exit 7" '{verify: [$good, $bad]}' > "$FFS4/.quetrex/verify.json"
+git -C "$FFS4" add .quetrex/verify.json
+git -C "$FFS4" commit -q -m "chore: fastskip4 verify chain with a genuine failure"
+
+OUT_FS4_RUN1="$(run_hook "$FFS4" "Stop" 2>&1)"
+COUNT_FS4_A="$(line_count "$M_FS4")"
+if [ "$(count_block_decisions "$OUT_FS4_RUN1")" = "1" ] && [ "$COUNT_FS4_A" = "1" ]; then
+  pass "FASTSKIP-4 SETUP: the first run genuinely fails on the second command and blocks"
+else
+  fail "FASTSKIP-4 SETUP: expected 1 block + marker=1, got blocks=$(count_block_decisions "$OUT_FS4_RUN1") marker=$COUNT_FS4_A"
+fi
+if [ -z "$(git -C "$FFS4" status --porcelain 2>/dev/null)" ]; then
+  pass "FASTSKIP-4 SETUP: the tree is clean after the red run"
+else
+  fail "FASTSKIP-4 SETUP: tree not clean after the red run [$(git -C "$FFS4" status --porcelain 2>/dev/null)]"
+fi
+
+OUT_FS4_RUN2="$(run_hook "$FFS4" "Stop" 2>&1)"
+if [ "$(count_block_decisions "$OUT_FS4_RUN2")" = "1" ]; then
+  pass "FASTSKIP-4: a clean tree with a genuine RED entry at HEAD still BLOCKS on the next run"
+else
+  fail "FASTSKIP-4: expected a block on the second run, got [$OUT_FS4_RUN2]"
+fi
+if printf '%s' "$OUT_FS4_RUN2" | grep -q '^VERIFY SKIPPED (fast-skip)'; then
+  fail "FASTSKIP-4: incorrectly fast-skipped a commit with a genuine failure in its ledger"
+else
+  pass "FASTSKIP-4: no fast-skip line printed"
+fi
+if [ "$(line_count "$M_FS4")" = "$((COUNT_FS4_A + 1))" ]; then
+  pass "FASTSKIP-4: the FULL chain (including the passing command) genuinely re-ran, not merely re-blocked from stale state"
+else
+  fail "FASTSKIP-4: expected marker $COUNT_FS4_A -> $((COUNT_FS4_A + 1)), got $(line_count "$M_FS4")"
+fi
+
+# -----------------------------------------------------------------------
+# FASTSKIP-5 — a modified TRACKED file (dirty tree) -> the chain runs.
+# -----------------------------------------------------------------------
+FFS5="$TMPROOT/fastskip5"
+mk_fastskip_repo "$FFS5"
+M_FS5="$TMPROOT/fastskip5-marker"
+jq -cn --arg c "echo ran >> $M_FS5" '{verify: [$c]}' > "$FFS5/.quetrex/verify.json"
+git -C "$FFS5" add .quetrex/verify.json
+git -C "$FFS5" commit -q -m "chore: fastskip5 verify chain"
+
+run_hook "$FFS5" "Stop" >/dev/null 2>&1
+COUNT_FS5_A="$(line_count "$M_FS5")"
+
+echo "dirty" >> "$FFS5/README.md"   # tracked file, modified but NOT committed
+
+OUT_FS5_RUN2="$(run_hook "$FFS5" "Stop" 2>&1)"
+if [ "$(line_count "$M_FS5")" = "$((COUNT_FS5_A + 1))" ]; then
+  pass "FASTSKIP-5: a modified tracked file (dirty tree) still runs the chain"
+else
+  fail "FASTSKIP-5: expected the chain to run again on a dirty tree, marker stayed at $(line_count "$M_FS5")"
+fi
+if printf '%s' "$OUT_FS5_RUN2" | grep -q '^VERIFY SKIPPED (fast-skip)'; then
+  fail "FASTSKIP-5: incorrectly fast-skipped a dirty tree"
+else
+  pass "FASTSKIP-5: no fast-skip line printed"
+fi
+
+# -----------------------------------------------------------------------
+# FASTSKIP-6 — an untracked file present (not gitignored) -> the chain runs.
+# -----------------------------------------------------------------------
+FFS6="$TMPROOT/fastskip6"
+mk_fastskip_repo "$FFS6"
+M_FS6="$TMPROOT/fastskip6-marker"
+jq -cn --arg c "echo ran >> $M_FS6" '{verify: [$c]}' > "$FFS6/.quetrex/verify.json"
+git -C "$FFS6" add .quetrex/verify.json
+git -C "$FFS6" commit -q -m "chore: fastskip6 verify chain"
+
+run_hook "$FFS6" "Stop" >/dev/null 2>&1
+COUNT_FS6_A="$(line_count "$M_FS6")"
+
+echo "new" > "$FFS6/untracked-file.txt"   # untracked, NOT gitignored
+
+OUT_FS6_RUN2="$(run_hook "$FFS6" "Stop" 2>&1)"
+if [ "$(line_count "$M_FS6")" = "$((COUNT_FS6_A + 1))" ]; then
+  pass "FASTSKIP-6: an untracked file still runs the chain"
+else
+  fail "FASTSKIP-6: expected the chain to run again with an untracked file present, marker stayed at $(line_count "$M_FS6")"
+fi
+if printf '%s' "$OUT_FS6_RUN2" | grep -q '^VERIFY SKIPPED (fast-skip)'; then
+  fail "FASTSKIP-6: incorrectly fast-skipped a tree with an untracked file"
+else
+  pass "FASTSKIP-6: no fast-skip line printed"
+fi
+
+# -----------------------------------------------------------------------
+# FASTSKIP-7 — an ESCALATION marker present on an otherwise clean/green
+# commit -> the chain runs; ESCALATION always surfaces to a human via the
+# normal path and is never shortcut by the fast-skip.
+# -----------------------------------------------------------------------
+FFS7="$TMPROOT/fastskip7"
+mk_fastskip_repo "$FFS7"
+M_FS7="$TMPROOT/fastskip7-marker"
+jq -cn --arg c "echo ran >> $M_FS7" '{verify: [$c]}' > "$FFS7/.quetrex/verify.json"
+git -C "$FFS7" add .quetrex/verify.json
+git -C "$FFS7" commit -q -m "chore: fastskip7 verify chain"
+
+run_hook "$FFS7" "Stop" >/dev/null 2>&1
+COUNT_FS7_A="$(line_count "$M_FS7")"
+touch "$FFS7/.quetrex/ESCALATION"   # a leftover/manually-restored marker
+
+OUT_FS7_RUN2="$(run_hook "$FFS7" "Stop" 2>&1)"
+if [ "$(line_count "$M_FS7")" = "$((COUNT_FS7_A + 1))" ]; then
+  pass "FASTSKIP-7: an ESCALATION marker still runs the chain, even on an otherwise clean/green commit"
+else
+  fail "FASTSKIP-7: expected the chain to run again with ESCALATION present, marker stayed at $(line_count "$M_FS7")"
+fi
+if printf '%s' "$OUT_FS7_RUN2" | grep -q '^VERIFY SKIPPED (fast-skip)'; then
+  fail "FASTSKIP-7: incorrectly fast-skipped a commit with an ESCALATION marker present"
+else
+  pass "FASTSKIP-7: no fast-skip line printed"
 fi
 
 echo
