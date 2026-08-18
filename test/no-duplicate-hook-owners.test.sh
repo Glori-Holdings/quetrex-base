@@ -62,17 +62,26 @@ edit-gate.sh'
 # a test that demanded its removal would be telling the operator to disarm the repo.
 # dealerq-2026 is exactly that shape today: factory disabled, hooks unwired, no
 # floor at all. Never let this file argue for more of that.
-enabled() {  # enabled <plugin-key>  -> 0 if truthy in enabledPlugins
+enabled() {  # enabled <plugin-key>  -> 0 enabled, 1 not enabled, 2 unparseable
   node -e '
     const fs=require("fs");
-    let j; try { j=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); } catch(e) { process.exit(1); }
+    // exit 0 = enabled, 1 = not enabled, 2 = could not parse (NOT the same thing).
+    let j; try { j=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); } catch(e) { process.exit(2); }
     const v=((j||{}).enabledPlugins||{})[process.argv[2]];
-    process.exit((v===true||(Array.isArray(v)&&v.length))?0:1);
+    // ONLY boolean true. A version-pin array makes the plugin fail to load, so in
+    // a pinned repo the local registrations are the real floor, not duplicates;
+    // calling a pin enabled would make this test demand their deletion.
+    process.exit(v===true?0:1);
   ' "$SETTINGS" "$1" 2>/dev/null
 }
 
+enabled "quetrex-factory@quetrex"; RC_F=$?
+if [ "$RC_F" -eq 2 ]; then
+  notok "ASSERTION 0: $SETTINGS could not be parsed — this test cannot tell 'plugin disabled' from 'file broken', and a broken settings file means NOTHING is registered. Fix the JSON before trusting any result below."
+  echo; echo "no-duplicate-hook-owners.test.sh: $PASS passed, $FAIL failed"; exit 1
+fi
 OWNED=""
-if enabled "quetrex-factory@quetrex"; then OWNED="$FACTORY_OWNED"; FACTORY_ON=yes; else FACTORY_ON=no; fi
+if [ "$RC_F" -eq 0 ]; then OWNED="$FACTORY_OWNED"; FACTORY_ON=yes; else FACTORY_ON=no; fi
 if enabled "quetrex@quetrex"; then OWNED="$(printf '%s\n%s' "$OWNED" "$QUETREX_OWNED" | grep -v '^$')"; QUETREX_ON=yes; else QUETREX_ON=no; fi
 echo "# enabled here: quetrex-factory=$FACTORY_ON quetrex=$QUETREX_ON"
 

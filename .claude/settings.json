@@ -49,5 +49,14 @@
   "enabledPlugins": {
     "quetrex@quetrex": true,
     "quetrex-factory@quetrex": true
+  },
+  "extraKnownMarketplaces": {
+    "quetrex": {
+      "source": {
+        "source": "github",
+        "repo": "Glori-Holdings/quetrex-plugins"
+      },
+      "autoUpdate": true
+    }
   }
 }

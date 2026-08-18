@@ -169,7 +169,14 @@ if [ "$SOURCE" = "startup" ]; then
     local s h
     for s in "$SETTINGS" "$HOME/.claude/settings.json"; do
       [ -f "$s" ] || continue
-      grep -q '"quetrex-factory@quetrex"[[:space:]]*:[[:space:]]*\(true\|\[\)' "$s" 2>/dev/null || continue
+      # ONLY the boolean true counts. A version-PIN array (["1.7.1"]) makes the
+      # plugin count as DISABLED for dependency resolution — measured across four
+      # checkouts: pin absent -> enabled, pin true -> enabled, pin ["1.2.1"] ->
+      # "failed to load", pin ["1.1.0"] -> "failed to load". Treating a pin as
+      # enabled would silence this banner in precisely the configuration already
+      # measured as the plugin NOT loading, which is the outage this repo's
+      # no-version-pins rule exists to prevent.
+      grep -q '"quetrex-factory@quetrex"[[:space:]]*:[[:space:]]*true' "$s" 2>/dev/null || continue
       # LIVE, not merely CACHED. A dir under plugins/cache/ records that a version
       # was once downloaded; it is NOT evidence anything loads now. Accepting it
       # silenced this banner for a repo whose plugin cannot load — measured: an
