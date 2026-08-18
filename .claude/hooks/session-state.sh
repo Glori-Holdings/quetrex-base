@@ -170,8 +170,18 @@ if [ "$SOURCE" = "startup" ]; then
     for s in "$SETTINGS" "$HOME/.claude/settings.json"; do
       [ -f "$s" ] || continue
       grep -q '"quetrex-factory@quetrex"[[:space:]]*:[[:space:]]*\(true\|\[\)' "$s" 2>/dev/null || continue
-      for h in "$HOME"/.claude/plugins/marketplaces/*/plugins/quetrex-factory/hooks/hooks.json \
-               "$HOME"/.claude/plugins/cache/*/quetrex-factory/*/hooks/hooks.json; do
+      # LIVE, not merely CACHED. A dir under plugins/cache/ records that a version
+      # was once downloaded; it is NOT evidence anything loads now. Accepting it
+      # silenced this banner for a repo whose plugin cannot load — measured: an
+      # orphaned cache (quetrex.gone27700 and friends, 3 of them on this machine)
+      # or a cache left by ordinary version churn with the marketplace removed both
+      # went SILENT while genuinely ungated. That is the failure this banner exists
+      # to catch, so only a marketplace install counts. Factory's marketplace entry
+      # is "source": "./plugins/quetrex-factory", so it really does install there.
+      # NOTE: this signal does NOT generalise to quetrex@quetrex, which is
+      # GitHub-sourced and lives only under cache/ — extending this helper to that
+      # plugin needs a different liveness test.
+      for h in "$HOME"/.claude/plugins/marketplaces/*/plugins/quetrex-factory/hooks/hooks.json; do
         [ -f "$h" ] && grep -q 'merge-gate\.sh' "$h" 2>/dev/null && return 0
       done
     done
