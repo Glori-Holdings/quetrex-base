@@ -1202,7 +1202,12 @@ exit 3
 SCRIPT
 chmod +x "$F26/fail26.sh"
 FAILCMD26="bash \"$F26/fail26.sh\""
-jq -cn --arg failcmd "$FAILCMD26" '{verify: ["echo QUICKOK", $failcmd], verifyQuick: ["echo QUICKOK"]}' \
+# The failing command must be in verifyQuick too. AC26 is about the preserved
+# FAILURE LOG surviving the next invocation; Stop is only the vehicle that
+# produces a failure. Stop now runs the quick chain, so a fixture whose failure
+# lives only in the full chain would produce no failure at all and AC26 would
+# assert nothing. Keeping the failure in BOTH keeps the log assertions real.
+jq -cn --arg failcmd "$FAILCMD26" '{verify: ["echo QUICKOK", $failcmd], verifyQuick: ["echo QUICKOK", $failcmd]}' \
   > "$F26/.quetrex/verify.json"
 
 # --- RUN 1: Stop, full chain, blocks on the real failure -------------------
@@ -1239,6 +1244,13 @@ else
 fi
 
 # --- RUN 2: SubagentStop, quick chain (single passing command), green ------
+# Narrow the quick chain to the passing command only. Stop and SubagentStop now
+# BOTH use the quick chain, so the failing/green distinction that AC26 needs can
+# no longer come from the event type — it comes from the chain, exactly as it
+# did before. The assertion is unchanged: a GREEN run must not erase the
+# preserved failure log written by the blocking run above.
+jq -cn --arg failcmd "$FAILCMD26" '{verify: ["echo QUICKOK", $failcmd], verifyQuick: ["echo QUICKOK"]}' \
+  > "$F26/.quetrex/verify.json"
 OUT26_2="$(run_hook "$F26" "SubagentStop" 2>&1)"; CODE26_2=$?
 BLOCKS26_2="$(count_block_decisions "$OUT26_2")"
 if [ "$CODE26_2" -eq 0 ] && [ "$BLOCKS26_2" = "0" ]; then
@@ -1292,7 +1304,10 @@ exit 4
 SCRIPT
 chmod +x "$F26/fail26-round3.sh"
 FAILCMD26_R3="bash \"$F26/fail26-round3.sh\""
-jq -cn --arg failcmd "$FAILCMD26_R3" '{verify: ["echo QUICKOK", $failcmd], verifyQuick: ["echo QUICKOK"]}' \
+# Round 3's failure must be in the quick chain, since Stop now runs that. The
+# assertion is unchanged: a NEWER real failure must REPLACE the older one in the
+# preserved slot rather than accumulating.
+jq -cn --arg failcmd "$FAILCMD26_R3" '{verify: ["echo QUICKOK", $failcmd], verifyQuick: ["echo QUICKOK", $failcmd]}' \
   > "$F26/.quetrex/verify.json"
 OUT26_3="$(run_hook "$F26" "Stop" 2>&1)"; CODE26_3=$?
 REASON26_3="$(printf '%s' "$OUT26_3" | jq -r '.reason // empty' 2>/dev/null)"
