@@ -71,7 +71,7 @@ the engine) into an invariant the suite defends. Every later review then reasone
 | **I2** | **The safety floor works with zero plugins installed.** deny-guard, secret-scan, enforce-branch, verify-gate and merge-gate must fire in a fresh clone, a CI runner, and a cloud routine before any plugin install completes. |
 | **I3** | **A hook's external timeout must exceed its internal fail-closed budget.** A hook killed by the harness produces no output, which reads as allow. |
 | **I4** | **No version pins.** `enabledPlugins` carries booleans only; the running version is surfaced in the status bar. |
-| **I5** | **AGENTS run in two places only** — the operator's terminal, and a cloud routine on Anthropic's servers under the same subscription. Never a third machine, never a separate API key. This governs where *an agent* executes, not where *tests* run: CI re-deriving the verify chain on a runner is explicitly permitted and is relied upon — `.github/workflows/verify.yml` is a required check and merge-gate GATE 2b leans on its independence. The defect this records is a CI job that ran **Claude** and so demanded its own `ANTHROPIC_API_KEY`; a runner executing tests holds no key and decides no verdict. |
+| **I5** | **AGENTS run in two places only** — the operator's terminal, and a cloud routine on Anthropic's servers under the same subscription. Never a third machine, never a separate API key. This governs where *an agent* executes, not where *tests* run: CI re-deriving the verify chain on a runner is explicitly permitted and is relied upon: `.github/workflows/verify.yml` is a required status check on `main` (branch protection, `enforce_admins` on), so it blocks merges independently of anything the pipeline writes about itself. The defect this records is a CI job that ran **Claude** and so demanded its own `ANTHROPIC_API_KEY`; a runner executing tests holds no key and decides no verdict. |
 | **I6** | **The board is the record.** Every status transition is written by the machinery, never left for the operator to fix by hand. |
 | **I7** | **A gate's verdict is sha-pinned** to the commit it judged, and a verdict for a different sha or a different task is treated as absent. |
 
@@ -96,3 +96,10 @@ while writing it, and are marked here so nobody mistakes them for the spec:
   run, not where tests run. §3's blocking rule marked agent-authored, with its known gap
   recorded. Both found by the review gate on this file's own PR — the document doing its job
   before it was merged.
+- **2026-08-18** — I5's justification corrected a second time. It claimed merge-gate GATE 2b
+  "leans on" CI's independence. False: `merge-gate.sh` contains no reference to CI, Actions
+  or verify.yml, GATE 2b enumerates its own independence sources (native pass, HEAD-pinned
+  security findings, or not-required), and GATE 3 reads the branch's own ledger — the very
+  dependency CI exists to supplement. Replaced with the provable claim: verify.yml is a
+  required status check with `enforce_admins` on, so it blocks merges independently of
+  anything the pipeline writes about itself.
