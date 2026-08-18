@@ -71,7 +71,7 @@ the engine) into an invariant the suite defends. Every later review then reasone
 | **I2** | **The safety floor works with zero plugins installed.** deny-guard, secret-scan, enforce-branch, verify-gate and merge-gate must fire in a fresh clone, a CI runner, and a cloud routine before any plugin install completes. |
 | **I3** | **A hook's external timeout must exceed its internal fail-closed budget.** A hook killed by the harness produces no output, which reads as allow. |
 | **I4** | **No version pins.** `enabledPlugins` carries booleans only; the running version is surfaced in the status bar. |
-| **I5** | **AGENTS run in two places only** — the operator's terminal, and a cloud routine on Anthropic's servers under the same subscription. Never a third machine, never a separate API key. This governs where *an agent* executes, not where *tests* run: CI re-deriving the verify chain on a runner is explicitly permitted and is relied upon: `.github/workflows/verify.yml` is a required status check on `main` (branch protection, `enforce_admins` on), so it blocks merges independently of anything the pipeline writes about itself. The defect this records is a CI job that ran **Claude** and so demanded its own `ANTHROPIC_API_KEY`; a runner executing tests holds no key and decides no verdict. |
+| **I5** | **Two execution locations only** — the operator's terminal, and a cloud routine on Anthropic's servers under the same subscription. Never a third machine (CI runner, partner hardware) and never a separate API key. |
 | **I6** | **The board is the record.** Every status transition is written by the machinery, never left for the operator to fix by hand. |
 | **I7** | **A gate's verdict is sha-pinned** to the commit it judged, and a verdict for a different sha or a different task is treated as absent. |
 
@@ -84,7 +84,7 @@ while writing it, and are marked here so nobody mistakes them for the spec:
 |---|---|
 | Step 5 originally required an **SMS** on `needs_human` | **RESOLVED, dropped 2026-08-17** — Anthropic's own routine notifications already reach the phone; a second notification channel is duplicated machinery. Step 5 now asks only that a run needing a human is visible away from the terminal. |
 | "**Twice**, on **two repos** — one Next.js, one Python" (§2) | **OPEN, agent-authored.** Reasoning: one pass can succeed on leftover state, and one stack hides anything hardcoded. Cost: it roughly doubles the work of declaring GOLDEN, and no Python fixture exists yet. The operator has not ruled on it. |
-| The **seven invariants** (§4) | **OPEN, agent-authored.** Derived from defects found on 2026-08-16/17, not dictated. Four of the seven were violated when written, so they carry real consequences for what blocks and what does not. I5 was corrected 2026-08-18 after review found it forbade this repo's own required CI check. |
+| The **seven invariants** (§4) | **OPEN, agent-authored.** Derived from defects found on 2026-08-16/17, not dictated. Four of the seven were violated when written, so they carry real consequences for what blocks and what does not. I5 was rewritten by an agent on 2026-08-18 to permit CI, then RESTORED to the operator's original wording the same day — see the amendment log. |
 | **§3's blocking rule** (B1/B2) | **OPEN, agent-authored** — recorded because review found it was reading as ratified spec while being the one clause deciding what can ever block a release. Known gap: B2's "executed, not argued" bar would have made a real authorization-widening defect (`requireAdmin()` -> `requireTenantAccess()` across 8 routes, found by inspection) a mere backlog item. A demonstrated missing control on a reachable path should be able to satisfy B2 where building an exploit fixture is disproportionate, and data destruction/corruption likely warrants its own B3. Operator ruling wanted. |
 
 ## 6. Amendment log
@@ -103,3 +103,12 @@ while writing it, and are marked here so nobody mistakes them for the spec:
   dependency CI exists to supplement. Replaced with the provable claim: verify.yml is a
   required status check with `enforce_admins` on, so it blocks merges independently of
   anything the pipeline writes about itself.
+- **2026-08-18** — **I5 restored to the operator's wording, and GitHub Actions removed
+  from the repo.** An agent had rewritten I5 to permit CI after a reviewer noted it
+  forbade `.github/workflows/verify.yml`. That was backwards: the rule was the
+  operator's and the workflow was the intruder — it arrived in `891e4aa` alongside the
+  `claude-review.yml` that was deleted for exactly this reason, and survived only
+  because it ran tests rather than Claude. Changing a rule to match what an agent built
+  is how a specification becomes a mirror. The workflow, its guard test, and the
+  required status check are gone; the 819-row sweep is unconditional again and runs
+  where the full chain runs — QA before the PR, and the ledger the merge gate reads.
