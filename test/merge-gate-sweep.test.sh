@@ -85,8 +85,14 @@
 # discovers and runs this file) as a REQUIRED status check on `main`
 # (branch protection, `enforce_admins: true`) against every PR's HEAD sha,
 # and that workflow sets `QX_FULL_SWEEP=1` so CI always runs the full
-# 819/819 sweep — nothing reaches `main` without it. Locally, run it in full
-# on demand with:
+# 819/819 sweep — nothing reaches `main` without it. That YAML line is
+# itself unassertable by eye (a HIGH finding on PR #108: delete it, or move
+# it to the job's own env: instead of the step's, and CI goes green on "43
+# passed, 1 skipped" while this entire file silently stops running, with
+# nothing anywhere reporting red) — test/ci-full-sweep-env.test.sh is the
+# test that makes THAT invariant executable too; read it if you are asking
+# "what actually guarantees CI runs this in full?" Locally, run this file in
+# full on demand with:
 #   QX_FULL_SWEEP=1 bash test/merge-gate-sweep.test.sh
 # Do NOT "fix" the local skip by reducing, sampling, or truncating the
 # golden table below — it runs in full or it says out loud that it did not
