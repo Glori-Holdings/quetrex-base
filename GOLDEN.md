@@ -71,7 +71,7 @@ the engine) into an invariant the suite defends. Every later review then reasone
 | **I2** | **The safety floor works with zero plugins installed.** deny-guard, secret-scan, enforce-branch, verify-gate and merge-gate must fire in a fresh clone, a CI runner, and a cloud routine before any plugin install completes. |
 | **I3** | **A hook's external timeout must exceed its internal fail-closed budget.** A hook killed by the harness produces no output, which reads as allow. |
 | **I4** | **No version pins.** `enabledPlugins` carries booleans only; the running version is surfaced in the status bar. |
-| **I5** | **Two execution locations only** — the operator's terminal, and a cloud routine on Anthropic's servers under the same subscription. Never a third machine (CI runner, partner hardware) and never a separate API key. |
+| **I5** | **AGENTS run in two places only** — the operator's terminal, and a cloud routine on Anthropic's servers under the same subscription. Never a third machine, never a separate API key. This governs where *an agent* executes, not where *tests* run: CI re-deriving the verify chain on a runner is explicitly permitted and is relied upon — `.github/workflows/verify.yml` is a required check and merge-gate GATE 2b leans on its independence. The defect this records is a CI job that ran **Claude** and so demanded its own `ANTHROPIC_API_KEY`; a runner executing tests holds no key and decides no verdict. |
 | **I6** | **The board is the record.** Every status transition is written by the machinery, never left for the operator to fix by hand. |
 | **I7** | **A gate's verdict is sha-pinned** to the commit it judged, and a verdict for a different sha or a different task is treated as absent. |
 
@@ -84,9 +84,15 @@ while writing it, and are marked here so nobody mistakes them for the spec:
 |---|---|
 | Step 5 originally required an **SMS** on `needs_human` | **RESOLVED, dropped 2026-08-17** — Anthropic's own routine notifications already reach the phone; a second notification channel is duplicated machinery. Step 5 now asks only that a run needing a human is visible away from the terminal. |
 | "**Twice**, on **two repos** — one Next.js, one Python" (§2) | **OPEN, agent-authored.** Reasoning: one pass can succeed on leftover state, and one stack hides anything hardcoded. Cost: it roughly doubles the work of declaring GOLDEN, and no Python fixture exists yet. The operator has not ruled on it. |
-| The **seven invariants** (§4) | **OPEN, agent-authored.** Derived from defects found on 2026-08-16/17, not dictated. Four of the seven were violated when written, so they carry real consequences for what blocks and what does not. |
+| The **seven invariants** (§4) | **OPEN, agent-authored.** Derived from defects found on 2026-08-16/17, not dictated. Four of the seven were violated when written, so they carry real consequences for what blocks and what does not. I5 was corrected 2026-08-18 after review found it forbade this repo's own required CI check. |
+| **§3's blocking rule** (B1/B2) | **OPEN, agent-authored** — recorded because review found it was reading as ratified spec while being the one clause deciding what can ever block a release. Known gap: B2's "executed, not argued" bar would have made a real authorization-widening defect (`requireAdmin()` -> `requireTenantAccess()` across 8 routes, found by inspection) a mere backlog item. A demonstrated missing control on a reachable path should be able to satisfy B2 where building an exploit fixture is disproportionate, and data destruction/corruption likely warrants its own B3. Operator ruling wanted. |
 
 ## 6. Amendment log
 
 - **2026-08-17** — created. SMS dropped from step 5 (operator). Sign-off ceremony removed in
   favour of git history.
+- **2026-08-18** — I5 corrected: as written it forbade "a third machine (CI runner)" while
+  this repo ships a required CI check that GATE 2b depends on. Now scoped to where agents
+  run, not where tests run. §3's blocking rule marked agent-authored, with its known gap
+  recorded. Both found by the review gate on this file's own PR — the document doing its job
+  before it was merged.
