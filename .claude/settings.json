@@ -38,96 +38,6 @@
     ],
     "defaultMode": "dontAsk"
   },
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "startup|resume|compact",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/session-state.sh\"",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/deny-guard.sh\"",
-            "timeout": 30
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/secret-scan.sh\"",
-            "timeout": 30
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/enforce-branch.sh\"",
-            "timeout": 30
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/merge-gate.sh\"",
-            "timeout": 60
-          }
-        ]
-      },
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/secret-scan.sh\"",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Write|Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/auto-format.sh\"",
-            "timeout": 30
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/edit-gate.sh\"",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/verify-gate.sh\"",
-            "timeout": 900
-          }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/verify-gate.sh\"",
-            "timeout": 600
-          }
-        ]
-      }
-    ]
-  },
   "statusLine": {
     "type": "command",
     "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/statusline-command.sh\""
@@ -139,5 +49,14 @@
   "enabledPlugins": {
     "quetrex@quetrex": true,
     "quetrex-factory@quetrex": true
+  },
+  "extraKnownMarketplaces": {
+    "quetrex": {
+      "source": {
+        "source": "github",
+        "repo": "Glori-Holdings/quetrex-plugins"
+      },
+      "autoUpdate": true
+    }
   }
 }

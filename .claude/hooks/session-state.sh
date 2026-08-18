@@ -158,8 +158,45 @@ if [ "$SOURCE" = "startup" ]; then
     add "  ! .quetrex/verify.json is missing — verify-gate will fall back to autodetect and may prove far less than you think."
   fi
   SETTINGS="$ROOT/.claude/settings.json"
-  if [ -f "$SETTINGS" ] && ! grep -q 'merge-gate\.sh' "$SETTINGS" 2>/dev/null; then
-    add "  ! this repo has .quetrex/ but merge-gate.sh is NOT wired in .claude/settings.json — the merge boundary is unenforced. Run the project-gates installer."
+  # A repo's own settings are only ONE of the two places the gate can be wired.
+  # quetrex-factory registers merge-gate.sh for every repo that ENABLES it, and a
+  # repo that lets the plugin own the engine guards is CORRECT, not unwired —
+  # registering them locally too runs every guard twice (measured 2026-08-17:
+  # two full verify chains per Stop, ~6m26s turns). Warn only when NEITHER owner
+  # has it, or this fires forever on a properly configured repo and joins the
+  # class of diagnostics an operator learns to ignore.
+  factory_owns_merge_gate() {
+    local s h
+    for s in "$SETTINGS" "$HOME/.claude/settings.json"; do
+      [ -f "$s" ] || continue
+      # ONLY the boolean true counts. A version-PIN array (["1.7.1"]) makes the
+      # plugin count as DISABLED for dependency resolution — measured across four
+      # checkouts: pin absent -> enabled, pin true -> enabled, pin ["1.2.1"] ->
+      # "failed to load", pin ["1.1.0"] -> "failed to load". Treating a pin as
+      # enabled would silence this banner in precisely the configuration already
+      # measured as the plugin NOT loading, which is the outage this repo's
+      # no-version-pins rule exists to prevent.
+      grep -q '"quetrex-factory@quetrex"[[:space:]]*:[[:space:]]*true' "$s" 2>/dev/null || continue
+      # LIVE, not merely CACHED. A dir under plugins/cache/ records that a version
+      # was once downloaded; it is NOT evidence anything loads now. Accepting it
+      # silenced this banner for a repo whose plugin cannot load — measured: an
+      # orphaned cache (quetrex.gone27700 and friends, 3 of them on this machine)
+      # or a cache left by ordinary version churn with the marketplace removed both
+      # went SILENT while genuinely ungated. That is the failure this banner exists
+      # to catch, so only a marketplace install counts. Factory's marketplace entry
+      # is "source": "./plugins/quetrex-factory", so it really does install there.
+      # NOTE: this signal does NOT generalise to quetrex@quetrex, which is
+      # GitHub-sourced and lives only under cache/ — extending this helper to that
+      # plugin needs a different liveness test.
+      for h in "$HOME"/.claude/plugins/marketplaces/*/plugins/quetrex-factory/hooks/hooks.json; do
+        [ -f "$h" ] && grep -q 'merge-gate\.sh' "$h" 2>/dev/null && return 0
+      done
+    done
+    return 1
+  }
+  if [ -f "$SETTINGS" ] && ! grep -q 'merge-gate\.sh' "$SETTINGS" 2>/dev/null \
+     && ! factory_owns_merge_gate; then
+    add "  ! this repo has .quetrex/ but merge-gate.sh is wired NEITHER in .claude/settings.json NOR by an enabled quetrex-factory — the merge boundary is unenforced. Run /quetrex:init."
   fi
   if [ -f "$SETTINGS" ] && grep -q '~/\.claude/hooks' "$SETTINGS" 2>/dev/null; then
     add "  ! a committed hook command points at ~/.claude — it exits 127 in a fresh clone or cloud runner, which is NON-blocking, so enforcement fails open silently."
