@@ -63,11 +63,42 @@
 # liveness — fails loudly here and names the exact row.
 #
 # RUNTIME: ~819 real hook invocations (git init + 3 commits done ONCE, then
-# one hook process per row against a shared fixture). Measured ~190s
-# (3.1min) on the machine this was authored on. Not bounded or sampled —
-# the whole point of this file is that a partial sweep would have missed
-# round 8's bug (2 of its 3 discovering rows are length-3 orderings a
-# smaller sample could easily have skipped).
+# one hook process per row against a shared fixture). Not bounded or
+# sampled — the whole point of this file is that a partial sweep would have
+# missed round 8's bug (2 of its 3 discovering rows are length-3 orderings a
+# smaller sample could easily have skipped). The cost is process spawn, not
+# computation: measured 2026-08-17 at ~300s solo, and under contention from
+# another agent's own verify chain on the same machine, a full `npm test`
+# run hit 14m45s wall (885s) — 15s under verify-gate.sh's own 840s internal
+# budget, and on a worse day past it (one run was killed at exit 124).
+#
+# WHY THIS FILE IS OPT-IN LOCALLY (QX_FULL_SWEEP). verify-gate.sh runs
+# `npm test` on every Stop/SubagentStop — i.e. at the end of every turn, for
+# every agent, including when several run in parallel on this machine (the
+# normal working mode here). An 819-subprocess sweep at that cadence is what
+# pushed the chain over its own timeout, not any assertion in this file
+# failing. So by default this file SKIPS OUT LOUD instead of running:
+#   SKIP: QX_FULL_SWEEP is not set...
+# Moving it off the per-turn chain is safe ONLY because coverage does not
+# move, only its location: `.github/workflows/verify.yml` runs
+# `.quetrex/verify.json`'s `verify[]` chain (which includes `npm test`, which
+# discovers and runs this file) as a REQUIRED status check on `main`
+# (branch protection, `enforce_admins: true`) against every PR's HEAD sha,
+# and that workflow sets `QX_FULL_SWEEP=1` so CI always runs the full
+# 819/819 sweep — nothing reaches `main` without it. That YAML line is
+# itself unassertable by eye (a HIGH finding on PR #108: delete it, or move
+# it to the job's own env: instead of the step's, and CI goes green on "43
+# passed, 1 skipped" while this entire file silently stops running, with
+# nothing anywhere reporting red) — test/ci-full-sweep-env.test.sh is the
+# test that makes THAT invariant executable too; read it if you are asking
+# "what actually guarantees CI runs this in full?" Locally, run this file in
+# full on demand with:
+#   QX_FULL_SWEEP=1 bash test/merge-gate-sweep.test.sh
+# Do NOT "fix" the local skip by reducing, sampling, or truncating the
+# golden table below — it runs in full or it says out loud that it did not
+# run, never a quiet subset. If you are reading this file wondering whether
+# a local `npm test` covered merge-gate.sh's 819-row contract: locally, by
+# default, it did not — CI did.
 #
 # Run: bash test/merge-gate-sweep.test.sh
 # Point at a different hook copy (e.g. the published factory copy) with:
@@ -81,6 +112,16 @@ if [ ! -x "$MG" ] && [ ! -f "$MG" ]; then
   echo "FAIL: hook not found at $MG"
   exit 1
 fi
+
+# OPT-IN GATE — see the RUNTIME/WHY THIS FILE IS OPT-IN LOCALLY comment
+# above for the full reasoning. Off by default so this file never runs on
+# the per-turn verify-gate.sh chain; CI sets QX_FULL_SWEEP=1 and always
+# runs the full 819 rows as a required check on main.
+if [ "${QX_FULL_SWEEP:-}" != "1" ]; then
+  echo "SKIP: QX_FULL_SWEEP is not set to 1 -- the 819-row sweep costs ~300s+ of real hook subprocess spawns (see RUNTIME comment above) and is opt-in locally to keep it off the per-turn verify-gate.sh chain; CI's required 'verify chain' check (.github/workflows/verify.yml) always sets QX_FULL_SWEEP=1 and runs it in full. Run it here by hand with: QX_FULL_SWEEP=1 bash test/merge-gate-sweep.test.sh"
+  exit 0
+fi
+
 if ! command -v jq >/dev/null 2>&1; then
   echo "SKIP: jq is not installed — merge-gate.sh is jq-mandatory, nothing to test"
   exit 0

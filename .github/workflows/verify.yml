@@ -57,6 +57,14 @@ jobs:
 
       - name: Run the .quetrex/verify.json chain
         id: chain
+        env:
+          # test/merge-gate-sweep.test.sh (819 real hook-subprocess rows) is
+          # opt-in locally to keep it off the per-turn verify-gate.sh chain
+          # (see that file's header). This is the ONE place it must always
+          # run in full: `npm test` -> test/run-all.sh discovers and runs
+          # it, and this workflow is a REQUIRED status check on main, so
+          # nothing merges without a real 819/819 sweep having run.
+          QX_FULL_SWEEP: "1"
         run: |
           set +e
           set -uo pipefail
