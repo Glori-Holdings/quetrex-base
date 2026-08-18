@@ -98,7 +98,11 @@ else
   DUPES=0
   while IFS= read -r script; do
     [ -n "$script" ] || continue
-    hits="$(printf '%s' "$CMDS" | grep -F -- "$script" || true)"
+    # Anchor on the path separator so a repo's OWN distinctly-named guard
+    # (repo-secret-scan.sh, company-deny-guard.sh) is not misread as a plugin
+    # duplicate — telling an operator to delete their own guard would be the
+    # exact inverse of this file's purpose.
+    hits="$(printf '%s' "$CMDS" | grep -E -- "[/\"']${script%.sh}\.sh" || true)"
     if [ -n "$hits" ]; then
       DUPES=$((DUPES+1))
       notok "ASSERTION 1: $script is registered by .claude/settings.json AND owned by an ENABLED plugin — it will run TWICE per event: $(printf '%s' "$hits" | tr '\n' ' ')"
