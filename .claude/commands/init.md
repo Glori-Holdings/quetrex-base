@@ -844,9 +844,13 @@ else
     echo "webhook: already registered on $QX_SLUG (id $QX_HOOK_ID) — left alone"
   else
     # The shared secret lives in the project vault, written once by the operator.
-    # It is fetched here and handed straight to GitHub; it is never printed and
-    # never written to the repo.
-    QX_WH_SECRET="$(qapi GET "/api/projects/$QX_PROJECT_CODE/secrets/GITHUB_WEBHOOK_SECRET" 2>/dev/null | jq -r '.value // empty')"
+    # POST .../secrets/export is the ONLY endpoint that returns plaintext — the
+    # collection GET deliberately returns masked entries (name + last4) and would
+    # silently yield an empty value here. POST, not GET, so a decrypted value
+    # never lands in a URL, referrer or proxy log. Fetched, handed straight to
+    # GitHub, never printed, never written into the repo, unset immediately after.
+    QX_WH_SECRET="$(qapi POST "/api/projects/$QX_PROJECT_CODE/secrets/export" \
+      '{"names":["GITHUB_WEBHOOK_SECRET"]}' 2>/dev/null | jq -r '.GITHUB_WEBHOOK_SECRET // empty')"
     if [ -z "$QX_WH_SECRET" ]; then
       echo "webhook: no GITHUB_WEBHOOK_SECRET in project $QX_PROJECT_CODE's vault — skipped."
       echo "         Add it at $QX_KANBAN_URL/keys, then re-run /quetrex:init to register."
