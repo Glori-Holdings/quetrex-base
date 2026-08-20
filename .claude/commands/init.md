@@ -878,9 +878,13 @@ does not match `project.githubRepo` — the identifier alone is not authorisatio
 ```bash
 QX_LINKED="$(qapi GET "/api/projects/$QX_PROJECT_CODE" 2>/dev/null | jq -r '.githubRepo // empty')"
 if [ -z "$QX_LINKED" ] && [ -n "$QX_SLUG" ]; then
-  qapi PATCH "/api/projects/$QX_PROJECT_CODE" "$(jq -cn --arg r "$QX_SLUG" '{githubRepo:$r}')" >/dev/null 2>&1 \
-    && echo "project $QX_PROJECT_CODE linked to $QX_SLUG" \
-    || echo "could not link project $QX_PROJECT_CODE to $QX_SLUG — the webhook will ignore its deliveries" >&2
+  # BARE repo name only. The API validates githubRepo against ^[A-Za-z0-9._-]+$,
+  # so sending "owner/repo" is rejected outright — and the webhook's repo check
+  # is written to match a bare stored name against the delivered owner/repo.
+  QX_REPO_NAME="${QX_SLUG##*/}"
+  qapi PATCH "/api/projects/$QX_PROJECT_CODE" "$(jq -cn --arg r "$QX_REPO_NAME" '{githubRepo:$r}')" >/dev/null 2>&1 \
+    && echo "project $QX_PROJECT_CODE linked to $QX_REPO_NAME" \
+    || echo "could not link project $QX_PROJECT_CODE to $QX_REPO_NAME — the webhook will ignore its deliveries" >&2
 fi
 ```
 
