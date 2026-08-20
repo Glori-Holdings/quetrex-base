@@ -813,6 +813,73 @@ or what it removed/left alone in `.mcp.json`) so step 6 stages `.claude/settings
 
 ---
 
+## 4i. Register the board webhook so cards move during a cloud build
+
+A cloud routine has **no credential for the kanban** — the bearer token lives in the
+operator's `~/.quetrex/auth.json` and never leaves that machine — so the cloud half is told
+not to call the board. Every other transition has a local writer (`in_progress` at dispatch,
+`merged` by `/quetrex:merge`), but `pr_ready` had none: a card froze the moment work was
+dispatched and only moved again when the operator came back. This registers the GitHub
+webhook that closes that window.
+
+**A webhook is not GitHub Actions.** No runner, no billed minutes, nothing executing on a
+third machine — GitHub POSTs to the board and the board, which already owns status
+transitions, does the write. Never add a workflow file here.
+
+Idempotent: an existing hook with the same URL is left alone, never duplicated.
+
+```bash
+# Owner/repo from the origin remote — skip silently when there is no GitHub origin.
+QX_ORIGIN="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null)"
+QX_SLUG="$(printf '%s' "$QX_ORIGIN" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##')"
+QX_HOOK_URL="${QX_KANBAN_URL%/}/api/webhooks/github"
+
+if [ -z "$QX_SLUG" ] || ! printf '%s' "$QX_SLUG" | grep -q '/'; then
+  echo "webhook: no GitHub origin remote — skipped (cards will not auto-move to pr_ready here)"
+elif ! command -v gh >/dev/null 2>&1; then
+  echo "webhook: gh CLI unavailable — skipped. Re-run /quetrex:init once gh is installed."
+else
+  QX_HOOK_ID="$(gh api "repos/$QX_SLUG/hooks" --jq '.[] | select(.config.url=="'"$QX_HOOK_URL"'") | .id' 2>/dev/null | head -1)"
+  if [ -n "$QX_HOOK_ID" ]; then
+    echo "webhook: already registered on $QX_SLUG (id $QX_HOOK_ID) — left alone"
+  else
+    # The shared secret lives in the project vault, written once by the operator.
+    # It is fetched here and handed straight to GitHub; it is never printed and
+    # never written to the repo.
+    QX_WH_SECRET="$(qapi GET "/api/projects/$QX_PROJECT_CODE/secrets/GITHUB_WEBHOOK_SECRET" 2>/dev/null | jq -r '.value // empty')"
+    if [ -z "$QX_WH_SECRET" ]; then
+      echo "webhook: no GITHUB_WEBHOOK_SECRET in project $QX_PROJECT_CODE's vault — skipped."
+      echo "         Add it at $QX_KANBAN_URL/keys, then re-run /quetrex:init to register."
+    else
+      QX_HOOK_OUT="$(jq -cn --arg u "$QX_HOOK_URL" --arg s "$QX_WH_SECRET" \
+        '{name:"web",active:true,events:["pull_request"],config:{url:$u,content_type:"json",secret:$s,insecure_ssl:"0"}}' \
+        | gh api -X POST "repos/$QX_SLUG/hooks" --input - 2>&1)"
+      QX_NEW_ID="$(printf '%s' "$QX_HOOK_OUT" | jq -r '.id // empty' 2>/dev/null)"
+      unset QX_WH_SECRET
+      if [ -n "$QX_NEW_ID" ]; then
+        echo "webhook: registered on $QX_SLUG (id $QX_NEW_ID) — PRs will move cards to pr_ready"
+      else
+        echo "webhook: registration FAILED on $QX_SLUG — $(printf '%s' "$QX_HOOK_OUT" | jq -r '.message // .' 2>/dev/null | head -1)" >&2
+        echo "         Cards will not auto-move here until this succeeds." >&2
+      fi
+    fi
+  fi
+fi
+```
+
+**The project must also record its repo.** The webhook refuses a delivery whose repository
+does not match `project.githubRepo` — the identifier alone is not authorisation, since
+`QDM-5` means something in every project coded QDM. If that field is unset, no card moves:
+
+```bash
+QX_LINKED="$(qapi GET "/api/projects/$QX_PROJECT_CODE" 2>/dev/null | jq -r '.githubRepo // empty')"
+if [ -z "$QX_LINKED" ] && [ -n "$QX_SLUG" ]; then
+  qapi PATCH "/api/projects/$QX_PROJECT_CODE" "$(jq -cn --arg r "$QX_SLUG" '{githubRepo:$r}')" >/dev/null 2>&1 \
+    && echo "project $QX_PROJECT_CODE linked to $QX_SLUG" \
+    || echo "could not link project $QX_PROJECT_CODE to $QX_SLUG — the webhook will ignore its deliveries" >&2
+fi
+```
+
 ## 4j. One-time legacy cleanup (guarded, reversible, per-machine)
 
 The npm era seeded Quetrex files into the operator's **global** `~/.claude`; the plugin era
