@@ -472,6 +472,12 @@ run_with_cap() {
 
 BUDGET_START=$(date +%s)
 
+# SEC-15: ledger byte size before this run's own writes — see
+# qx_write_bounded_skips_for_cap in verify-gate-quick-chain.sh.
+LEDGER_RUN_START_BYTES=0
+[ -n "${LEDGER:-}" ] && [ -f "$LEDGER" ] && LEDGER_RUN_START_BYTES=$(wc -c < "$LEDGER" 2>/dev/null | tr -d ' ')
+case "$LEDGER_RUN_START_BYTES" in ''|*[!0-9]*) LEDGER_RUN_START_BYTES=0 ;; esac
+
 for ((CHAIN_IDX=0; CHAIN_IDX<${#CHAIN[@]}; CHAIN_IDX++)); do
   cmd="${CHAIN[$CHAIN_IDX]}"
   if should_skip_for_env "$cmd"; then
@@ -561,9 +567,10 @@ TIME BUDGET EXHAUSTED: exceeded its ${remaining}s share of the ${BUDGET_TOTAL}s 
   # arbitration (out of this file's ownership) is what makes that true.
   if [ "$TIMED_OUT" -eq 1 ] && [ "$QUICK" -eq 1 ]; then
     CAP_HIT=1; CAP_CMD="$cmd"
-    for ((CHAIN_REST=CHAIN_IDX; CHAIN_REST<${#CHAIN[@]}; CHAIN_REST++)); do
-      qx_write_bounded_skip "${CHAIN[$CHAIN_REST]}"
-    done
+    # SEC-15: reorders so a genuine result THIS run already wrote stays the
+    # ledger's last line, never a cap-cut boundedQuick skip — see
+    # qx_write_bounded_skips_for_cap in verify-gate-quick-chain.sh.
+    qx_write_bounded_skips_for_cap "$CHAIN_IDX"
     break
   fi
 

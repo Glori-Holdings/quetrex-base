@@ -359,14 +359,26 @@ split_segments_quote_aware() {
           fi
           ;;
         '&' | '|')
-          two="${s:$i:2}"
-          if [ "$two" = "&&" ] || [ "$two" = "||" ]; then
-            out+=$'\n'
-            i=$((i + 1))
+          # SEC-13 (security review, 2026-08-21): '>|' is bash own
+          # noclobber-override redirect operator, not a pipe -- without
+          # this check a bare unquoted '|' immediately after an emitted
+          # '>' was always read as a pipe/segment separator, splitting
+          # "cat x >| protected-path" into two unrelated segments and
+          # losing the redirect target entirely. Glue it onto the
+          # preceding '>' instead, exactly like '>>' already reaches
+          # normalize_segment as one token.
+          if [ "$c" = '|' ] && [ "${out: -1}" = '>' ]; then
+            out+="$c"; have=1
           else
-            out+=$'\n'
+            two="${s:$i:2}"
+            if [ "$two" = "&&" ] || [ "$two" = "||" ]; then
+              out+=$'\n'
+              i=$((i + 1))
+            else
+              out+=$'\n'
+            fi
+            have=0
           fi
-          have=0
           ;;
         ';')
           out+=$'\n'
@@ -1690,11 +1702,17 @@ evaluate_vector() {
   fi
 
   if [ -z "$CHAIN_JSON" ]; then
-    # Committed autodetect, mirroring verify-gate.sh's resolve_autodetect --
-    # package.json scripts (typecheck/type-check/tsc/lint/build/test), a
-    # Makefile's lint/build/test/check targets, or a bare pyproject.toml /
-    # go.mod / Cargo.toml presence -- read from the COMMITTED blob at
-    # $HEAD_SHA, never the working tree.
+    # SEC-14 (security review, 2026-08-21): this used to read ONLY
+    # package.json, while the comment claimed parity with verify-gate.sh
+    # own resolve_autodetect (which also resolves Makefile/pyproject.toml/
+    # setup.cfg/go.mod/Cargo.toml) and the deny text below named all four
+    # sources as read. A go.mod repo with none of verify.json/CLAUDE.md
+    # fence/package.json hit a permanent ESCALATE_HUMAN deny naming sources
+    # the code never actually looked at. Fixed by resolving the SAME
+    # sources, in the SAME order, as verify-gate.sh resolve_autodetect --
+    # every read from the COMMITTED blob at the pinned $HEAD_SHA via
+    # `git show`, never the working tree, matching this function own SEC-2
+    # pinning discipline elsewhere.
     if [ -n "$HEAD_SHA" ] && [[ "$HEAD_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
       PKG_BLOB=$(git -C "$ROOT" show "$HEAD_SHA:package.json" 2>/dev/null)
       if [ -n "$PKG_BLOB" ]; then
@@ -1703,6 +1721,42 @@ evaluate_vector() {
           | map(select($s[.] != null)) | map("npm run " + .) | .[]
         ' 2>/dev/null)
         [ -n "$AUTO_CMDS" ] && CHAIN_JSON=$(printf '%s\n' "$AUTO_CMDS" | jq -Rsc '[splits("\n")] | map(select(length > 0))' 2>/dev/null)
+      fi
+
+      if [ -z "$CHAIN_JSON" ] || [ "$CHAIN_JSON" = "[]" ]; then
+        CHAIN_JSON=""
+        MK_BLOB=$(git -C "$ROOT" show "$HEAD_SHA:Makefile" 2>/dev/null)
+        [ -z "$MK_BLOB" ] && MK_BLOB=$(git -C "$ROOT" show "$HEAD_SHA:makefile" 2>/dev/null)
+        if [ -n "$MK_BLOB" ] && printf '%s' "$MK_BLOB" | grep -qE '^(lint|build|test|check):'; then
+          MK_CMDS=""
+          printf '%s' "$MK_BLOB" | grep -qE '^lint:'  && MK_CMDS="${MK_CMDS}make lint"$'\n'
+          printf '%s' "$MK_BLOB" | grep -qE '^build:' && MK_CMDS="${MK_CMDS}make build"$'\n'
+          printf '%s' "$MK_BLOB" | grep -qE '^test:'  && MK_CMDS="${MK_CMDS}make test"$'\n'
+          printf '%s' "$MK_BLOB" | grep -qE '^check:' && MK_CMDS="${MK_CMDS}make check"$'\n'
+          [ -n "$MK_CMDS" ] && CHAIN_JSON=$(printf '%s' "$MK_CMDS" | jq -Rsc '[splits("\n")] | map(select(length > 0))' 2>/dev/null)
+        fi
+      fi
+
+      if [ -z "$CHAIN_JSON" ] || [ "$CHAIN_JSON" = "[]" ]; then
+        CHAIN_JSON=""
+        PY_PRESENT=0
+        git -C "$ROOT" cat-file -e "$HEAD_SHA:pyproject.toml" 2>/dev/null && PY_PRESENT=1
+        [ "$PY_PRESENT" -eq 0 ] && git -C "$ROOT" cat-file -e "$HEAD_SHA:setup.cfg" 2>/dev/null && PY_PRESENT=1
+        [ "$PY_PRESENT" -eq 1 ] && CHAIN_JSON='["python -m pytest -q"]'
+      fi
+
+      if [ -z "$CHAIN_JSON" ] || [ "$CHAIN_JSON" = "[]" ]; then
+        CHAIN_JSON=""
+        if git -C "$ROOT" cat-file -e "$HEAD_SHA:go.mod" 2>/dev/null; then
+          CHAIN_JSON='["go build ./...","go test ./..."]'
+        fi
+      fi
+
+      if [ -z "$CHAIN_JSON" ] || [ "$CHAIN_JSON" = "[]" ]; then
+        CHAIN_JSON=""
+        if git -C "$ROOT" cat-file -e "$HEAD_SHA:Cargo.toml" 2>/dev/null; then
+          CHAIN_JSON='["cargo build","cargo test"]'
+        fi
       fi
     fi
     if [ -z "$CHAIN_JSON" ] || [ "$CHAIN_JSON" = "[]" ]; then
@@ -1793,7 +1847,16 @@ evaluate_vector() {
         # per the deferred-to-$athead.exit==null handling below) when NOTHING else describes
         # $head at all.
         | ( [ $ent[] | select(.sha == $head and $head != "") ] ) as $head_ents
-        | ( ( [ $head_ents[] | select(.boundedQuick | not) ] | last ) // ( $head_ents | last ) ) as $raw_athead
+        # SEC-12 FIX (security review, 2026-08-21): when NO non-boundedQuick entry
+        # exists at $head, $raw_athead must become null (defer to the ancestor walk),
+        # never fall back to the boundedQuick entry itself. The prior version fell
+        # back to it, and jq tostring applied to that entry null .exit produces the
+        # non-empty STRING "null" downstream -- [ -n "$e_athead" ] then took the
+        # why="exit" branch and an artifact-only-range ancestor green was never
+        # consulted. Reproduced in normal operation: green at an ancestor, then a
+        # Stop at $head whose bounded quick chain filtered the command -- the merge
+        # denied "exit null" instead of deferring to the ancestor.
+        | ( [ $head_ents[] | select(.boundedQuick | not) ] | last ) as $raw_athead
         # ONLY A CLEAN SKIP AT $head DEFERS TO THE WALK. If any sha carries a genuine failure,
         # a CLEAN skip at $head (one whose own sha carries no failure, so $ent left its exit at
         # 0) cannot stand in as the describing answer — otherwise a red at an artifact-only-range
@@ -1819,11 +1882,20 @@ evaluate_vector() {
         # a genuine failure behind a stale, unrelated, older describing green — the same defect
         # one level removed, for any sha, not only $head. The per-sha collapse ALSO applies the
         # same genuine-wins-over-boundedQuick preference as $athead above, independent of order.
+        # SEC-12 completion (security review, 2026-08-21): a boundedQuick entry
+        # that survives the per-sha collapse above means that sha has NO
+        # genuine evidence at all. Left in $persha it trivially satisfies the
+        # ancestor walk own artifact_only_range_ok(sha, sha) self-match for
+        # sha == $head, so a boundedQuick-only entry at HEAD would be picked
+        # as "describing" before the walk ever reaches a genuine ancestor
+        # entry later in this array. Drop it here -- a sha with no genuine
+        # evidence must be treated as non-describing, same as absent.
         | ( ( reduce ($ent | reverse)[] as $e ({};
               if has($e.sha) then
                 (if (.[$e.sha].boundedQuick) and ($e.boundedQuick | not) then .[$e.sha] = $e else . end)
               else .[$e.sha] = $e end) | [ .[] ] )
-            | if ($redshas | length) > 0 then [ .[] | select((.skipped | not) or .exit != 0) ] else . end ) as $persha
+            | if ($redshas | length) > 0 then [ .[] | select((.skipped | not) or .exit != 0) ] else . end
+            | [ .[] | select(.boundedQuick | not) ] ) as $persha
         | { cmd: $c, athead: $athead, persha: $persha }
         | select(.athead == null or .athead.exit != 0) ]
   ' "$LEDGER" 2>/dev/null)

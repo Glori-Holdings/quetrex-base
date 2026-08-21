@@ -19,13 +19,31 @@
 # precisely the failure this guard exists to prevent: a guard that LOOKS
 # installed and gates NOTHING. What IS verified: a "deny" decision is
 # absolute and honored in every permission mode, including bypassPermissions.
-# So a write to a floor script is DENIED by default. The unlock is an
-# explicit, deliberate OPERATOR action an agent cannot grant itself as a side
-# effect of the very edit it authorizes: the environment variable
-# QUETREX_UNLOCK_FLOOR=1, set for the command by whoever is driving the
-# session — never a marker file inside the repo (a file is something an agent
-# can create for itself, which would make the guard self-authorizing and
-# worthless). Every unlocked write is RECORDED, never silent.
+# So a write to a floor script is DENIED by default. The unlock is the
+# environment variable QUETREX_UNLOCK_FLOOR=1 — never a marker file inside
+# the repo (a file is something an agent can create for itself, which would
+# make the guard trivially self-authorizing). Every unlocked write is
+# RECORDED, never silent.
+#
+# SEC-6 (security review, 2026-08-21): the unlock is NOT self-granting via
+# the ONE path this hook actually closes — an agent cannot smuggle
+# QUETREX_UNLOCK_FLOOR=1 into the environment of the SAME Bash command that
+# performs the edit, since a PreToolUse hook sees that command's own
+# env only if the agent explicitly prefixes it there, and no other
+# in-session mechanism lets a Bash tool call inject an env var into a
+# DIFFERENT, later PreToolUse invocation. What this guard does NOT close:
+# `.claude/settings.json`'s top-level `env` block IS passed through to
+# every hook subprocess quetrex-base spawns (confirmed empirically), so an
+# agent that already has write access to settings.json — the SAME
+# permission surface that gates most other repo-wide changes — could add
+# QUETREX_UNLOCK_FLOOR=1 there and unlock every future floor-script write
+# for the rest of the session, not just one command. That is a real,
+# disclosed limitation of THIS mechanism, not a false guarantee: the
+# original text here claimed the unlock "cannot be self-granted" without
+# qualification, which settings.json's env reaching hook subprocesses
+# makes plainly false. Reported to the operator as a design gap in the
+# unlock mechanism itself (not a defect in this hook's enforcement of it);
+# the mechanism is unchanged pending that decision.
 #
 # DECISION SCHEMA: PreToolUse denies via
 #   {"hookSpecificOutput":{"hookEventName":"PreToolUse",
@@ -290,14 +308,26 @@ split_segments_quote_aware() {
           fi
           ;;
         '&' | '|')
-          two="${s:$i:2}"
-          if [ "$two" = "&&" ] || [ "$two" = "||" ]; then
-            out+=$'\n'
-            i=$((i + 1))
+          # SEC-13 (security review, 2026-08-21): '>|' is bash own
+          # noclobber-override redirect operator, not a pipe -- without
+          # this check a bare unquoted '|' immediately after an emitted
+          # '>' was always read as a pipe/segment separator, splitting
+          # "cat x >| protected-path" into two unrelated segments and
+          # losing the redirect target entirely. Glue it onto the
+          # preceding '>' instead, exactly like '>>' already reaches
+          # normalize_segment as one token.
+          if [ "$c" = '|' ] && [ "${out: -1}" = '>' ]; then
+            out+="$c"; have=1
           else
-            out+=$'\n'
+            two="${s:$i:2}"
+            if [ "$two" = "&&" ] || [ "$two" = "||" ]; then
+              out+=$'\n'
+              i=$((i + 1))
+            else
+              out+=$'\n'
+            fi
+            have=0
           fi
-          have=0
           ;;
         ';')
           out+=$'\n'
@@ -403,23 +433,66 @@ protected_write_targets() {
   # last_nonflag_arg <start-index> -- the last token from w[start..] that is
   # neither a flag (leading '-'), a redirection token, nor the token
   # immediately following a '<' (a stdin-redirect SOURCE, never a write
-  # destination for the command itself).
-  local last="" tok skip_next=0 i
+  # destination for the command itself). first_pos is the FIRST such token --
+  # for cp/mv/install/rsync's common single-source shape this is the source,
+  # used below (SEC-13) to resolve a directory destination.
+  local last="" first_pos="" tok skip_next=0 i
   for ((i = 1; i < ${#w[@]}; i++)); do
     tok="${w[$i]}"
     if [ "$skip_next" -eq 1 ]; then skip_next=0; continue; fi
     case "$tok" in
       '<') skip_next=1; continue ;;
       '<'*) continue ;;
-      -*) continue ;;
+      -*)
+        # SEC-13: `install -m 0755 src dest` -- install's -m/-o/-g/-t are
+        # value-taking flags; without this, the MODE/OWNER/GROUP/TARGET
+        # value that follows is wrongly picked up as first_pos (the
+        # presumed source) below. Deliberately narrow -- other verbs' own
+        # value-taking short flags (rsync's large flag surface especially)
+        # are NOT enumerated here; a disclosed best-effort limitation, same
+        # class as the interpreter inline-write heuristic above.
+        case "$first:$tok" in
+          install:-m|install:-o|install:-g|install:-t) skip_next=1 ;;
+        esac
+        continue
+        ;;
       '>'*|'>>'*) continue ;;
     esac
+    [ -z "$first_pos" ] && first_pos="$tok"
     last="$tok"
   done
 
   case "$first" in
     cp|mv|install|rsync|truncate|patch)
       [ -n "$last" ] && PWT_TARGETS+=("$last")
+      # SEC-13 (security review, 2026-08-21): a DIRECTORY destination puts
+      # the protected basename ONLY in the source token, which the
+      # destination-only check above deliberately ignores --
+      # `cp /tmp/hooks/verify-gate.sh .claude/hooks/` (or `.claude/hooks`,
+      # an existing directory) lands the write at .claude/hooks/verify-
+      # gate.sh but `last` alone is just a directory path that names
+      # nothing protected. Resolve directory + basename(source) too,
+      # for BOTH the explicit trailing-slash form (no filesystem access
+      # needed) and an existing real directory on disk (this hook already
+      # makes one real filesystem check elsewhere -- the one-hop symlink
+      # read in names_protected_path_or_symlink -- so a directory stat
+      # here is the same established, disclosed exception, never a
+      # general resolution engine).
+      if [ "$first" != "patch" ] && [ -n "$last" ] && [ -n "$first_pos" ] && [ "$first_pos" != "$last" ]; then
+        local destdir="$last" destcheck srcbase="${first_pos##*/}"
+        case "$destdir" in
+          */) : ;;
+          *)
+            destcheck="$destdir"
+            case "$destcheck" in
+              /*) : ;;
+              *) [ -n "$PENDING_CD" ] && destcheck="${PENDING_CD%/}/$destcheck" ;;
+            esac
+            if [ -d "$destcheck" ]; then destdir="${destdir}/"; else destdir=""; fi
+            ;;
+        esac
+        [ -n "$destdir" ] && [ -n "$srcbase" ] && PWT_TARGETS+=("${destdir%/}/${srcbase}")
+      fi
       ;;
     sed)
       if printf '%s' "$seg" | grep -Eq -- '(^|[[:space:]])(-[A-Za-z]*i[A-Za-z]*([[:space:]]|=|$)|--in-place([=[:space:]]|$))'; then
@@ -468,18 +541,65 @@ protected_write_targets() {
         esac
       done
       ;;
+    exec)
+      # SEC-13 (security review, 2026-08-21): `exec N> path` binds fd N to
+      # path for the REST OF THE SCRIPT (every later segment, not just this
+      # one) -- a later `echo x >&N` in ANY subsequent segment of the SAME
+      # command then writes to that same path with no path token of its own
+      # for the redirection loop below to see. Record the binding into the
+      # QX_FD_* globals (reset once per hook invocation, below the SEGMENTS
+      # loop's declaration) so a later segment's `>&N` can resolve it. The
+      # target of the `exec N> path` itself is caught directly by the
+      # generic redirection loop below (it matches the same numbered-op
+      # pattern) -- this case only needs to remember the binding.
+      for ((i = 1; i < ${#w[@]}; i++)); do
+        tok="${w[$i]}"
+        if [[ "$tok" =~ ^([0-9]+)(\>\>|\>)(.*)$ ]]; then
+          local fdn="${BASH_REMATCH[1]}" fdtarget="${BASH_REMATCH[3]}"
+          if [ -z "$fdtarget" ] && [ $((i + 1)) -lt "${#w[@]}" ]; then
+            case "${w[$((i + 1))]}" in -*) : ;; *) fdtarget="${w[$((i + 1))]}" ;; esac
+          fi
+          if [ -n "$fdtarget" ]; then
+            QX_FD_NUMS+=("$fdn")
+            QX_FD_PATHS+=("$fdtarget")
+          fi
+        fi
+      done
+      ;;
   esac
 
   # Redirection targets -- ANY command can redirect its OWN output,
   # regardless of verb (`cat x > path`, `echo y >> path`, …).
+  #
+  # SEC-13 (security review, 2026-08-21): the previous version matched ONLY
+  # bare `>`/`>>`, so `cat /tmp/evil 1> .claude/hooks/verify-gate.sh`
+  # (stdout/stderr-numbered), `... &> path` / `... &>> path` (both streams),
+  # and `... >| path` (noclobber-override) all evaded the scanner entirely.
+  # One coherent parser now closes all of them plus the `exec N> path` /
+  # `... >&N` pair recorded above, rather than special-casing tokens one at
+  # a time: an optional leading fd number OR a literal `&`, then `>`, `>>`,
+  # or `>|`, then either an attached target (`2>/tmp/x`), a separate next
+  # token (`2> /tmp/x`), or an `&N` fd-duplication suffix (`>&3`) resolved
+  # against the exec bindings above.
   for ((i = 0; i < ${#w[@]}; i++)); do
     tok="${w[$i]}"
-    case "$tok" in
-      '>>') [ $((i + 1)) -lt "${#w[@]}" ] && PWT_TARGETS+=("${w[$((i + 1))]}") ;;
-      '>>'*) PWT_TARGETS+=("${tok#>>}") ;;
-      '>') [ $((i + 1)) -lt "${#w[@]}" ] && PWT_TARGETS+=("${w[$((i + 1))]}") ;;
-      '>'*) PWT_TARGETS+=("${tok#>}") ;;
-    esac
+    if [[ "$tok" =~ ^([0-9]+|\&)?(\>\>|\>\||\>)(.*)$ ]]; then
+      local rest="${BASH_REMATCH[3]}"
+      case "$rest" in
+        '&'[0-9]*)
+          local dupfd="${rest#&}" j
+          for ((j = 0; j < ${#QX_FD_NUMS[@]}; j++)); do
+            [ "${QX_FD_NUMS[$j]}" = "$dupfd" ] && PWT_TARGETS+=("${QX_FD_PATHS[$j]}")
+          done
+          ;;
+        '')
+          [ $((i + 1)) -lt "${#w[@]}" ] && PWT_TARGETS+=("${w[$((i + 1))]}")
+          ;;
+        *)
+          PWT_TARGETS+=("$rest")
+          ;;
+      esac
+    fi
   done
 }
 
@@ -526,6 +646,11 @@ fi
 SEGMENTS=$(split_segments_quote_aware "$COMMAND")
 PENDING_CD=""
 HIT_SEG=""
+# SEC-13: fd bindings from `exec N> path`, persisted across every segment of
+# THIS one command string (never across separate tool calls -- same
+# documented per-call boundary as PENDING_CD and the rest of this hook).
+QX_FD_NUMS=()
+QX_FD_PATHS=()
 
 while IFS= read -r seg; do
   [ -z "$seg" ] && continue

@@ -321,6 +321,83 @@ else
 fi
 
 # =============================================================================
+# SEC-13 (security review at 4bd824f, 2026-08-21): the SEC-7 destination-only
+# fix opened two vectors it had not existed for. (a) a DIRECTORY destination
+# for cp/mv/install/rsync puts the protected basename only in the SOURCE
+# token, which destination-only checking deliberately ignores. (b) numbered
+# and clobber redirection tokens (1>, 2>, &>, >|, >>, and the exec N> /
+# >&N fd-duplication pair) matched neither the bare '>' nor '>>' the scanner
+# recognized. Both allowed before this fix; every case below drives the
+# SHIPPED hook end to end. The SEC-7 property this must NOT regress -- a
+# protected path as a pure READ argument still allows -- is re-asserted at
+# the end of this section.
+# =============================================================================
+# SEC13_DIR MUST be a real ".../hooks" path segment (not merely containing
+# the substring "hooks") -- names_protected_path's PROT_PATH_ERE requires
+# "hooks" or "scripts" as its OWN path segment, exactly the real vector
+# shape (`.claude/hooks/` / plugin `scripts/`), same directory SEC_TARGET
+# already lives in.
+SEC13_DIR="$(dirname "$SEC_TARGET")"
+mkdir -p "$SEC13_DIR"
+SEC13_TARGET_NOSLASH="$SEC13_DIR"
+SEC13_TARGET_SLASH="$SEC13_DIR/"
+
+# (a) directory-destination form, the exact shape reported: source basename
+# is the ONLY place the protected name appears; destination is a directory.
+sec_deny "cp SOURCE to directory dest, trailing slash" \
+  "cp /tmp/hooks/verify-gate.sh $SEC13_TARGET_SLASH"
+sec_deny "cp SOURCE to EXISTING directory dest, no trailing slash" \
+  "cp /tmp/hooks/verify-gate.sh $SEC13_TARGET_NOSLASH"
+sec_deny "mv SOURCE to directory dest" "mv /tmp/hooks/verify-gate.sh $SEC13_TARGET_SLASH"
+sec_deny "install SOURCE to directory dest" "install -m 0755 /tmp/hooks/verify-gate.sh $SEC13_TARGET_SLASH"
+sec_deny "rsync SOURCE to directory dest" "rsync -a /tmp/hooks/verify-gate.sh $SEC13_TARGET_SLASH"
+sec_allow "cp UNRELATED source basename to directory dest" \
+  "cp /tmp/hooks/readme.md $SEC13_TARGET_SLASH"
+sec_allow "cp SOURCE to a NON-existent dir with no trailing slash (not a directory form)" \
+  "cp /tmp/hooks/verify-gate.sh $TMP/sec13-does-not-exist"
+
+# (b) numbered / clobber redirection tokens.
+sec_deny "1> numbered stdout redirect" "cat /tmp/evil 1> $SEC_TARGET"
+sec_deny "2> numbered stderr redirect" "cat /tmp/evil 2> $SEC_TARGET"
+sec_deny "&> both-streams redirect" "cat /tmp/evil &> $SEC_TARGET"
+sec_deny "&>> both-streams append redirect" "cat /tmp/evil &>> $SEC_TARGET"
+sec_deny "1>> numbered append redirect" "cat /tmp/evil 1>> $SEC_TARGET"
+sec_deny ">| noclobber-override redirect" "cat /tmp/evil >| $SEC_TARGET"
+sec_deny "1>| numbered noclobber-override redirect" "cat /tmp/evil 1>| $SEC_TARGET"
+
+# (b) exec N> path / echo x >&N -- the fd-binding pair QA identified as
+# sharing the SAME root cause as the bare numbered tokens above.
+SEC13_EXEC_CMD="$(printf 'exec 3> %s\necho x >&3' "$SEC_TARGET")"
+sec_deny "exec 3> <protected>; echo x >&3 (fd bound to a protected path)" "$SEC13_EXEC_CMD"
+SEC13_EXEC_UNRELATED="$(printf 'exec 3> %s/unrelated.txt\necho x >&3' "$TMP")"
+sec_allow "exec 3> <unrelated>; echo x >&3 (fd bound to a NON-protected path)" "$SEC13_EXEC_UNRELATED"
+
+# SEC-7 property re-asserted: a protected path as a pure READ argument, with
+# the write elsewhere, must still allow after this section's changes.
+sec_allow "SEC-7 non-regression: grep reads the protected path, writes elsewhere" \
+  "grep -n QUICK $SEC_TARGET > $TMP/sec13-readonly-check.txt"
+
+# --- SEC-13 FAIL-FIRST: every assertion above genuinely fails against the
+# immediately pre-fix commit (4bd824f, before this round's directory-
+# destination and numbered/clobber-redirection handling landed).
+SEC13_BASELINE_SHA="4bd824f"
+if git -C "$ROOT" cat-file -e "${SEC13_BASELINE_SHA}:.claude/hooks/protected-files-guard.sh" 2>/dev/null; then
+  SEC13_BASELINE="$TMP/sec13-baseline-guard.sh"
+  git -C "$ROOT" show "${SEC13_BASELINE_SHA}:.claude/hooks/protected-files-guard.sh" > "$SEC13_BASELINE"
+  SEC13_BASE_DIR_PAYLOAD="$(jq -cn --arg c "cp /tmp/hooks/verify-gate.sh $SEC13_TARGET_SLASH" '{tool_name:"Bash",tool_input:{command:$c}}')"
+  SEC13_BASE_DIR_OUT="$(printf '%s' "$SEC13_BASE_DIR_PAYLOAD" | bash "$SEC13_BASELINE" 2>&1)"
+  SEC13_BASE_1G_PAYLOAD="$(jq -cn --arg c "cat /tmp/evil 1> $SEC_TARGET" '{tool_name:"Bash",tool_input:{command:$c}}')"
+  SEC13_BASE_1G_OUT="$(printf '%s' "$SEC13_BASE_1G_PAYLOAD" | bash "$SEC13_BASELINE" 2>&1)"
+  if is_deny "$SEC13_BASE_DIR_OUT" || is_deny "$SEC13_BASE_1G_OUT"; then
+    notok "SEC-13 FAIL-FIRST: the pre-fix baseline ($SEC13_BASELINE_SHA) unexpectedly already denies (dir: [$SEC13_BASE_DIR_OUT], 1>: [$SEC13_BASE_1G_OUT]) — cannot demonstrate either fix is real"
+  else
+    ok "SEC-13 FAIL-FIRST: the pre-fix baseline ($SEC13_BASELINE_SHA) WRONGLY ALLOWS both the directory-destination cp and the 1> numbered redirect — proving both closures are genuine, deliberate fixes"
+  fi
+else
+  echo "SKIP: commit ${SEC13_BASELINE_SHA} not reachable — SEC-13 fail-first proof could not run"
+fi
+
+# =============================================================================
 # AC11 — FAIL-FIRST: protected-files-guard.sh does not exist on the
 # pre-change baseline, and NO existing hook on main intercepts this vector.
 # =============================================================================

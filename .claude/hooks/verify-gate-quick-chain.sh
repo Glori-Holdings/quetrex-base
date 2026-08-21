@@ -389,6 +389,46 @@ qx_write_bounded_skip() {
   return 0
 }
 
+# qx_write_bounded_skips_for_cap <start-idx> -- SEC-15 (security review,
+# 2026-08-21): on a CAP_HIT, verify-gate.sh's run loop used to append the
+# boundedQuick lines for CHAIN[start-idx..end] straight after whatever
+# genuine result an EARLIER command in this SAME run already wrote, so the
+# ledger's `tail -n 1` yielded a boundedQuick (exit:null) line even when a
+# real, executed result exists elsewhere in this run -- exactly git-
+# workflow.md Gate 2's refusal test ("last verify command exited null").
+# The heavy-filter path (qx_filter_heavy_chain, above) is accidentally safe
+# because ITS boundedQuick lines are written BEFORE the run loop starts.
+# Made consistent here: pull this run's own genuine lines (everything
+# appended since the caller's LEDGER_RUN_START_BYTES) off the ledger tail,
+# write the cap-cut boundedQuick lines in their place, then re-append the
+# genuine lines -- so the ledger's last line is a genuine executed result
+# from this run whenever one exists. Reads CHAIN (array), LEDGER,
+# LEDGER_RUN_START_BYTES from the caller's scope (verify-gate.sh globals).
+qx_write_bounded_skips_for_cap() {
+  local start_idx="$1" i cur_bytes this_run_tail=""
+  if [ -n "${LEDGER:-}" ] && [ -f "$LEDGER" ]; then
+    cur_bytes=$(wc -c < "$LEDGER" 2>/dev/null | tr -d ' ')
+    case "$cur_bytes" in ''|*[!0-9]*) cur_bytes=0 ;; esac
+    if [ "$cur_bytes" -gt "${LEDGER_RUN_START_BYTES:-0}" ]; then
+      this_run_tail=$(tail -c "+$(( ${LEDGER_RUN_START_BYTES:-0} + 1 ))" "$LEDGER" 2>/dev/null)
+      # BSD `head -c 0` (macOS stock head) errors and exits non-zero rather
+      # than emitting an empty file, silently no-op-ing the truncate and
+      # duplicating the genuine line when it gets re-appended below.
+      if [ "${LEDGER_RUN_START_BYTES:-0}" -eq 0 ]; then
+        : > "$LEDGER.qxtmp" 2>/dev/null && mv "$LEDGER.qxtmp" "$LEDGER" 2>/dev/null
+      else
+        head -c "${LEDGER_RUN_START_BYTES:-0}" "$LEDGER" > "$LEDGER.qxtmp" 2>/dev/null \
+          && mv "$LEDGER.qxtmp" "$LEDGER" 2>/dev/null
+      fi
+    fi
+  fi
+  for ((i = start_idx; i < ${#CHAIN[@]}; i++)); do
+    qx_write_bounded_skip "${CHAIN[$i]}"
+  done
+  [ -n "$this_run_tail" ] && [ -n "${LEDGER:-}" ] && printf '%s\n' "$this_run_tail" >> "$LEDGER" 2>/dev/null
+  return 0
+}
+
 # --- qx_filter_heavy_chain: the heavy-command filter (CORRECTED 2026-08-21) -
 # QUICK path only, declared verifyQuick included — a declared chain is not
 # exempt. A requiredEnv-skip-eligible command is never excluded (kept so the

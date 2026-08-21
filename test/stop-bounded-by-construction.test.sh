@@ -185,6 +185,58 @@ CAPMENTION2=$(printf '%s' "$OUT2" | grep -ci 'cap')
 [ "$CAPMENTION2" -ge 1 ] && ok "AC2: stdout names the cap" || notok "AC2: stdout does not mention the cap (out: [$OUT2])"
 
 # =============================================================================
+# SEC-15 (security review, 2026-08-21): a genuine EARLIER command in the same
+# run, followed by a LATER command the cap cuts, must leave the ledger's
+# LAST LINE as the genuine result — never the cap-cut boundedQuick skip.
+# Before this fix the boundedQuick lines were appended straight after
+# whatever genuine lines this SAME run had already written, so the ledger's
+# tail read exit:null even though a real, executed result exists earlier in
+# the very same run -- exactly git-workflow.md Gate 2's refusal test ("last
+# verify command exited null").
+# =============================================================================
+F15="$TMP/sec15"
+mkrepo "$F15" '{"verify":["sh -c \"exit 0\"","sh -c \"sleep 20\""],"verifyQuick":["sh -c \"exit 0\"","sh -c \"sleep 20\""]}'
+OUT15="$(fire_ev "$F15" Stop QUETREX_VERIFY_QUICK_CAP=2)"; CODE15=$?
+BLOCKS15=$(block_count "$OUT15")
+LEDGER15_FILE="$F15/.quetrex/verify-ledger.jsonl"
+LAST_LINE_EXIT="$(tail -n 1 "$LEDGER15_FILE" 2>/dev/null | jq -r '.exit' 2>/dev/null)"
+LAST_LINE_CMD="$(tail -n 1 "$LEDGER15_FILE" 2>/dev/null | jq -r '.cmd' 2>/dev/null)"
+GENUINE15="$(ledger_count_for "$F15" 'sh -c "exit 0"')"
+BOUNDED15="$(is_bounded_skip_line "$F15" 'sh -c "sleep 20"')"
+
+[ "$CODE15" -eq 0 ] && ok "SEC-15: hook exit 0 (cap-allow, not a block)" || notok "SEC-15: expected exit 0, got $CODE15"
+[ "$BLOCKS15" -eq 0 ] && ok "SEC-15: 0 block decisions" || notok "SEC-15: expected 0 block decisions, got $BLOCKS15 (out: [$OUT15])"
+[ "$GENUINE15" = "1" ] && ok "SEC-15: the earlier genuine command still has exactly 1 ledger line" \
+  || notok "SEC-15: expected 1 genuine ledger line for the earlier command, got $GENUINE15"
+[ "$BOUNDED15" = "1" ] && ok "SEC-15: the cap-cut command still has exactly 1 boundedQuick ledger line" \
+  || notok "SEC-15: expected 1 boundedQuick line for the cap-cut command, got $BOUNDED15"
+[ "$LAST_LINE_CMD" = 'sh -c "exit 0"' ] && ok "SEC-15: the ledger's LAST LINE is the genuine earlier command, not the cap-cut boundedQuick skip" \
+  || notok "SEC-15: expected the ledger's last line .cmd to be the genuine earlier command, got [$LAST_LINE_CMD] (full: [$(cat "$LEDGER15_FILE" 2>/dev/null)])"
+[ "$LAST_LINE_EXIT" = "0" ] && ok "SEC-15: the ledger's LAST LINE .exit is 0 (a real result), never null" \
+  || notok "SEC-15: expected the ledger's last line .exit to be 0, got [$LAST_LINE_EXIT] — this is exactly git-workflow.md Gate 2's refusal test"
+
+# --- SEC-15 FAIL-FIRST: the pre-fix baseline (4bd824f, before this run's
+# reordering landed) genuinely leaves the boundedQuick skip as the ledger's
+# last line for the identical fixture.
+SEC15_BASELINE_SHA="4bd824f"
+if git -C "$ROOT" cat-file -e "${SEC15_BASELINE_SHA}:.claude/hooks/verify-gate.sh" 2>/dev/null; then
+  SEC15_BASELINE="$TMP/sec15-baseline-verify-gate.sh"
+  git -C "$ROOT" show "${SEC15_BASELINE_SHA}:.claude/hooks/verify-gate.sh" > "$SEC15_BASELINE"
+  FB15="$TMP/sec15-baseline-fixture"
+  mkrepo "$FB15" '{"verify":["sh -c \"exit 0\"","sh -c \"sleep 20\""],"verifyQuick":["sh -c \"exit 0\"","sh -c \"sleep 20\""]}'
+  printf '{"hook_event_name":"Stop","cwd":"%s"}' "$FB15" \
+    | ( cd "$FB15" && CLAUDE_PROJECT_DIR="$FB15" QUETREX_VERIFY_QUICK_CAP=2 bash "$SEC15_BASELINE" >/dev/null 2>&1 )
+  BASE_LAST_EXIT="$(tail -n 1 "$FB15/.quetrex/verify-ledger.jsonl" 2>/dev/null | jq -r '.exit' 2>/dev/null)"
+  if [ "$BASE_LAST_EXIT" != "0" ]; then
+    ok "SEC-15 FAIL-FIRST: the pre-fix baseline ($SEC15_BASELINE_SHA) leaves a non-genuine last ledger line (.exit=[$BASE_LAST_EXIT]) for the identical fixture — proving the reordering fix is genuine"
+  else
+    notok "SEC-15 FAIL-FIRST: the pre-fix baseline already has a genuine last line either (.exit=[$BASE_LAST_EXIT]) — cannot demonstrate the fix is real"
+  fi
+else
+  echo "SKIP: commit ${SEC15_BASELINE_SHA} not reachable — SEC-15 fail-first proof could not run"
+fi
+
+# =============================================================================
 # AC3 — a genuinely failing CHEAP command still blocks (red stays red).
 # =============================================================================
 F3="$TMP/ac3"
