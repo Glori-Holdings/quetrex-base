@@ -128,25 +128,245 @@ EOF
   return 1
 }
 
+# =============================================================================
+# >>> QX-SEGSPLIT BEGIN — copied verbatim from .claude/hooks/merge-gate.sh
+# (split_segments_quote_aware, normalize_segment), the SAME functions
+# protected-files-guard.sh already copies from the same source. Needed here
+# to find the ACTUAL COMMAND TOKEN of each segment of a (possibly compound)
+# verify[] command — see qx_is_heavy_segment below for why a whole-string
+# regex was replaced (2026-08-21, operator-directed correction: substring
+# matching flagged `echo BUILD_MARKER` as heavy and matched a TMPDIR PATH
+# fragment, silently dropping genuinely cheap commands and their block
+# coverage — the exact failure mode the cap, not the matcher, is supposed to
+# own). Not sourced (merge-gate.sh executes at load); copied and drift-pinned
+# the same way protected-files-guard.sh's copy is (byte-identity, by
+# function-name boundary — see that file's AC16 for the pattern; this copy
+# does not yet have its own mechanical pin, which is a disclosed gap, not an
+# oversight — see the developer's report).
+# =============================================================================
+split_segments_quote_aware() {
+  # Two `local` statements, same reason as tokenize_argv below: word
+  # expansion for the WHOLE `local` command happens before the builtin
+  # runs, against the enclosing scope's state -- `n=${#s}` on the same
+  # line as `s="$1"` would see `s` as unset under `set -u`.
+  local s="$1"
+  local i=0 n=${#s} c two nc out='' in_sq=0 in_dq=0 in_cm=0 have=0
+  while [ "$i" -lt "$n" ]; do
+    c="${s:$i:1}"
+    if [ "$in_cm" -eq 1 ]; then
+      out+="$c"
+      if [ "$c" = $'\n' ]; then in_cm=0; have=0; fi
+    elif [ "$in_sq" -eq 1 ]; then
+      out+="$c"; have=1
+      [ "$c" = "'" ] && in_sq=0
+    elif [ "$in_dq" -eq 1 ]; then
+      out+="$c"; have=1
+      if [ "$c" = '\' ] && [ $((i + 1)) -lt "$n" ]; then
+        i=$((i + 1)); out+="${s:$i:1}"
+      elif [ "$c" = '"' ]; then
+        in_dq=0
+      fi
+    else
+      case "$c" in
+        ' ' | $'\t')
+          out+="$c"; have=0
+          ;;
+        $'\n')
+          out+="$c"; have=0
+          ;;
+        "'") in_sq=1; out+="$c"; have=1 ;;
+        '"') in_dq=1; out+="$c"; have=1 ;;
+        '#')
+          # A `#` starts a shell comment only at the START of a word --
+          # tracked with the SAME `have` flag tokenize_argv uses (whether
+          # we're currently mid-token), not by inspecting the last emitted
+          # character. Those disagree: `a\ #x` (an ESCAPED space before
+          # `#`) leaves the literal character before `#` a space either
+          # way, but the escape means we're still INSIDE the word "a x" —
+          # `have` correctly stays 1 through an escaped separator (see the
+          # `\` case below), while inspecting `${out: -1}` could not tell
+          # an escaped separator from a real one and wrongly started a
+          # "comment" mid-word. A differential test (DEFECT K) feeds both
+          # functions the same corpus and fails on any disagreement.
+          if [ "$have" -eq 0 ]; then
+            in_cm=1
+          fi
+          out+="$c"; have=1
+          ;;
+        '\')
+          if [ $((i + 1)) -lt "$n" ]; then
+            nc="${s:$((i + 1)):1}"
+            if [ "$nc" = $'\n' ]; then
+              # Genuine continuation: an unescaped backslash immediately
+              # followed by a newline. Drop BOTH characters -- a real shell
+              # removes them entirely, joining the two physical lines with
+              # nothing inserted between them.
+              i=$((i + 1))
+            else
+              out+="$c"; i=$((i + 1)); out+="$nc"; have=1
+            fi
+          else
+            out+="$c"; have=1
+          fi
+          ;;
+        '&' | '|')
+          two="${s:$i:2}"
+          if [ "$two" = "&&" ] || [ "$two" = "||" ]; then
+            out+=$'\n'
+            i=$((i + 1))
+          else
+            out+=$'\n'
+          fi
+          have=0
+          ;;
+        ';')
+          out+=$'\n'
+          have=0
+          ;;
+        *)
+          out+="$c"; have=1
+          ;;
+      esac
+    fi
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
+normalize_segment() {
+  local s="$1" first
+  # A leading `GH_REPO=value` (or `env GH_REPO=value`) is stripped below like
+  # any other wrapper/assignment prefix — but gh itself reads GH_REPO from
+  # the environment when no --repo/-R flag is present, so silently discarding
+  # it here would mean `GH_REPO=other-org/other-repo gh pr merge 7` and
+  # `env GH_REPO=other-org/other-repo gh pr merge 7` carry a real repo
+  # selector that this hook then never sees. Capture it (last one wins, same
+  # as gh's own last-assignment-wins semantics) into NORM_GH_REPO_PREFIX so
+  # the caller can fold it into the cross-repo signal set. Reset per call —
+  # only the assignments IN THIS SEGMENT are in scope; see the boundary note
+  # above `normalize_segment`'s call site for what is deliberately NOT (an
+  # `export GH_REPO=x;` on an EARLIER, separate segment of the same line).
+  NORM_GH_REPO_PREFIX=""
+  s=$(printf '%s' "$s" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  while [ -n "$s" ]; do
+    first="${s%%[[:space:]]*}"
+    case "$first" in
+      sudo|env|eval|command|nohup|time)
+        s="${s#"$first"}" ;;
+      bash|sh|zsh)
+        # bash -c '<payload>' — unwrap the payload, then keep normalizing it.
+        if [[ "$s" =~ ^(bash|sh|zsh)[[:space:]]+-c[[:space:]]+(.*)$ ]]; then
+          s="${BASH_REMATCH[2]}"
+          s="${s#[\"\']}"; s="${s%[\"\']}"
+        else
+          break
+        fi ;;
+      *)
+        # A leading VAR=value assignment only — matched with a regex, not a
+        # case glob: `git commit -m "a=b"` also contains `=`, and stripping to
+        # the first space there would drop the `git` and silently un-detect a
+        # real vector.
+        if [[ "$first" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+          case "$first" in
+            GH_REPO=*) NORM_GH_REPO_PREFIX="${first#GH_REPO=}" ;;
+          esac
+          s="${s#"$first"}"
+        else
+          break
+        fi ;;
+    esac
+    s=$(printf '%s' "$s" | sed 's/^[[:space:]]*//')
+  done
+  NORM_RESULT="$s"
+}
+# =============================================================================
+# <<< QX-SEGSPLIT END
+# =============================================================================
+
+# --- qx_is_heavy_segment: PRECISE, structured command-token matching -------
+# (CORRECTED 2026-08-21, operator-directed — replaces a whole-command-string
+# substring regex that matched `echo BUILD_MARKER` as heavy and matched a
+# TMPDIR PATH fragment ("...-test.XXXXXX") as heavy, silently dropping
+# genuinely cheap commands and their block coverage). Anchors on the actual
+# command TOKEN — the first word of the (wrapper-stripped) segment, and at
+# most the next two words — and ignores every path and argument entirely. A
+# MISSED heavy command is harmless (the wall-clock cap, not this matcher, is
+# the safety property); a FALSE heavy match is not — it silently drops a
+# cheap command's block coverage — so this is intentionally NARROW. Simple
+# whitespace tokenization (not full argv quoting) is sufficient and correct
+# here: the command verb / subcommand / script name this function inspects
+# is never meaningfully quoted in practice; only later arguments are, and
+# those are ignored by design ("ignore paths and arguments entirely").
+qx_is_heavy_segment() {
+  local seg="$1"
+  local -a w
+  read -ra w <<< "$seg"
+  [ "${#w[@]}" -ge 1 ] || return 1
+  local bin="${w[0]##*/}"
+  # npx wraps a real binary invocation by name; unwrap exactly one level.
+  if [ "$bin" = "npx" ] && [ "${#w[@]}" -ge 2 ]; then
+    w=("${w[@]:1}")
+    bin="${w[0]##*/}"
+  fi
+  case "$bin" in
+    npm|yarn|pnpm|bun)
+      case "${w[1]:-}" in
+        run)
+          case "${w[2]:-}" in
+            test|build|e2e|test:*|build:*) return 0 ;;
+          esac
+          ;;
+        test) return 0 ;;   # the well-known bare shorthand ("npm test" et al)
+      esac
+      return 1
+      ;;
+    pytest|vitest|jest|cypress) return 0 ;;
+    playwright)
+      [ "${w[1]:-}" = "test" ] && return 0
+      return 1
+      ;;
+    cargo|go)
+      case "${w[1]:-}" in test|build) return 0 ;; esac
+      return 1
+      ;;
+    mvn|gradle)
+      [ "${w[1]:-}" = "test" ] && return 0
+      return 1
+      ;;
+  esac
+  return 1
+}
+
+# qx_is_heavy_command <full-command-string> -- splits on shell operators
+# (&&/||/;/|), strips wrapper prefixes from EACH segment, and returns 0
+# (heavy) if ANY segment matches a heavy shape. A compound command ("cd app
+# && npm test") is heavy if any part of it is.
+qx_is_heavy_command() {
+  local cmd="$1" seg norm
+  while IFS= read -r seg; do
+    [ -z "$seg" ] && continue
+    normalize_segment "$seg"
+    norm="$NORM_RESULT"
+    [ -z "$norm" ] && continue
+    qx_is_heavy_segment "$norm" && return 0
+  done <<< "$(split_segments_quote_aware "$cmd")"
+  return 1
+}
+
 # --- qx_filter_heavy_chain: the heavy-command filter (CORRECTED 2026-08-21) -
 # QUICK path only, declared verifyQuick included — a declared chain is not
-# exempt. Heavy = bounded case-insensitive match on
-# test|tests|build|e2e|playwright|vitest|jest|cypress ("testing-lib" is NOT
-# flagged; "npm test"/"npm run build" are). CORRECTED: a requiredEnv-skip-
-# eligible command is never excluded (kept so the run loop records its skip);
-# if filtering would leave the CHAIN array EMPTY, the caller's array is left
-# UNTOUCHED (the ORIGINAL selected chain still runs, under the cap) — never
-# "filter to empty, run nothing". The regex is an optimization; the cap is
-# the safety property. Bias to over-exclusion otherwise — merge-gate GATE 3
-# backstops with the FULL chain at the merge boundary. Reads/writes the
+# exempt. A requiredEnv-skip-eligible command is never excluded (kept so the
+# run loop records its skip); if filtering would leave the CHAIN array EMPTY,
+# the caller's array is left UNTOUCHED (the ORIGINAL selected chain still
+# runs, under the cap) — never "filter to empty, run nothing". The matcher
+# is an optimization; the cap is the safety property. Reads/writes the
 # global array CHAIN in place; no new customer-controlled input.
 qx_filter_heavy_chain() {
   [ "$QUICK" -eq 1 ] || return 0
   local _c
   local -a filtered=()
-  local heavy_ere='(^|[^A-Za-z0-9])(test|tests|build|e2e|playwright|vitest|jest|cypress)([^A-Za-z0-9]|$)'
   for _c in "${CHAIN[@]}"; do
-    if should_skip_for_env "$_c" || ! printf '%s' "$_c" | grep -Eiq "$heavy_ere"; then
+    if should_skip_for_env "$_c" || ! qx_is_heavy_command "$_c"; then
       filtered+=("$_c")
     fi
   done

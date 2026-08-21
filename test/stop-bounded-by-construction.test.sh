@@ -12,12 +12,25 @@
 # behavior: marker files written by the fixture's own commands, the ledger
 # file, stdout, exit code, wall clock.
 #
-# AC1: a heavy command (contains "test", sleeps 30s) never runs; a cheap one does.
+# HEAVY FIXTURES USE REAL COMMAND SHAPES (operator-directed correction,
+# 2026-08-21 — see verify-gate-quick-chain.sh's qx_is_heavy_segment): the
+# matcher is now PRECISE structured-token matching (npm/yarn/pnpm/bun run
+# <script>, bare "npm test", or a direct test/build binary), not a
+# whole-string substring regex — a `# test` comment tag on an arbitrary `sh
+# -c` command no longer counts as heavy, and correctly so. Every "heavy"
+# fixture below is therefore a REAL npm-shaped invocation, with its actual
+# behavior (sleep/fail/mark) supplied by a per-fixture PATH-shimmed `npm` (or
+# other binary) — never a real npm install. A "cheap" fixture stays a plain
+# `sh -c`/`echo`, exactly as before.
+#
+# AC1: a heavy command ("npm test", shimmed to sleep 30s) never runs; a cheap
+#      one does.
 # AC2: the quick-chain wall-clock cap (QUETREX_VERIFY_QUICK_CAP) cuts a run
 #      short and ALLOWS — no ledger line for the cut command, no containment
 #      side effects (ESCALATION/verify-attempts untouched).
 # AC3: a genuinely failing CHEAP command still blocks (red stays red).
-# AC4: 12 commands (7 heavy, 5 cheap) — the derived chain runs exactly the 5.
+# AC4: 12 commands (7 heavy, real npm/playwright/vitest/jest/cypress shapes;
+#      5 cheap) — the derived chain runs exactly the 5.
 # AC5: an ALL-heavy verify[] runs nothing, allows, and says so once.
 # AC6: SubagentStop + a non-subset verifyQuick still runs the real chain and
 #      blocks on its genuine failure (subset enforcement is untouched).
@@ -25,6 +38,11 @@
 # the quick-chain cap apply to a DECLARED verifyQuick too, not only an
 # auto-derived one — a repo that explicitly configures a slow verifyQuick is
 # bounded exactly like a repo that configures none.
+# PRECISION (coordinator correction, 2026-08-21): the matcher must NOT flag a
+# plain `echo` whose text happens to contain "BUILD"/"TEST", and must NOT
+# flag a command whose PATH ARGUMENT merely traverses a directory containing
+# "test" — pinned directly against the exact two collision shapes the
+# coordinator's own review found.
 # AC11 (fail-first): every new assertion below is proven to fail against the
 # pre-change baseline resolved from origin/main (fallback main).
 
@@ -69,16 +87,28 @@ ledger_lines_total() {
   [ -f "$1/.quetrex/verify-ledger.jsonl" ] || { echo 0; return; }
   wc -l < "$1/.quetrex/verify-ledger.jsonl" | tr -d ' '
 }
+# mkshim <dir> <name> <body> — writes an executable fake binary at
+# <dir>/<name> whose body is <body> (a real shell script fragment). Used to
+# give a REAL npm/playwright/vitest/jest/cypress-shaped command controllable
+# behavior (sleep/fail/mark) without a real install.
+mkshim() {
+  local dir="$1" name="$2" body="$3"
+  mkdir -p "$dir"
+  { printf '#!/usr/bin/env bash\n'; printf '%s\n' "$body"; } > "$dir/$name"
+  chmod +x "$dir/$name"
+}
 
 # =============================================================================
-# AC1 — a heavy command never runs; a cheap one does. Wall clock proves it:
-# the heavy command sleeps 30s, so >=30s would mean it ran.
+# AC1 — a heavy command (a real "npm test" invocation) never runs; a cheap
+# one does. Wall clock proves it: the shimmed npm sleeps 30s on "test", so
+# >=30s would mean it ran.
 # =============================================================================
 F1="$TMP/ac1"
 MARK1="$TMP/ac1-marks"; : > "$MARK1"
-mkrepo "$F1" '{"verify":["sh -c \"echo cheap >> '"$MARK1"'\"","sh -c \"echo heavy >> '"$MARK1"'; sleep 30\" # test"]}'
+mkrepo "$F1" '{"verify":["sh -c \"echo cheap >> '"$MARK1"'\"","npm test"]}'
+mkshim "$F1/fakebin" npm "echo heavy >> '"$MARK1"'; sleep 30"
 START1=$(date +%s)
-OUT1="$(fire_ev "$F1" Stop)"; CODE1=$?
+OUT1="$(fire_ev "$F1" Stop PATH="$F1/fakebin:$PATH")"; CODE1=$?
 END1=$(date +%s)
 ELAPSED1=$((END1-START1))
 BLOCKS1=$(block_count "$OUT1")
@@ -87,7 +117,7 @@ HEAVY1=$(grep -c '^heavy$' "$MARK1" 2>/dev/null; true); HEAVY1=${HEAVY1:-0}
 
 [ "$CODE1" -eq 0 ] && ok "AC1: hook exit 0" || notok "AC1: expected exit 0, got $CODE1"
 [ "$BLOCKS1" -eq 0 ] && ok "AC1: 0 block decisions" || notok "AC1: expected 0 block decisions, got $BLOCKS1 (out: [$OUT1])"
-[ "$HEAVY1" -eq 0 ] && ok "AC1: the heavy (sleeping) command never ran (0 marker lines)" \
+[ "$HEAVY1" -eq 0 ] && ok "AC1: the heavy (\"npm test\", sleeping) command never ran (0 marker lines)" \
   || notok "AC1: the heavy command ran ($HEAVY1 marker lines) — it should have been filtered"
 [ "$CHEAP1" -eq 1 ] && ok "AC1: the cheap command ran exactly once" \
   || notok "AC1: expected exactly 1 cheap marker line, got $CHEAP1"
@@ -97,6 +127,9 @@ HEAVY1=$(grep -c '^heavy$' "$MARK1" 2>/dev/null; true); HEAVY1=${HEAVY1:-0}
 # =============================================================================
 # AC2 — the quick-chain cap cuts the run and ALLOWS; nothing is recorded for
 # the cut command; ESCALATION and verify-attempts are untouched (containment).
+# A cheap `sh -c "sleep 20"` deliberately stays UN-heavy here (this AC is
+# about the cap, not the matcher — see AC5b for a heavy command hitting the
+# cap via the empty-filter fallback).
 # =============================================================================
 F2="$TMP/ac2"
 mkrepo "$F2" '{"verify":["sh -c \"sleep 20\""],"verifyQuick":["sh -c \"sleep 20\""]}'
@@ -150,24 +183,40 @@ printf '%s' "$REASON3" | grep -Eq 'exited 9([^0-9]|$)' \
   || notok "AC3: expected ledger .sha == $HEAD3, got [$LEDGER3_SHA]"
 
 # =============================================================================
-# AC4 — 12 commands (7 heavy, 5 cheap): the derived chain runs exactly the 5.
+# AC4 — 12 commands: 7 REAL heavy shapes (npm test, npm run build, npm run
+# e2e, playwright test, vitest, jest, cypress) + 5 cheap. The derived chain
+# runs exactly the 5. PATH-shimmed binaries mark if (and only if) they are
+# ever actually invoked — the filter must keep every one of them from ever
+# running at all.
 # =============================================================================
 F4="$TMP/ac4"
 MARK4="$TMP/ac4-marks"; : > "$MARK4"
-V4='{"verify":['
-for kw in test tests build e2e playwright vitest cypress; do
-  V4="${V4}\"sh -c \\\"echo H_${kw} >> ${MARK4}\\\" # ${kw}\","
-done
+mkshim "$F4/fakebin" npm '
+case "$1 $2" in
+  "test ") echo H_npmtest >> '"$MARK4"' ;;
+  *) case "$1" in
+       run) case "$2" in
+              build) echo H_npmbuild >> '"$MARK4"' ;;
+              e2e) echo H_npme2e >> '"$MARK4"' ;;
+            esac ;;
+     esac ;;
+esac
+exit 0'
+mkshim "$F4/fakebin" playwright 'echo H_playwright >> '"$MARK4"'; exit 0'
+mkshim "$F4/fakebin" vitest 'echo H_vitest >> '"$MARK4"'; exit 0'
+mkshim "$F4/fakebin" jest 'echo H_jest >> '"$MARK4"'; exit 0'
+mkshim "$F4/fakebin" cypress 'echo H_cypress >> '"$MARK4"'; exit 0'
+V4='{"verify":["npm test","npm run build","npm run e2e","playwright test","vitest","jest","cypress",'
 for i in 1 2 3 4 5; do
   V4="${V4}\"sh -c \\\"echo C_${i} >> ${MARK4}\\\"\""
   [ "$i" -lt 5 ] && V4="${V4},"
 done
 V4="${V4}]}"
 mkrepo "$F4" "$V4"
-OUT4="$(fire_ev "$F4" Stop)"; CODE4=$?
+OUT4="$(fire_ev "$F4" Stop PATH="$F4/fakebin:$PATH")"; CODE4=$?
 BLOCKS4=$(block_count "$OUT4")
 HEAVY4_TOTAL=0
-for kw in test tests build e2e playwright vitest cypress; do
+for kw in npmtest npmbuild npme2e playwright vitest jest cypress; do
   n=$(grep -c "^H_${kw}\$" "$MARK4" 2>/dev/null; true); n=${n:-0}
   HEAVY4_TOTAL=$((HEAVY4_TOTAL+n))
 done
@@ -180,7 +229,7 @@ LEDGER4_TOTAL="$(ledger_lines_total "$F4")"
 
 [ "$CODE4" -eq 0 ] && ok "AC4: hook exit 0" || notok "AC4: expected exit 0, got $CODE4"
 [ "$BLOCKS4" -eq 0 ] && ok "AC4: 0 block decisions" || notok "AC4: expected 0 block decisions, got $BLOCKS4"
-[ "$HEAVY4_TOTAL" -eq 0 ] && ok "AC4: 0 total marker lines from the 7 heavy commands" \
+[ "$HEAVY4_TOTAL" -eq 0 ] && ok "AC4: 0 total marker lines from the 7 heavy commands (none ever invoked)" \
   || notok "AC4: expected 0 heavy marker lines, got $HEAVY4_TOTAL"
 [ "$CHEAP4_TOTAL" -eq 5 ] && ok "AC4: exactly 5 total marker lines from the 5 cheap commands (one each)" \
   || notok "AC4: expected 5 cheap marker lines, got $CHEAP4_TOTAL"
@@ -192,11 +241,9 @@ LEDGER4_TOTAL="$(ledger_lines_total "$F4")"
 # does NOT run nothing. The plan's original AC5 text ("nothing is executed,
 # the finish is allowed... stdout == exactly 1 line") is EXPLICITLY SUPERSEDED
 # — filtering to an EMPTY chain allowed a red finish with ZERO evidence
-# written (measured: test/verify-gate.test.sh's AC2/ADV-K and
-# test/env-derive.test.sh's AC20 all depended on a heavy-named command
-# actually running or being recorded skipped). The corrected rule: if
-# filtering would leave nothing runnable, DISCARD the filter and run the
-# ORIGINAL chain instead, still under the wall-clock cap. Two real fixtures
+# written. The corrected rule: if filtering would leave nothing runnable,
+# DISCARD the filter and run the ORIGINAL chain instead, still under the
+# wall-clock cap. Two real fixtures (a real "npm test" invocation, shimmed)
 # prove both directions of that fallback:
 #   AC5a — a fast-FAILING all-heavy chain still runs for real and BLOCKS,
 #          with a genuine ledger line (the cap never even has to fire).
@@ -205,12 +252,13 @@ LEDGER4_TOTAL="$(ledger_lines_total "$F4")"
 #          instead of a chain that was never filtered in the first place).
 # =============================================================================
 F5A="$TMP/ac5a"
-mkrepo "$F5A" '{"verify":["sh -c \"exit 3\" # test"]}'
+mkrepo "$F5A" '{"verify":["npm test"]}'
+mkshim "$F5A/fakebin" npm "exit 3"
 HEAD5A="$(git -C "$F5A" rev-parse HEAD)"
-OUT5A="$(fire_ev "$F5A" Stop)"; CODE5A=$?
+OUT5A="$(fire_ev "$F5A" Stop PATH="$F5A/fakebin:$PATH")"; CODE5A=$?
 BLOCKS5A=$(block_count "$OUT5A")
 REASON5A="$(printf '%s' "$OUT5A" | jq -r '.reason // empty' 2>/dev/null)"
-LEDGER5A="$(jq -s -c --arg c "sh -c \"exit 3\" # test" '[.[] | select(.cmd==$c)]' "$F5A/.quetrex/verify-ledger.jsonl" 2>/dev/null)"
+LEDGER5A="$(jq -s -c --arg c "npm test" '[.[] | select(.cmd==$c)]' "$F5A/.quetrex/verify-ledger.jsonl" 2>/dev/null)"
 LEDGER5A_N="$(printf '%s' "$LEDGER5A" | jq 'length' 2>/dev/null)"
 LEDGER5A_EXIT="$(printf '%s' "$LEDGER5A" | jq -r '.[0].exit // empty' 2>/dev/null)"
 
@@ -224,9 +272,10 @@ printf '%s' "$REASON5A" | grep -Eq 'exited 3([^0-9]|$)' && ok "AC5a: block reaso
   || notok "AC5a: expected 1 ledger line with exit 3, got n=$LEDGER5A_N exit=$LEDGER5A_EXIT"
 
 F5B="$TMP/ac5b"
-mkrepo "$F5B" '{"verify":["sh -c \"sleep 20\" # test"]}'
+mkrepo "$F5B" '{"verify":["npm test"]}'
+mkshim "$F5B/fakebin" npm "sleep 20"
 START5B=$(date +%s)
-OUT5B="$(fire_ev "$F5B" Stop QUETREX_VERIFY_QUICK_CAP=2)"; CODE5B=$?
+OUT5B="$(fire_ev "$F5B" Stop QUETREX_VERIFY_QUICK_CAP=2 PATH="$F5B/fakebin:$PATH")"; CODE5B=$?
 END5B=$(date +%s)
 ELAPSED5B=$((END5B-START5B))
 BLOCKS5B=$(block_count "$OUT5B")
@@ -272,8 +321,12 @@ printf '%s' "$REASON6" | grep -qi 'not a subset' && ok "AC6: reason case-insensi
 # =============================================================================
 F7="$TMP/addendum"
 MARK7="$TMP/addendum-marks"; : > "$MARK7"
-mkrepo "$F7" '{"verify":["sh -c \"echo LINT >> '"$MARK7"'\"","sh -c \"echo TESTED >> '"$MARK7"'\" # test"],"verifyQuick":["sh -c \"echo LINT >> '"$MARK7"'\"","sh -c \"echo TESTED >> '"$MARK7"'\" # test"]}'
-OUT7="$(fire_ev "$F7" Stop)"; CODE7=$?
+mkshim "$F7/fakebin" npm '
+if [ "$1" = "run" ] && [ "$2" = "lint" ]; then echo LINT >> '"$MARK7"'; exit 0; fi
+if [ "$1" = "test" ]; then echo TESTED >> '"$MARK7"'; exit 0; fi
+exit 0'
+mkrepo "$F7" '{"verify":["npm run lint","npm test"],"verifyQuick":["npm run lint","npm test"]}'
+OUT7="$(fire_ev "$F7" Stop PATH="$F7/fakebin:$PATH")"; CODE7=$?
 BLOCKS7=$(block_count "$OUT7")
 LINT7=$(grep -c '^LINT$' "$MARK7" 2>/dev/null; true); LINT7=${LINT7:-0}
 TESTED7=$(grep -c '^TESTED$' "$MARK7" 2>/dev/null; true); TESTED7=${TESTED7:-0}
@@ -284,6 +337,30 @@ TESTED7=$(grep -c '^TESTED$' "$MARK7" 2>/dev/null; true); TESTED7=${TESTED7:-0}
   || notok "ADDENDUM: expected the cheap declared-quick command to run once, got $LINT7"
 [ "$TESTED7" -eq 0 ] && ok "ADDENDUM: the declared verifyQuick's heavy command was filtered out (a declared chain is not exempt)" \
   || notok "ADDENDUM: the heavy command in a DECLARED verifyQuick ran anyway ($TESTED7) — declared chains must not be exempt from the heavy filter"
+
+# =============================================================================
+# PRECISION — the two exact collision shapes the coordinator's review found:
+# a plain `echo` containing "BUILD"/"TEST" must NOT be flagged heavy, and a
+# command whose PATH ARGUMENT merely traverses a directory named with "test"
+# in it must NOT be flagged heavy either. Both must actually RUN.
+# =============================================================================
+F8="$TMP/precision-test-dir"   # deliberately a tmpdir-style name containing "test"
+MARK8="$TMP/precision-marks"; : > "$MARK8"
+mkrepo "$F8" '{"verify":["echo BUILD_MARKER >> '"$MARK8"'","echo TEST_MARKER >> '"$MARK8"'","cat '"$F8"'/.quetrex/verify.json >> /dev/null"]}'
+OUT8="$(fire_ev "$F8" Stop)"; CODE8=$?
+BLOCKS8=$(block_count "$OUT8")
+BUILDMARK8=$(grep -c '^BUILD_MARKER$' "$MARK8" 2>/dev/null; true); BUILDMARK8=${BUILDMARK8:-0}
+TESTMARK8=$(grep -c '^TEST_MARKER$' "$MARK8" 2>/dev/null; true); TESTMARK8=${TESTMARK8:-0}
+LEDGER8_TOTAL="$(ledger_lines_total "$F8")"
+
+[ "$CODE8" -eq 0 ] && ok "PRECISION: hook exit 0" || notok "PRECISION: expected exit 0, got $CODE8"
+[ "$BLOCKS8" -eq 0 ] && ok "PRECISION: 0 block decisions" || notok "PRECISION: expected 0 block decisions, got $BLOCKS8 (out: [$OUT8])"
+[ "$BUILDMARK8" -eq 1 ] && ok "PRECISION: \`echo BUILD_MARKER\` ran — an echo whose TEXT contains \"BUILD\" is not heavy" \
+  || notok "PRECISION: \`echo BUILD_MARKER\` did not run ($BUILDMARK8) — a plain echo was wrongly flagged heavy"
+[ "$TESTMARK8" -eq 1 ] && ok "PRECISION: \`echo TEST_MARKER\` ran — an echo whose TEXT contains \"TEST\" is not heavy" \
+  || notok "PRECISION: \`echo TEST_MARKER\` did not run ($TESTMARK8) — a plain echo was wrongly flagged heavy"
+[ "$LEDGER8_TOTAL" = "3" ] && ok "PRECISION: all 3 commands ran (this fixture's OWN tmpdir path contains \"-test\", proving a path fragment is not enough to match)" \
+  || notok "PRECISION: expected 3 ledger lines (all cheap, this fixture's tmpdir path itself contains \"test\"), got $LEDGER8_TOTAL"
 
 # =============================================================================
 # AC11 — FAIL-FIRST: each key fixture above genuinely fails against the
@@ -302,9 +379,10 @@ else
   # --- baseline AC1: the heavy (sleeping) command DID run under the old code.
   FB1="$TMP/base-ac1"
   MARKB1="$TMP/base-ac1-marks"; : > "$MARKB1"
-  mkrepo "$FB1" '{"verify":["sh -c \"echo cheap >> '"$MARKB1"'\"","sh -c \"echo heavy >> '"$MARKB1"'\" # test"]}'
+  mkrepo "$FB1" '{"verify":["sh -c \"echo cheap >> '"$MARKB1"'\"","npm test"]}'
+  mkshim "$FB1/fakebin" npm "echo heavy >> '"$MARKB1"'"
   printf '{"hook_event_name":"Stop","cwd":"%s"}' "$FB1" \
-    | ( cd "$FB1" && CLAUDE_PROJECT_DIR="$FB1" bash "$BASELINE" >/dev/null 2>&1 )
+    | ( cd "$FB1" && CLAUDE_PROJECT_DIR="$FB1" PATH="$FB1/fakebin:$PATH" bash "$BASELINE" >/dev/null 2>&1 )
   HEAVYB1=$(grep -c '^heavy$' "$MARKB1" 2>/dev/null; true); HEAVYB1=${HEAVYB1:-0}
   [ "$HEAVYB1" -ge 1 ] \
     && ok "AC11 FAIL-FIRST (AC1): the pre-change baseline DID run the heavy command ($HEAVYB1 marker line(s)) — proving AC1's heavy-filter assertion is a genuine behavior change" \

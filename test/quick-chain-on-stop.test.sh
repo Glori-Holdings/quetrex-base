@@ -46,8 +46,21 @@ mkrepo() { # mkrepo <dir> <verify-json>
 fire() { # fire <repo> <event> -> stdout
   ( cd "$1" && CLAUDE_PROJECT_DIR="$1" bash "$HOOK" </dev/null 2>/dev/null ) # event via payload below
 }
-fire_ev() { # fire_ev <repo> <event>
-  printf '{"hook_event_name":"%s","cwd":"%s"}' "$2" "$1" | ( cd "$1" && CLAUDE_PROJECT_DIR="$1" bash "$HOOK" 2>/dev/null )
+fire_ev() { # fire_ev <repo> <event> [extra PATH prefix dir]
+  local extra_path="${3:-}"
+  printf '{"hook_event_name":"%s","cwd":"%s"}' "$2" "$1" \
+    | ( cd "$1" && CLAUDE_PROJECT_DIR="$1" PATH="${extra_path:+$extra_path:}$PATH" bash "$HOOK" 2>/dev/null )
+}
+# mkshim <dir> <name> <body> — a real, PATH-shimmed fake binary (e.g. npm)
+# controllable via <body>, so a REAL heavy-shaped command ("npm test") can be
+# fixtured without a real install. See verify-gate-quick-chain.sh's
+# qx_is_heavy_segment (structured, token-anchored matching, 2026-08-21
+# operator-directed correction — replaced a whole-string substring regex).
+mkshim() {
+  local dir="$1" name="$2" body="$3"
+  mkdir -p "$dir"
+  { printf '#!/usr/bin/env bash\n'; printf '%s\n' "$body"; } > "$dir/$name"
+  chmod +x "$dir/$name"
 }
 
 # --- 1+2: Stop runs the QUICK commands and NOT the slow one ------------------
@@ -68,9 +81,15 @@ S=$(grep -c '^SLOW$' "$MARK" 2>/dev/null; true); S=${S:-0}
 # verify[] deliberately — its ORIGINAL single command was cheap, and the
 # inverted assertion would otherwise pass VACUOUSLY (zero heavy commands run
 # is trivially true when there were never any heavy commands to begin with).
+# The heavy command is a REAL "npm test" invocation (structured, token-based
+# matching — see mkshim above), not a `sh -c` command tagged with a `# test`
+# comment: a whole-string substring match on an arbitrary command was
+# corrected away (2026-08-21) because it flagged plain, unrelated commands
+# too (e.g. `echo BUILD_MARKER`).
 R2="$TMP/r2"
-mkrepo "$R2" '{"verify":["sh -c \"echo full >> '"$MARK"'\"","sh -c \"echo HEAVY >> '"$MARK"'\" # run tests"]}'
-: > "$MARK"; fire_ev "$R2" Stop >/dev/null
+mkrepo "$R2" '{"verify":["sh -c \"echo full >> '"$MARK"'\"","npm test"]}'
+mkshim "$R2/fakebin" npm "echo HEAVY >> '"$MARK"'"
+: > "$MARK"; fire_ev "$R2" Stop "$R2/fakebin" >/dev/null
 F=$(grep -c '^full$' "$MARK" 2>/dev/null; true); F=${F:-0}
 H=$(grep -c '^HEAVY$' "$MARK" 2>/dev/null; true); H=${H:-0}
 [ "$F" -ge 1 ] \
