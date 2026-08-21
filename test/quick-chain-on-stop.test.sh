@@ -13,7 +13,15 @@
 #      "already verified" record for the gated agent to forge. (A genuine
 #      fast-skip was rejected for exactly that: it trusted the agent-writable
 #      ledger, and one appended line let a red chain exit 0.)
-#   3. A repo with NO verifyQuick still gets the full chain on Stop.
+#   3. INVERTED (HOOKFIX, .quetrex/plan/HOOKFIX.json design.G2/notes[0]/notes[9],
+#      operator-approved amendment 2026-08-21): a repo with NO verifyQuick used
+#      to still get the FULL chain on Stop — that is exactly the unbounded
+#      5m21s-per-turn path this task exists to make structurally unreachable.
+#      It now gets a BOUNDED, AUTO-DERIVED quick chain instead: verify[] with
+#      heavy commands (test/build/e2e/playwright/vitest/jest/cypress) filtered
+#      out. Pinned BOTH directions so this cannot degenerate into a silent
+#      fast-skip: at least one real (cheap) command still RUNS — a Stop that
+#      ran nothing stays a FAILURE — AND zero heavy commands run.
 #   4. verifyQuick is not a loophole — it must be a subset of verify[], so
 #      an arbitrary replacement is rejected and the full chain runs.
 #   5. Red is still red: the quick chain BLOCKS when one of its commands fails.
@@ -55,13 +63,22 @@ S=$(grep -c '^SLOW$' "$MARK" 2>/dev/null; true); S=${S:-0}
 [ "$S" -eq 0 ] && ok "Stop did NOT run the slow command — the 133s cost is off the per-turn loop" \
                || notok "Stop still ran the slow command; the change had no effect"
 
-# --- 3: no verifyQuick declared -> full chain on Stop ------------------------
+# --- 3 (INVERTED): no verifyQuick declared -> a bounded, AUTO-DERIVED quick
+# chain, not the full chain. A heavy command is added to this fixture's
+# verify[] deliberately — its ORIGINAL single command was cheap, and the
+# inverted assertion would otherwise pass VACUOUSLY (zero heavy commands run
+# is trivially true when there were never any heavy commands to begin with).
 R2="$TMP/r2"
-mkrepo "$R2" '{"verify":["sh -c \"echo full >> '"$MARK"'\""]}'
+mkrepo "$R2" '{"verify":["sh -c \"echo full >> '"$MARK"'\"","sh -c \"echo HEAVY >> '"$MARK"'\" # run tests"]}'
 : > "$MARK"; fire_ev "$R2" Stop >/dev/null
-F=$(grep -c '^full$' "$MARK" 2>/dev/null; true); [ "${F:-0}" -ge 1 ] \
-  && ok "no verifyQuick declared: Stop runs the FULL chain — repos that never opted in are unaffected" \
+F=$(grep -c '^full$' "$MARK" 2>/dev/null; true); F=${F:-0}
+H=$(grep -c '^HEAVY$' "$MARK" 2>/dev/null; true); H=${H:-0}
+[ "$F" -ge 1 ] \
+  && ok "no verifyQuick declared: Stop still ran >=1 real (cheap) command from the auto-derived quick chain — never a silent fast-skip" \
   || notok "no verifyQuick declared and Stop ran nothing — the fallback is broken"
+[ "$H" -eq 0 ] \
+  && ok "no verifyQuick declared: Stop did NOT run the heavy command — the auto-derived quick chain filtered it out" \
+  || notok "no verifyQuick declared: Stop ran the heavy command anyway — the auto-derive filter is not applied when no verifyQuick is configured"
 
 # --- 4: verifyQuick that is NOT a subset of verify[] is rejected -------------
 R3="$TMP/r3"

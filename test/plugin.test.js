@@ -84,7 +84,13 @@ const ENGINE_GUARDS = ['deny-guard.sh', 'secret-scan.sh', 'enforce-branch.sh', '
 // The command-layer hooks unique to quetrex, which it keeps registering.
 // quetrex-update-check.sh is the one hook the command-layer plugin legitimately
 // owns: a non-blocking SessionStart nudge that a newer engine version exists.
-const KEPT_HOOKS = ['session-state.sh', 'edit-gate.sh', 'quetrex-update-check.sh'];
+// quetrex-bound-version-guard.sh (HOOKFIX G1) and protected-files-guard.sh
+// (HOOKFIX G4) are new, quetrex-owned scripts that are NOT part of the
+// five-script safety floor quetrex-factory ships (see PARITY.sha256 /
+// test/hook-parity.test.sh) — they are command-layer additions, registered
+// here exactly like the other three.
+const KEPT_HOOKS = ['session-state.sh', 'edit-gate.sh', 'quetrex-update-check.sh',
+  'quetrex-bound-version-guard.sh', 'protected-files-guard.sh'];
 
 // --- 0. THIS REPO IS THE PLUGIN -------------------------------------------
 // Everything at this repo root is shipped to every consumer of the `quetrex`

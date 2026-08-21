@@ -1,3 +1,9 @@
+PROTECTED (HOOKFIX G5): deny-guard.sh, secret-scan.sh, enforce-branch.sh,
+merge-gate.sh, verify-gate.sh are the safety floor. Changing one requires
+explicit operator approval (QUETREX_UNLOCK_FLOOR=1). verify-gate.sh's
+quick-chain-on-Stop behavior must never be reverted. Regenerate
+.claude/hooks/PARITY.sha256 in the SAME commit as any change to one of them.
+
 # quetrex-base
 
 This repo IS the Quetrex engine — the hooks, agents, commands and installer that other repos run. Work here edits enforcement machinery, not application code.
