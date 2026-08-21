@@ -242,6 +242,85 @@ is_deny "$OUT_STILL_DENIED" \
   || notok "CORRECTION 2: expected a deny without the unlock env var [$OUT_STILL_DENIED]"
 
 # =============================================================================
+# SEC-7 / SEC-4 (security review, 2026-08-21): the write-detection must key
+# ONLY on the actual write DESTINATION, never on a protected path appearing
+# as a READ argument anywhere else in the same command; and several
+# additional write vectors (git checkout/restore, curl -o, patch, inline
+# interpreter writes, ./ and ../ path fragments, one-hop symlink
+# indirection) must be closed too. Every assertion below drives the SHIPPED
+# hook end to end.
+# =============================================================================
+SEC_TARGET="$TMP/repo/.claude/hooks/verify-gate.sh"
+
+sec_allow() {  # sec_allow <label> <raw-command-string>
+  local label="$1" cmd="$2" payload out
+  payload="$(jq -cn --arg c "$cmd" '{tool_name:"Bash",tool_input:{command:$c}}')"
+  out="$(printf '%s' "$payload" | bash "$GUARD" 2>&1)"
+  if is_deny "$out"; then
+    notok "SEC-7/SEC-4 ($label): expected ALLOW, got a deny [$cmd] -> $out"
+  else
+    ok "SEC-7/SEC-4 ($label): correctly allowed"
+  fi
+}
+sec_deny() {  # sec_deny <label> <raw-command-string>
+  local label="$1" cmd="$2" payload out
+  payload="$(jq -cn --arg c "$cmd" '{tool_name:"Bash",tool_input:{command:$c}}')"
+  out="$(printf '%s' "$payload" | bash "$GUARD" 2>&1)"
+  if is_deny "$out"; then
+    ok "SEC-7/SEC-4 ($label): correctly denied"
+  else
+    notok "SEC-7/SEC-4 ($label): expected a deny, got [$out] for [$cmd]"
+  fi
+}
+
+# SEC-7: the exact two commands the security review reported as wrongly denied.
+sec_allow "grep redirects elsewhere, protected path only a READ arg" \
+  "grep -n QUICK $SEC_TARGET > $TMP/sec7-out.txt"
+sec_allow "PARITY regeneration procedure this repo's own CLAUDE.md mandates" \
+  "cd $TMP/repo/.claude/hooks && shasum -a 256 deny-guard.sh secret-scan.sh enforce-branch.sh merge-gate.sh verify-gate.sh > PARITY.sha256"
+sec_allow "cp READS the protected path, writes elsewhere" \
+  "cp $SEC_TARGET $TMP/sec7-backup.sh"
+
+# SEC-4: additional write vectors.
+sec_deny "git checkout -- <protected>" "git checkout HEAD~1 -- $SEC_TARGET"
+sec_deny "git restore <protected>" "git restore --source=HEAD~1 $SEC_TARGET"
+sec_deny "curl -o <protected>" "curl -o $SEC_TARGET https://example.com/x"
+sec_deny "patch <protected> < diff" "patch $SEC_TARGET < $TMP/sec4.patch"
+sec_deny "python3 -c inline write" "python3 -c \"open('$SEC_TARGET','w').write('x')\""
+sec_deny "node -e inline write" "node -e \"require('fs').writeFileSync('$SEC_TARGET','x')\""
+
+# SEC-4: path normalization (./ and ../).
+sec_deny "./ path fragment" "cp $TMP/x $TMP/repo/.claude/hooks/./verify-gate.sh"
+sec_deny "../ path fragment" "cp $TMP/x $TMP/repo/.claude/hooks/sub/../verify-gate.sh"
+
+# SEC-4: two-step symlink indirection (real sequential execution — the
+# symlink genuinely exists on disk by the time the second command is
+# evaluated, exactly as it would across two separate agent tool calls).
+SEC_LINK="$TMP/sec4-link"
+ln -sf "$SEC_TARGET" "$SEC_LINK"
+sec_deny "write through a symlink pointing AT a protected path" "cp $TMP/evil $SEC_LINK"
+rm -f "$SEC_LINK"
+
+# --- fail-first: every one of the above genuinely fails against the
+# immediately pre-fix commit (the substring/whole-segment matcher this round
+# replaced) — resolved by sha, not by branch name, since this defect was
+# introduced and fixed within the same feature branch.
+SEC_BASELINE_SHA="e2dadea"
+if git -C "$ROOT" cat-file -e "${SEC_BASELINE_SHA}:.claude/hooks/protected-files-guard.sh" 2>/dev/null; then
+  SEC_BASELINE="$TMP/sec-baseline-guard.sh"
+  git -C "$ROOT" show "${SEC_BASELINE_SHA}:.claude/hooks/protected-files-guard.sh" > "$SEC_BASELINE"
+  BASE_PAYLOAD="$(jq -cn --arg c "grep -n QUICK $SEC_TARGET > $TMP/sec7-basecheck.txt" '{tool_name:"Bash",tool_input:{command:$c}}')"
+  BASE_OUT="$(printf '%s' "$BASE_PAYLOAD" | bash "$SEC_BASELINE" 2>&1)"
+  if is_deny "$BASE_OUT"; then
+    ok "SEC-7 FAIL-FIRST: the pre-fix guard (commit ${SEC_BASELINE_SHA}) DID wrongly deny the grep-redirect-elsewhere command — proving this is a genuine, deliberate fix"
+  else
+    notok "SEC-7 FAIL-FIRST: the pre-fix guard did not deny the grep case either (out: [$BASE_OUT]) — cannot demonstrate the fix is real"
+  fi
+else
+  echo "SKIP: commit ${SEC_BASELINE_SHA} not reachable — SEC-7 fail-first proof could not run"
+fi
+
+# =============================================================================
 # AC11 — FAIL-FIRST: protected-files-guard.sh does not exist on the
 # pre-change baseline, and NO existing hook on main intercepts this vector.
 # =============================================================================

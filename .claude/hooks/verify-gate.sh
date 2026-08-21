@@ -221,8 +221,21 @@ case "$BUDGET_TOTAL" in ''|*[!0-9]*) BUDGET_TOTAL="$BUDGET_DEFAULT" ;; esac
 # Sourced-only helper (bounded quick-chain machinery: the cap, the
 # declarative env-skip, the heavy-command filter) — see its own header for
 # why it is a separate file. Never invoked directly.
+# SEC-8 FAIL-CLOSED: if the helper is missing/unreadable, `source` fails but
+# (with no `set -e`) the script would otherwise CONTINUE past it -- every
+# later call to an undefined function (should_skip_for_env, in the run loop,
+# once per command) would then print a raw "command not found" interpreter
+# line to the operator on every single command, and the requiredEnv skip and
+# heavy filter would both silently stop functioning. A missing dependency of
+# the gate is a genuine failure, not something to run past: block once, with
+# one labelled line, never a raw stack trace.
+QX_HELPER="$(dirname "${BASH_SOURCE[0]}")/verify-gate-quick-chain.sh"
 # shellcheck source=verify-gate-quick-chain.sh
-source "$(dirname "${BASH_SOURCE[0]}")/verify-gate-quick-chain.sh"
+if ! source "$QX_HELPER" 2>/dev/null || ! command -v qx_apply_quick_cap >/dev/null 2>&1; then
+  printf 'VERIFY GATE MISCONFIGURED: required helper %s is missing or failed to load — refusing to run unverified. Reinstall/republish the plugin.
+' "$QX_HELPER" >&2
+  exit 2
+fi
 qx_apply_quick_cap
 
 # --- helpers ---------------------------------------------------------------
@@ -459,7 +472,8 @@ run_with_cap() {
 
 BUDGET_START=$(date +%s)
 
-for cmd in "${CHAIN[@]}"; do
+for ((CHAIN_IDX=0; CHAIN_IDX<${#CHAIN[@]}; CHAIN_IDX++)); do
+  cmd="${CHAIN[$CHAIN_IDX]}"
   if should_skip_for_env "$cmd"; then
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     {
@@ -503,10 +517,23 @@ for cmd in "${CHAIN[@]}"; do
     code=124; TIMED_OUT=1
     out="TIME BUDGET EXHAUSTED (${BUDGET_TOTAL}s) before this command could run."
   else
+    # SEC-2 FIX: TIMED_OUT must be determined from MEASURED ELAPSED TIME
+    # against the cap, never from exit code alone. A command that itself
+    # genuinely exits 124/137 (e.g. its own internal `timeout N cmd`, or a
+    # self-directed kill) in well under its cap window is a REAL failure —
+    # inferring "our watchdog fired" from the bare exit code alone silently
+    # laundered exactly that into a CAP-ALLOW (fail-open) in the pre-fix
+    # code. Only when the ELAPSED wall-clock time is itself close to (within
+    # a small margin of) the cap actually granted is this attributable to
+    # OUR OWN timeout wrapper.
+    CMD_START=$(date +%s)
     run_with_cap "$cmd" "$remaining"
+    CMD_ELAPSED=$(( $(date +%s) - CMD_START ))
     code="$CMD_CODE"
     out="$CMD_OUT"
-    if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+    CAP_MARGIN=2
+    CAP_FLOOR=$(( remaining > CAP_MARGIN ? remaining - CAP_MARGIN : 0 ))
+    if { [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; } && [ "$CMD_ELAPSED" -ge "$CAP_FLOOR" ]; then
       TIMED_OUT=1
       out="${out}
 TIME BUDGET EXHAUSTED: exceeded its ${remaining}s share of the ${BUDGET_TOTAL}s budget and was killed."
@@ -523,9 +550,21 @@ TIME BUDGET EXHAUSTED: exceeded its ${remaining}s share of the ${BUDGET_TOTAL}s 
     printf '%s\n' "$out"
   } >> "$LOG" 2>/dev/null
 
-  # CAP-ALLOW: bounded fail-OPEN, QUICK only — NOT RED, writes NO ledger line.
+  # CAP-ALLOW: bounded fail-OPEN, QUICK only — NOT RED. SEC-1/SEC-3 FIX
+  # (2026-08-21): writes a boundedQuick SKIP ledger line for THIS cut
+  # command and every REMAINING, never-attempted command in the resolved
+  # chain — never NO line at all. Absence was indistinguishable from "never
+  # configured", which broke merge-gate's ledger-derived-chain fallback in
+  # both directions (a red suite could ship when no verify.json existed; a
+  # real chain could be denied forever once a command's only evidence
+  # vanished). A boundedQuick line is never proof; merge-gate.sh's own
+  # arbitration (out of this file's ownership) is what makes that true.
   if [ "$TIMED_OUT" -eq 1 ] && [ "$QUICK" -eq 1 ]; then
-    CAP_HIT=1; CAP_CMD="$cmd"; break
+    CAP_HIT=1; CAP_CMD="$cmd"
+    for ((CHAIN_REST=CHAIN_IDX; CHAIN_REST<${#CHAIN[@]}; CHAIN_REST++)); do
+      qx_write_bounded_skip "${CHAIN[$CHAIN_REST]}"
+    done
+    break
   fi
 
   # Append to the append-only ledger (best-effort; failure to log never blocks).

@@ -87,6 +87,18 @@ ledger_lines_total() {
   [ -f "$1/.quetrex/verify-ledger.jsonl" ] || { echo 0; return; }
   wc -l < "$1/.quetrex/verify-ledger.jsonl" | tr -d ' '
 }
+# is_bounded_skip_line <repo> <cmd> -- SEC-1/SEC-3 (security review,
+# 2026-08-21): the ledger must describe the WHOLE resolved chain, always. A
+# command the bounded quick chain excluded (heavy-filtered, or cut by the
+# cap) must carry EXACTLY ONE ledger line: skipped:true, exit:null,
+# skipReason:"boundedQuick" (never absent, never "requiredEnv").
+is_bounded_skip_line() {  # -> "1" if exactly one such line exists, else "0"
+  local repo="$1" cmd="$2"
+  [ -f "$repo/.quetrex/verify-ledger.jsonl" ] || { echo 0; return; }
+  jq -s --arg c "$cmd" \
+    '[.[] | select(.cmd==$c and .skipped==true and .skipReason=="boundedQuick" and .exit==null)] | length' \
+    "$repo/.quetrex/verify-ledger.jsonl" 2>/dev/null || echo 0
+}
 # mkshim <dir> <name> <body> — writes an executable fake binary at
 # <dir>/<name> whose body is <body> (a real shell script fragment). Used to
 # give a REAL npm/playwright/vitest/jest/cypress-shaped command controllable
@@ -124,6 +136,13 @@ HEAVY1=$(grep -c '^heavy$' "$MARK1" 2>/dev/null; true); HEAVY1=${HEAVY1:-0}
 [ "$ELAPSED1" -lt 5 ] && ok "AC1: wall clock ${ELAPSED1}s < 5s (a 30s sleep would have failed this)" \
   || notok "AC1: wall clock ${ELAPSED1}s >= 5s — the heavy command likely ran"
 
+# SEC-1/SEC-3 (security review, 2026-08-21): the filtered-out heavy command
+# is NOT simply absent from the ledger -- it carries its own boundedQuick
+# skip line, so the ledger still describes the whole resolved chain.
+BOUNDED1="$(is_bounded_skip_line "$F1" "npm test")"
+[ "$BOUNDED1" = "1" ] && ok "AC1: the filtered-out heavy command has exactly 1 boundedQuick ledger line (the ledger describes the WHOLE resolved chain)" \
+  || notok "AC1: expected exactly 1 boundedQuick ledger line for the filtered command, got $BOUNDED1"
+
 # =============================================================================
 # AC2 — the quick-chain cap cuts the run and ALLOWS; nothing is recorded for
 # the cut command; ESCALATION and verify-attempts are untouched (containment).
@@ -141,6 +160,7 @@ END2=$(date +%s)
 ELAPSED2=$((END2-START2))
 BLOCKS2=$(block_count "$OUT2")
 LEDGER2=$(ledger_count_for "$F2" "sh -c \"sleep 20\"")
+BOUNDED2="$(is_bounded_skip_line "$F2" "sh -c \"sleep 20\"")"
 LINES2=$(printf '%s\n' "$OUT2" | grep -c .)
 CAPMENTION2=$(printf '%s' "$OUT2" | grep -ci 'cap')
 
@@ -148,8 +168,15 @@ CAPMENTION2=$(printf '%s' "$OUT2" | grep -ci 'cap')
 [ "$BLOCKS2" -eq 0 ] && ok "AC2: 0 block decisions" || notok "AC2: expected 0 block decisions, got $BLOCKS2 (out: [$OUT2])"
 [ "$ELAPSED2" -lt 10 ] && ok "AC2: wall clock ${ELAPSED2}s < 10s (a 20s sleep would have failed this)" \
   || notok "AC2: wall clock ${ELAPSED2}s >= 10s — the cap did not cut the run"
-[ "$LEDGER2" -eq 0 ] && ok "AC2: 0 ledger lines for the capped command (no null/124/137 entry pinned to HEAD)" \
-  || notok "AC2: expected 0 ledger lines for the capped command, got $LEDGER2"
+# SEC-1/SEC-3 (security review, 2026-08-21): the capped command is not simply
+# absent from the ledger (absence broke merge-gate's ledger-derived-chain
+# fallback in both directions) -- it carries exactly ONE boundedQuick skip
+# line: exit:null, skipped:true, skipReason:"boundedQuick" (never
+# "requiredEnv", never a genuine exit code).
+[ "$LEDGER2" -eq 1 ] && ok "AC2: exactly 1 ledger line for the capped command (never 0 — the ledger describes the whole resolved chain)" \
+  || notok "AC2: expected exactly 1 ledger line for the capped command, got $LEDGER2"
+[ "$BOUNDED2" = "1" ] && ok "AC2: that line is a genuine boundedQuick skip (exit:null, skipped:true, skipReason:boundedQuick) — never a null/124/137 entry read as a real failure" \
+  || notok "AC2: expected exactly 1 boundedQuick-shaped line, got $BOUNDED2"
 [ -f "$F2/.quetrex/ESCALATION" ] && ok "AC2: pre-existing ESCALATION still exists (a cap-allow is not a green)" \
   || notok "AC2: ESCALATION was cleared by a cap-allow run"
 [ "$(cat "$F2/.quetrex/verify-attempts" 2>/dev/null)" = "2" ] && ok "AC2: verify-attempts still reads '2' (self-heal counter untouched)" \
@@ -233,8 +260,19 @@ LEDGER4_TOTAL="$(ledger_lines_total "$F4")"
   || notok "AC4: expected 0 heavy marker lines, got $HEAVY4_TOTAL"
 [ "$CHEAP4_TOTAL" -eq 5 ] && ok "AC4: exactly 5 total marker lines from the 5 cheap commands (one each)" \
   || notok "AC4: expected 5 cheap marker lines, got $CHEAP4_TOTAL"
-[ "$LEDGER4_TOTAL" = "5" ] && ok "AC4: exactly 5 ledger lines were appended" \
-  || notok "AC4: expected 5 ledger lines, got $LEDGER4_TOTAL"
+# SEC-1/SEC-3 (security review, 2026-08-21): the ledger must describe the
+# WHOLE resolved chain, always — the 7 excluded heavy commands are NOT
+# simply absent; each carries its own boundedQuick skip line, alongside the
+# 5 genuine (exit:0) lines from the cheap commands that actually ran.
+[ "$LEDGER4_TOTAL" = "12" ] && ok "AC4: exactly 12 ledger lines were appended (5 genuine + 7 boundedQuick — the whole resolved chain, not just what ran)" \
+  || notok "AC4: expected 12 ledger lines (5 genuine + 7 boundedQuick), got $LEDGER4_TOTAL"
+BOUNDED4_TOTAL=0
+for hcmd in "npm test" "npm run build" "npm run e2e" "playwright test" "vitest" "jest" "cypress"; do
+  n="$(is_bounded_skip_line "$F4" "$hcmd")"
+  BOUNDED4_TOTAL=$((BOUNDED4_TOTAL + n))
+done
+[ "$BOUNDED4_TOTAL" -eq 7 ] && ok "AC4: all 7 heavy commands each have exactly 1 boundedQuick ledger line" \
+  || notok "AC4: expected 7 boundedQuick lines (one per heavy command), got $BOUNDED4_TOTAL"
 
 # =============================================================================
 # AC5 — CORRECTED (coordinator directive, 2026-08-21): an ALL-heavy verify[]
@@ -286,8 +324,18 @@ CAPMENTION5B=$(printf '%s' "$OUT5B" | grep -ci 'cap')
 [ "$BLOCKS5B" -eq 0 ] && ok "AC5b: 0 block decisions" || notok "AC5b: expected 0 block decisions, got $BLOCKS5B"
 [ "$ELAPSED5B" -lt 10 ] && ok "AC5b: wall clock ${ELAPSED5B}s < 10s (a 20s sleep would have failed this)" \
   || notok "AC5b: wall clock ${ELAPSED5B}s >= 10s — the cap did not bound the fallback chain"
-[ "$LEDGER5B_TOTAL" = "0" ] && ok "AC5b: 0 ledger lines appended for the capped command" \
-  || notok "AC5b: expected 0 ledger lines, got $LEDGER5B_TOTAL"
+# SEC-1/SEC-3 (security review, 2026-08-21): the capped command is not
+# simply absent from the ledger — it carries exactly 1 boundedQuick skip
+# line (exit:null, skipped:true, skipReason:"boundedQuick"), reached here
+# via the empty-filter FALLBACK path (this single-command chain, all heavy,
+# would filter to empty and fall back to the original chain, which then
+# genuinely hits the cap) — proving boundedQuick recording applies on the
+# fallback path too, not only the ordinary-filter path AC2/AC4 already cover.
+BOUNDED5B="$(is_bounded_skip_line "$F5B" "npm test")"
+[ "$LEDGER5B_TOTAL" = "1" ] && ok "AC5b: exactly 1 ledger line appended for the capped command (never 0)" \
+  || notok "AC5b: expected exactly 1 ledger line, got $LEDGER5B_TOTAL"
+[ "$BOUNDED5B" = "1" ] && ok "AC5b: that line is a genuine boundedQuick skip, reached via the empty-filter fallback path" \
+  || notok "AC5b: expected exactly 1 boundedQuick-shaped line, got $BOUNDED5B"
 [ "$CAPMENTION5B" -ge 1 ] && ok "AC5b: stdout mentions the cap" || notok "AC5b: stdout does not mention the cap (out: [$OUT5B])"
 
 # =============================================================================
@@ -337,6 +385,12 @@ TESTED7=$(grep -c '^TESTED$' "$MARK7" 2>/dev/null; true); TESTED7=${TESTED7:-0}
   || notok "ADDENDUM: expected the cheap declared-quick command to run once, got $LINT7"
 [ "$TESTED7" -eq 0 ] && ok "ADDENDUM: the declared verifyQuick's heavy command was filtered out (a declared chain is not exempt)" \
   || notok "ADDENDUM: the heavy command in a DECLARED verifyQuick ran anyway ($TESTED7) — declared chains must not be exempt from the heavy filter"
+# SEC-1/SEC-3 (security review, 2026-08-21): the filtered-out heavy command
+# still carries its own boundedQuick ledger line, even in a DECLARED
+# verifyQuick — the ledger-completeness fix applies uniformly.
+BOUNDED7="$(is_bounded_skip_line "$F7" "npm test")"
+[ "$BOUNDED7" = "1" ] && ok "ADDENDUM: the filtered-out heavy command in a declared verifyQuick has exactly 1 boundedQuick ledger line" \
+  || notok "ADDENDUM: expected exactly 1 boundedQuick ledger line for the filtered declared command, got $BOUNDED7"
 
 # =============================================================================
 # PRECISION — the two exact collision shapes the coordinator's review found:

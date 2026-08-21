@@ -119,11 +119,64 @@ PROT_PATH_ERE="(^|[^A-Za-z0-9_.-])(hooks|scripts)/(${PROT_ALT})\\.sh([^A-Za-z0-9
 # with `cd` tracking below for the third shape the plan names.
 PROT_BARE_ERE="(^|[^A-Za-z0-9_.-])(${PROT_ALT})\\.sh([^A-Za-z0-9_.-]|\$)"
 
+# qx_normalize_path <path> -- collapses "./" and "a/../b" SYNTACTICALLY (no
+# filesystem access, no realpath dependency -- the target frequently does not
+# exist yet). SEC-4 FIX (2026-08-21, security review): ".claude/hooks/./
+# verify-gate.sh" and ".claude/hooks/sub/../verify-gate.sh" do not literally
+# contain the substring "hooks/verify-gate.sh" and previously slipped past
+# the regex untouched. bash 3.2-safe (no negative array indices — this repo
+# ships on macOS's stock /usr/bin/bash; see merge-gate.sh's own note on the
+# same constraint).
+qx_normalize_path() {
+  local p="$1" part leading_slash="" last_idx joined
+  local -a parts=() out=()
+  case "$p" in /*) leading_slash="/" ;; esac
+  IFS='/' read -ra parts <<< "$p"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      .|'') continue ;;
+      ..)
+        last_idx=$((${#out[@]} - 1))
+        if [ "$last_idx" -ge 0 ] && [ "${out[$last_idx]}" != ".." ]; then
+          unset "out[$last_idx]"
+          out=(${out[@]+"${out[@]}"})
+        else
+          out+=("..")
+        fi
+        ;;
+      *) out+=("$part") ;;
+    esac
+  done
+  ( IFS='/'; joined="${out[*]:-}"; printf '%s%s' "$leading_slash" "$joined" )
+}
+
 names_protected_path() {  # <text> -> 0 if it names a protected hooks/scripts path
+  local norm
+  norm=$(qx_normalize_path "$1")
+  printf '%s' "$norm" | grep -Eq "$PROT_PATH_ERE" && return 0
   printf '%s' "$1" | grep -Eq "$PROT_PATH_ERE"
 }
 names_bare_protected() {  # <text> -> 0 if it names a bare protected basename
   printf '%s' "$1" | grep -Eq "$PROT_BARE_ERE"
+}
+# names_protected_path_or_symlink <candidate-target-token> -- SEC-4 FIX,
+# closes the two-step symlink indirection (`ln -s <protected> /tmp/x` in one
+# Bash call, `cp evil /tmp/x` in a LATER one): this hook has no memory across
+# separate tool calls (same documented boundary as merge-gate.sh's own
+# command-string parser), but by the time the SECOND call is evaluated, the
+# symlink from the FIRST call already exists on disk. One hop of
+# `readlink` — never followed recursively, never executed — catches exactly
+# that shape without turning this into a general filesystem-resolution
+# engine.
+names_protected_path_or_symlink() {
+  local t="$1"
+  names_protected_path "$t" && return 0
+  if [ -L "$t" ] 2>/dev/null; then
+    local link_target
+    link_target=$(readlink "$t" 2>/dev/null)
+    [ -n "$link_target" ] && names_protected_path "$link_target" && return 0
+  fi
+  return 1
 }
 
 # --- deny / allow (correct PreToolUse schema; exit 0) -----------------------
@@ -310,36 +363,148 @@ normalize_segment() {
 # <<< QX-CMDSCAN END
 # =============================================================================
 
-# --- write-shaped detection over ONE normalized segment ----------------------
-segment_is_write_shaped() {
+# --- protected_write_targets: SEC-7 FIX (2026-08-21, security review) ------
+# THE DEFECT THIS REPLACES. segment_is_write_shaped's old rule -- "a
+# recognized write verb, OR the segment contains a bare '>' anywhere" --
+# combined with a "does the WHOLE segment mention a protected basename
+# anywhere" targeting check, denied `grep -n QUICK .claude/hooks/verify-
+# gate.sh > /tmp/out.txt` (redirects to /tmp/out.txt; the protected path is
+# only a READ argument to grep) and the PARITY regeneration procedure this
+# repo's own CLAUDE.md mandates (`shasum -a 256 deny-guard.sh ... verify-
+# gate.sh > PARITY.sha256` -- every floor basename is a READ argument being
+# hashed; the write target is PARITY.sha256). A PreToolUse deny beats
+# bypassPermissions, so a wrongful deny here has NO recourse.
+#
+# THE FIX. Only the REDIRECTION TARGET, or a recognized write-verb's OWN
+# destination argument, is ever checked against the protected set -- never a
+# protected path merely appearing as a READ argument elsewhere in the same
+# command. Sets PWT_TARGETS to the list of candidate write-destination
+# tokens for the segment; the caller checks EACH one with
+# names_protected_path_or_symlink, never the segment as a whole.
+#
+# SEC-4 (best-effort write-vector coverage, 2026-08-21): also extracts
+# destinations for `git checkout`/`git restore` (a path after a literal `--`,
+# else the last positional arg) and `curl -o`/`--output`. Interpreter-
+# mediated writes (python/node/perl/ruby inline `-c`/`-e` code) cannot be
+# structurally parsed here -- see qx_is_interpreter_inline_write below for
+# the deliberately narrower, best-effort heuristic used for that ONE class,
+# and the developer's report for what remains genuinely open (inferred
+# `patch` targets with no explicit path argument; a `<` stdin-redirect
+# source token being misread as a positional argument by callers that do not
+# also special-case it).
+protected_write_targets() {
+  local seg="$1" first
+  local -a w=()
+  read -ra w <<< "$seg"
+  PWT_TARGETS=()
+  [ "${#w[@]}" -ge 1 ] || return 0
+  first="${w[0]}"
+
+  # last_nonflag_arg <start-index> -- the last token from w[start..] that is
+  # neither a flag (leading '-'), a redirection token, nor the token
+  # immediately following a '<' (a stdin-redirect SOURCE, never a write
+  # destination for the command itself).
+  local last="" tok skip_next=0 i
+  for ((i = 1; i < ${#w[@]}; i++)); do
+    tok="${w[$i]}"
+    if [ "$skip_next" -eq 1 ]; then skip_next=0; continue; fi
+    case "$tok" in
+      '<') skip_next=1; continue ;;
+      '<'*) continue ;;
+      -*) continue ;;
+      '>'*|'>>'*) continue ;;
+    esac
+    last="$tok"
+  done
+
+  case "$first" in
+    cp|mv|install|rsync|truncate|patch)
+      [ -n "$last" ] && PWT_TARGETS+=("$last")
+      ;;
+    sed)
+      if printf '%s' "$seg" | grep -Eq -- '(^|[[:space:]])(-[A-Za-z]*i[A-Za-z]*([[:space:]]|=|$)|--in-place([=[:space:]]|$))'; then
+        [ -n "$last" ] && PWT_TARGETS+=("$last")
+      fi
+      ;;
+    ln)
+      if printf '%s' "$seg" | grep -Eq -- '(^|[[:space:]])-[A-Za-z]*s[A-Za-z]*f[A-Za-z]*([[:space:]]|$)' \
+        || printf '%s' "$seg" | grep -Eq -- '(^|[[:space:]])-[A-Za-z]*f[A-Za-z]*s[A-Za-z]*([[:space:]]|$)' \
+        || { printf '%s' "$seg" | grep -Eq -- '(^|[[:space:]])-s([[:space:]]|$)' \
+             && printf '%s' "$seg" | grep -Eq -- '(^|[[:space:]])-f([[:space:]]|$)'; }; then
+        [ -n "$last" ] && PWT_TARGETS+=("$last")
+      fi
+      ;;
+    tee)
+      for tok in "${w[@]:1}"; do
+        case "$tok" in -*|'>'*|'>>'*) continue ;; esac
+        PWT_TARGETS+=("$tok")
+      done
+      ;;
+    dd)
+      for tok in "${w[@]:1}"; do
+        case "$tok" in of=*) PWT_TARGETS+=("${tok#of=}") ;; esac
+      done
+      ;;
+    git)
+      case "${w[1]:-}" in
+        checkout|restore)
+          local after_dd=0
+          for tok in "${w[@]:2}"; do
+            if [ "$after_dd" -eq 1 ]; then PWT_TARGETS+=("$tok"); continue; fi
+            case "$tok" in --) after_dd=1 ;; esac
+          done
+          [ "$after_dd" -eq 0 ] && [ -n "$last" ] && PWT_TARGETS+=("$last")
+          ;;
+      esac
+      ;;
+    curl)
+      local next_is_out=0
+      for tok in "${w[@]:1}"; do
+        if [ "$next_is_out" -eq 1 ]; then PWT_TARGETS+=("$tok"); next_is_out=0; continue; fi
+        case "$tok" in
+          -o|--output) next_is_out=1 ;;
+          -o?*) PWT_TARGETS+=("${tok#-o}") ;;
+          --output=*) PWT_TARGETS+=("${tok#--output=}") ;;
+        esac
+      done
+      ;;
+  esac
+
+  # Redirection targets -- ANY command can redirect its OWN output,
+  # regardless of verb (`cat x > path`, `echo y >> path`, …).
+  for ((i = 0; i < ${#w[@]}; i++)); do
+    tok="${w[$i]}"
+    case "$tok" in
+      '>>') [ $((i + 1)) -lt "${#w[@]}" ] && PWT_TARGETS+=("${w[$((i + 1))]}") ;;
+      '>>'*) PWT_TARGETS+=("${tok#>>}") ;;
+      '>') [ $((i + 1)) -lt "${#w[@]}" ] && PWT_TARGETS+=("${w[$((i + 1))]}") ;;
+      '>'*) PWT_TARGETS+=("${tok#>}") ;;
+    esac
+  done
+}
+
+# qx_is_interpreter_inline_write <normalized-segment> -- best-effort ONLY.
+# python3/node/perl/ruby's inline `-c`/`-e` argument is arbitrary source
+# code this hook cannot structurally parse (no interpreter grammar here), so
+# — unlike every other case above, which checks a real destination token —
+# this ONE class falls back to scanning the WHOLE segment text for a
+# protected basename. Deliberately narrow (gated on the interpreter name AND
+# an inline-code flag) so it does not regress SEC-7's fix for every other
+# command; still imprecise BY NATURE (a comment or string literal mentioning
+# a floor script's name in inline code would also match) — a disclosed,
+# accepted limitation, not a silent gap. See the developer's report.
+qx_is_interpreter_inline_write() {
   local seg="$1" first
   first="${seg%%[[:space:]]*}"
   case "$first" in
-    cp|mv|install|rsync|tee|truncate) return 0 ;;
-    dd)
-      printf '%s' "$seg" | grep -Eq -- '(^|[[:space:]])of=' && return 0
-      return 1
-      ;;
-    sed)
-      printf '%s' "$seg" | grep -Eq -- '(^|[[:space:]])(-[A-Za-z]*i[A-Za-z]*([[:space:]]|=|$)|--in-place([=[:space:]]|$))' && return 0
-      return 1
-      ;;
-    ln)
-      { printf '%s' "$seg" | grep -Eq -- '(^|[[:space:]])-[A-Za-z]*s[A-Za-z]*f[A-Za-z]*([[:space:]]|$)'; } && return 0
-      { printf '%s' "$seg" | grep -Eq -- '(^|[[:space:]])-[A-Za-z]*f[A-Za-z]*s[A-Za-z]*([[:space:]]|$)'; } && return 0
-      if printf '%s' "$seg" | grep -Eq -- '(^|[[:space:]])-s([[:space:]]|$)' \
-        && printf '%s' "$seg" | grep -Eq -- '(^|[[:space:]])-f([[:space:]]|$)'; then
-        return 0
-      fi
-      return 1
-      ;;
+    python|python3|node|nodejs|ruby|perl) : ;;
+    *) return 1 ;;
   esac
-  # ANY redirection is write-shaped, regardless of the leading command
-  # (`cat x > path`, `echo y >> path`, …).
   case "$seg" in
-    *'>'*) return 0 ;;
+    *' -c '*|*' -e '*|*' -pi '*|*' -pi'*) : ;;
+    *) return 1 ;;
   esac
-  return 1
+  names_protected_path "$seg"
 }
 
 # =============================================================================
@@ -347,7 +512,7 @@ segment_is_write_shaped() {
 # =============================================================================
 if [ "$TOOL_NAME" = "Write" ] || [ "$TOOL_NAME" = "Edit" ]; then
   [ -n "$FILE_PATH" ] || exit 0
-  names_protected_path "$FILE_PATH" || exit 0
+  names_protected_path_or_symlink "$FILE_PATH" || exit 0
   is_unlocked && allow_unlocked "$TOOL_NAME $FILE_PATH"
   deny "PROTECTED FLOOR SCRIPT: this $TOOL_NAME targets \`$FILE_PATH\`, one of the safety-floor scripts (deny-guard.sh, secret-scan.sh, enforce-branch.sh, merge-gate.sh, verify-gate.sh) or its quick-chain helper. Denied by default — see .claude/CLAUDE.md."
   exit 0
@@ -373,17 +538,23 @@ while IFS= read -r seg; do
     continue
   fi
 
-  targeted=0
-  if names_protected_path "$norm"; then
-    targeted=1
-  elif names_bare_protected "$norm" && [ -n "$PENDING_CD" ]; then
-    case "$PENDING_CD" in
-      */hooks|*/scripts) targeted=1 ;;
-    esac
-  fi
-  [ "$targeted" -eq 1 ] || continue
+  protected_write_targets "$norm"
+  for t in ${PWT_TARGETS[@]+"${PWT_TARGETS[@]}"}; do
+    [ -n "$t" ] || continue
+    if names_protected_path_or_symlink "$t"; then
+      HIT_SEG="$norm"
+      break
+    fi
+    if names_bare_protected "$t" && [ -n "$PENDING_CD" ]; then
+      case "$PENDING_CD" in
+        */hooks|*/scripts) HIT_SEG="$norm" ;;
+      esac
+      [ -n "$HIT_SEG" ] && break
+    fi
+  done
+  [ -n "$HIT_SEG" ] && break
 
-  if segment_is_write_shaped "$norm"; then
+  if qx_is_interpreter_inline_write "$norm"; then
     HIT_SEG="$norm"
     break
   fi

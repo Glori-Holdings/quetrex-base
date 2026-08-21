@@ -353,6 +353,42 @@ qx_is_heavy_command() {
   return 1
 }
 
+# --- qx_write_bounded_skip: SEC-1/SEC-3 FIX (2026-08-21, security review) --
+# THE DEFECT THIS CLOSES. The bounded quick chain used to leave commands it
+# excluded (heavy-filtered, or cut by the cap) with NO ledger line at all.
+# That shrinks the ledger, and the ledger is merge-gate.sh's evidence, which
+# broke its compensating control in BOTH directions:
+#   SEC-1 (repos with NO verify.json): merge-gate.sh derives the required
+#   chain FROM the ledger when no verify.json resolves. A Stop whose ledger
+#   is missing the one command that would have failed let GATE 3 pass on a
+#   genuinely red suite -- a red suite could SHIP.
+#   SEC-3 (repos WITH verify.json): the mirror image -- a heavy command's
+#   ledger evidence vanishing forever meant GATE 3 could never find a
+#   describing entry for it, denying every future merge permanently. The
+#   compensating control became a wall.
+# THE FIX: the ledger must describe the WHOLE resolved chain, always. Every
+# command that is excluded from actually running (heavy-filtered, or never
+# reached because the cap expired) gets EXACTLY ONE skipped:true line with a
+# DISTINCT skipReason ("boundedQuick", never "requiredEnv" -- the two must
+# stay separately recognizable) and exit:null. A boundedQuick line is never
+# proof of anything -- merge-gate.sh (out of this file's ownership; tracked
+# as a required follow-up in the developer's report) is what must (a) treat
+# it as unproven, exactly like "never ran", (b) never let it shadow or
+# outrank a genuine executed entry for the same command at the same sha, and
+# (c) stop deriving a REQUIRED chain from bounded Stop lines at :1647.
+qx_write_bounded_skip() {
+  local cmd="$1"
+  [ -n "${LEDGER:-}" ] && [ -n "${HEAD_SHA:-}" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  local ts
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -cn \
+    --arg ts "$ts" --arg cmd "$cmd" --arg cwd "${ROOT:-}" --arg sha "$HEAD_SHA" \
+    '{ts:$ts,cmd:$cmd,cwd:$cwd,sha:$sha,exit:null,skipped:true,skipReason:"boundedQuick",tail:"SKIPPED: excluded by the bounded quick chain (heavy filter or wall-clock cap) — never proven, never a pass"}' \
+    >> "$LEDGER" 2>/dev/null
+  return 0
+}
+
 # --- qx_filter_heavy_chain: the heavy-command filter (CORRECTED 2026-08-21) -
 # QUICK path only, declared verifyQuick included — a declared chain is not
 # exempt. A requiredEnv-skip-eligible command is never excluded (kept so the
@@ -361,15 +397,30 @@ qx_is_heavy_command() {
 # runs, under the cap) — never "filter to empty, run nothing". The matcher
 # is an optimization; the cap is the safety property. Reads/writes the
 # global array CHAIN in place; no new customer-controlled input.
+#
+# SEC-1/SEC-3: every command EXCLUDED here (heavy, not skip-eligible) gets a
+# qx_write_bounded_skip ledger line -- but ONLY when the filtered result is
+# actually used (non-empty). When the empty-result fallback fires instead,
+# NOTHING was excluded (the caller's CHAIN is left untouched and every
+# command will be genuinely attempted, or get its own boundedQuick line from
+# the run loop if the cap cuts it there) -- recording exclusions that never
+# actually happened would be its own false evidence.
 qx_filter_heavy_chain() {
   [ "$QUICK" -eq 1 ] || return 0
   local _c
-  local -a filtered=()
+  local -a filtered=() excluded=()
   for _c in "${CHAIN[@]}"; do
     if should_skip_for_env "$_c" || ! qx_is_heavy_command "$_c"; then
       filtered+=("$_c")
+    else
+      excluded+=("$_c")
     fi
   done
-  [ "${#filtered[@]}" -gt 0 ] && CHAIN=("${filtered[@]}")
+  if [ "${#filtered[@]}" -gt 0 ]; then
+    CHAIN=("${filtered[@]}")
+    for _c in ${excluded[@]+"${excluded[@]}"}; do
+      qx_write_bounded_skip "$_c"
+    done
+  fi
   return 0
 }

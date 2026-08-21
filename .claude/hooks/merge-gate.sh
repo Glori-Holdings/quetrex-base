@@ -1639,17 +1639,83 @@ evaluate_vector() {
   fi
 
   if [ -z "$CHAIN_JSON" ]; then
-    # No canonical chain resolvable at either source — fall back to: every
-    # command that appears in the ledger must be proven green for the commit
-    # being merged (conservative; a lingering red or an unproven command
-    # blocks). Deriving the command set from the ledger keeps ONE evaluation
-    # path below instead of a second, subtly-different copy of it.
-    CHAIN_JSON=$(jq -sc '[ .[] | .cmd ] | unique' "$LEDGER" 2>/dev/null)
-    if [ -z "$CHAIN_JSON" ] || [ "$CHAIN_JSON" = "null" ] || [ "$CHAIN_JSON" = "[]" ]; then
-      # A non-empty ledger that yields no evaluable command at all is
-      # unreadable evidence at the ship boundary -> fail closed.
-      deny "MERGE GATE (ESCALATE_HUMAN): could not evaluate .quetrex/verify-ledger.jsonl (malformed JSONL, or no entry carries a command). The verify chain cannot be proven green, so the merge is denied. Surface to the user."
+    # SEC-1 FIX (security review, 2026-08-21): this used to derive the
+    # REQUIRED chain from every distinct .cmd already IN the ledger. That was
+    # sound only while a Stop hook ran the FULL verify chain every turn, so
+    # the ledger command set and the true required set were the same thing.
+    # verify-gate.sh now runs a BOUNDED quick chain at Stop (declared
+    # verifyQuick, or verify[] with heavy commands filtered out) — so the
+    # ledger can genuinely be missing an entire command a repo's own
+    # CLAUDE.md/autodetect chain would have required, and deriving
+    # "required" from "what happened to run" silently shrinks the gate to
+    # whatever the quick chain touched. Reproduced: a CLAUDE.md chain
+    # ["echo lint-ok","npm test"] with a genuinely failing `npm test` — a
+    # Stop whose ledger holds only `echo lint-ok` (the rest boundedQuick or
+    # simply never resolved this way before) let this fallback treat
+    # `echo lint-ok` as the WHOLE required chain and pass a measurably red
+    # suite.
+    #
+    # THE FIX: resolve the chain the SAME way verify-gate.sh does when no
+    # verify.json exists — the committed ".claude/CLAUDE.md" "## Verification"
+    # fenced block, read from the COMMITTED blob at the pinned $HEAD_SHA
+    # (never the working tree, matching this function's own SEC-2 pinning
+    # discipline elsewhere) — and if THAT does not resolve either, REFUSE TO
+    # DERIVE rather than trust the ledger as a proxy for what was required.
+    # An unprovable merge is the fail-closed answer; a wrong, ledger-shrunk
+    # chain that silently drops requirements is not.
+    CLAUDE_MD_BLOB=""
+    if [ -n "$HEAD_SHA" ] && [[ "$HEAD_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
+      CLAUDE_MD_BLOB=$(git -C "$ROOT" show "$HEAD_SHA:.claude/CLAUDE.md" 2>/dev/null)
     fi
+    if [ -n "$CLAUDE_MD_BLOB" ]; then
+      CLAUDE_MD_CMDS=$(printf '%s' "$CLAUDE_MD_BLOB" | awk '
+        /^[[:space:]]*```/ { infence = !infence; next }
+        (!infence && $0 ~ /^#{1,6}[[:space:]]/) {
+          insec = (tolower($0) ~ /verification/) ? 1 : 0
+          next
+        }
+        (insec && infence) {
+          line = $0
+          sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
+          if (line == "" || line ~ /^#/) next
+          sub(/^\$[[:space:]]*/, "", line)
+          print line
+        }
+      ' 2>/dev/null)
+      if [ -n "$CLAUDE_MD_CMDS" ]; then
+        CHAIN_JSON=$(printf '%s\n' "$CLAUDE_MD_CMDS" | jq -Rsc '[splits("\n")] | map(select(length > 0))' 2>/dev/null)
+        [ "$CHAIN_JSON" = "[]" ] && CHAIN_JSON=""
+      fi
+    fi
+  fi
+
+  if [ -z "$CHAIN_JSON" ]; then
+    # Committed autodetect, mirroring verify-gate.sh's resolve_autodetect --
+    # package.json scripts (typecheck/type-check/tsc/lint/build/test), a
+    # Makefile's lint/build/test/check targets, or a bare pyproject.toml /
+    # go.mod / Cargo.toml presence -- read from the COMMITTED blob at
+    # $HEAD_SHA, never the working tree.
+    if [ -n "$HEAD_SHA" ] && [[ "$HEAD_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
+      PKG_BLOB=$(git -C "$ROOT" show "$HEAD_SHA:package.json" 2>/dev/null)
+      if [ -n "$PKG_BLOB" ]; then
+        AUTO_CMDS=$(printf '%s' "$PKG_BLOB" | jq -r '
+          .scripts as $s | ["typecheck","type-check","tsc","lint","build","test"]
+          | map(select($s[.] != null)) | map("npm run " + .) | .[]
+        ' 2>/dev/null)
+        [ -n "$AUTO_CMDS" ] && CHAIN_JSON=$(printf '%s\n' "$AUTO_CMDS" | jq -Rsc '[splits("\n")] | map(select(length > 0))' 2>/dev/null)
+      fi
+    fi
+    if [ -z "$CHAIN_JSON" ] || [ "$CHAIN_JSON" = "[]" ]; then
+      CHAIN_JSON=""
+    fi
+  fi
+
+  if [ -z "$CHAIN_JSON" ]; then
+    # No canonical chain resolvable ANYWHERE (verify.json at head/base/
+    # worktree, CLAUDE.md, or autodetect) -- REFUSE TO DERIVE from the
+    # ledger. Fail closed: an unprovable merge, never a chain silently
+    # narrowed to whatever a bounded Stop happened to touch.
+    deny "MERGE GATE (ESCALATE_HUMAN): no verify chain is resolvable for the merged commit (no .quetrex/verify.json at HEAD, base, or the worktree; no '## Verification' fence in .claude/CLAUDE.md; no autodetectable package.json/Makefile/pyproject.toml/go.mod/Cargo.toml). The verify chain cannot be proven green from evidence with no declared requirement to check it against, so the merge is denied. Surface to the user."
   fi
 
   # --- WHICH LEDGER LINES? the ones that describe the COMMIT BEING MERGED -----
@@ -1690,7 +1756,17 @@ evaluate_vector() {
     . as $all
     | [ $chain[]
         | . as $c
-        | ( [ $all[] | select(.cmd == $c) | {sha: (.sha // ""), rawexit: .exit, skipped: ((.skipped == true) and (.skipReason == "requiredEnv"))} ] ) as $raw
+        | ( [ $all[] | select(.cmd == $c) | {sha: (.sha // ""), rawexit: .exit, skipped: ((.skipped == true) and (.skipReason == "requiredEnv")), boundedQuick: ((.skipped == true) and (.skipReason == "boundedQuick"))} ] ) as $raw
+        # SEC-1/SEC-3 (security review, 2026-08-21): a `skipReason=="boundedQuick"` entry
+        # (verify-gate.sh bounded quick chain excluded this command, or the wall-clock cap
+        # cut it before it ran) is kept STRUCTURALLY DISTINCT from a `requiredEnv` skip here —
+        # never merged into the same `skipped` branch. requiredEnv is a legitimate,
+        # human-confirmed pass-equivalent; boundedQuick is UNPROVEN, exactly like "never ran",
+        # and must never satisfy this gate. It is also never counted toward $redshas (a
+        # boundedQuick entry rawexit is always null, never a genuine non-zero exit) and never
+        # dominance-forced to exit 1 the way a requiredEnv skip sharing a sha with a real
+        # failure is — it simply carries no evidence of its own.
+        #
         # A DESCRIBING RED DOMINATES A LATER SKIP AT THE SAME SHA. `athead` takes the LAST
         # entry at $head, so mapping a skip to exit 0 before that selection let a skip appended
         # AFTER a genuine failure at the SAME commit erase it — a command that measurably
@@ -1704,8 +1780,20 @@ evaluate_vector() {
         # this gate would deny every future genuine green for a command that failed even once
         # anywhere in the ledger (reproduced: red exit 1, then a genuine re-run at the SAME sha
         # exits 0 — that second run is real proof and must not be buried).
-        | ( [ $raw[] | select((.skipped | not) and .rawexit != null and .rawexit != 0) | .sha ] | unique ) as $redshas
-        | ( [ $raw[] | . as $e | {sha: $e.sha, exit: (if $e.skipped then (if ($redshas | index($e.sha)) then 1 else 0 end) else $e.rawexit end), skipped: $e.skipped} ] ) as $ent
+        | ( [ $raw[] | select((.skipped | not) and (.boundedQuick | not) and .rawexit != null and .rawexit != 0) | .sha ] | unique ) as $redshas
+        | ( [ $raw[] | . as $e | {sha: $e.sha, exit: (if $e.skipped then (if ($redshas | index($e.sha)) then 1 else 0 end) else $e.rawexit end), skipped: $e.skipped, boundedQuick: $e.boundedQuick} ] ) as $ent
+        # SEC-1/SEC-3: A GENUINE EXECUTED ENTRY ALWAYS WINS OVER A boundedQuick ONE FOR THE
+        # SAME SHA, REGARDLESS OF WRITE ORDER. A bounded quick chain can write its skip line
+        # either before OR after a genuine run at the identical commit reaches the ledger (QA
+        # full-chain run, or a later Stop that genuinely executed the command) — a boundedQuick
+        # line must never be allowed to shadow real proof merely by having a later timestamp,
+        # and a boundedQuick line must never be treated as proof itself when it is the only
+        # thing on record for that sha. At $head specifically: prefer the last NON-boundedQuick
+        # entry at $head if one exists; only fall back to a boundedQuick entry (still unproven,
+        # per the deferred-to-$athead.exit==null handling below) when NOTHING else describes
+        # $head at all.
+        | ( [ $ent[] | select(.sha == $head and $head != "") ] ) as $head_ents
+        | ( ( [ $head_ents[] | select(.boundedQuick | not) ] | last ) // ( $head_ents | last ) ) as $raw_athead
         # ONLY A CLEAN SKIP AT $head DEFERS TO THE WALK. If any sha carries a genuine failure,
         # a CLEAN skip at $head (one whose own sha carries no failure, so $ent left its exit at
         # 0) cannot stand in as the describing answer — otherwise a red at an artifact-only-range
@@ -1717,8 +1805,7 @@ evaluate_vector() {
         # evidence, and must never be nulled away: doing so discarded the ONLY trace of a red at
         # $head itself (reproduced: green at a describing ancestor, red at $head, then a skip
         # ALSO at $head — the null here threw the red away and the merge shipped it).
-        | ( ( [ $ent[] | select(.sha == $head and $head != "") ] | last ) as $last
-            | if ($last != null and $last.skipped and $last.exit == 0 and ($redshas | length) > 0) then null else $last end ) as $athead
+        | ( if ($raw_athead != null and $raw_athead.skipped and $raw_athead.exit == 0 and ($redshas | length) > 0) then null else $raw_athead end ) as $athead
         # THE WALKS OWN CANDIDATE LIST MUST HONOR THE SAME DEFERRAL — AND NO MORE. Nulling
         # $athead above sends the decision to the bash walk below, which picks the FIRST persha
         # candidate connected to $head by an artifact-only range and stops there. But $head
@@ -1730,9 +1817,12 @@ evaluate_vector() {
         # $persha; a skip already dominance-forced to exit 1 IS the red evidence for its sha (not
         # a mask over it) and dropping it too would erase that sha from $persha entirely, hiding
         # a genuine failure behind a stale, unrelated, older describing green — the same defect
-        # one level removed, for any sha, not only $head.
+        # one level removed, for any sha, not only $head. The per-sha collapse ALSO applies the
+        # same genuine-wins-over-boundedQuick preference as $athead above, independent of order.
         | ( ( reduce ($ent | reverse)[] as $e ({};
-              if has($e.sha) then . else .[$e.sha] = $e end) | [ .[] ] )
+              if has($e.sha) then
+                (if (.[$e.sha].boundedQuick) and ($e.boundedQuick | not) then .[$e.sha] = $e else . end)
+              else .[$e.sha] = $e end) | [ .[] ] )
             | if ($redshas | length) > 0 then [ .[] | select((.skipped | not) or .exit != 0) ] else . end ) as $persha
         | { cmd: $c, athead: $athead, persha: $persha }
         | select(.athead == null or .athead.exit != 0) ]
