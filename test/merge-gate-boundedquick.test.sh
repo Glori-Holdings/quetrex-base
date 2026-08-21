@@ -404,24 +404,82 @@ fi
 # denies case (d) for the WRONG reason (no boundedQuick concept — a null
 # exit just reads as red by accident, same as case (a) above) and would not
 # isolate the persha-exclusion bug this fix actually closes. The genuine
-# pre-fix baseline for THIS specific change is the committed 4bd824f version
-# at HEAD: it already has the boundedQuick concept and the $athead null-vs-
-# fallback fix, but not yet the $persha boundedQuick-exclusion — and at the
-# time this proof runs, that persha fix is still UNCOMMITTED in the working
-# tree, so `git show HEAD:path` genuinely returns the pre-persha-fix file
-# (not self-referential — the lesson from the (b) baseline bug above).
-D_BASELINE="$TMP/baseline-merge-gate-d.sh"
-if git -C "$ROOT" show HEAD:.claude/hooks/merge-gate.sh > "$D_BASELINE" 2>/dev/null \
-   && ! git -C "$ROOT" diff --quiet HEAD -- .claude/hooks/merge-gate.sh 2>/dev/null; then
+# pre-fix baseline for THIS specific change is the committed 4bd824f version:
+# it already has the boundedQuick concept and the $athead null-vs-fallback
+# fix, but not yet the $persha boundedQuick-exclusion.
+#
+# QA FIX (GREEN-PROOF review, 2026-08-21): this originally resolved the
+# baseline via `git show HEAD:path`, gated on `! git diff --quiet HEAD --
+# path` (i.e. only when merge-gate.sh had an UNCOMMITTED diff). That is only
+# ever true transiently, during the same session the fix is written in —
+# once this commit lands (as it now has), HEAD has no uncommitted diff
+# against itself, the guard is permanently false, and this proof
+# permanently prints "SKIP" forever, never proving anything again despite
+# the PR description's "every fix has a fail-first test" claim. Confirmed
+# 4bd824f is independently a durable, PERMANENT baseline for this exact
+# claim — it already carries the $athead fix but genuinely lacks the
+# $persha boundedQuick-exclusion (grepped directly: 0 occurrences of
+# `select(.boundedQuick | not) ] ) as $persha`-shaped filtering after the
+# reduce/dominance step) — so pin to that immutable sha instead, the same
+# durable pattern SEC-14/SEC-15's fail-firsts already use.
+SEC12_BASELINE_SHA="4bd824f"
+if git -C "$ROOT" cat-file -e "${SEC12_BASELINE_SHA}:.claude/hooks/merge-gate.sh" 2>/dev/null; then
+  D_BASELINE="$TMP/baseline-merge-gate-d.sh"
+  git -C "$ROOT" show "${SEC12_BASELINE_SHA}:.claude/hooks/merge-gate.sh" > "$D_BASELINE"
+  mkgh_mock2 "$HEAD_D_Y" "$HEAD_D_X"
   BASE_OUT_D="$(printf '%s' "$(jq -cn --arg c "$GH_MERGE_CMD" --arg cwd "$FD" '{tool_input:{command:$c},cwd:$cwd}')" \
     | CLAUDE_PROJECT_DIR="$FD" PATH="$MOCKBIN:$PATH" bash "$D_BASELINE" 2>&1)"
   if is_deny "$BASE_OUT_D"; then
-    ok "FAIL-FIRST (d) SEC-12: the pre-persha-fix baseline (4bd824f) WRONGLY DENIES the artifact-only-range ancestor-defer case — proving the \$persha boundedQuick-exclusion is a genuine, deliberate behavior change"
+    ok "FAIL-FIRST (d) SEC-12: the pre-persha-fix baseline ($SEC12_BASELINE_SHA) WRONGLY DENIES the artifact-only-range ancestor-defer case — proving the \$persha boundedQuick-exclusion is a genuine, deliberate behavior change"
   else
     notok "FAIL-FIRST (d) SEC-12: the pre-persha-fix baseline did not deny case (d) either (out: [$BASE_OUT_D]) — cannot demonstrate the fix is real"
   fi
 else
-  echo "SKIP: (d) SEC-12 fail-first — merge-gate.sh has no uncommitted diff at HEAD, cannot isolate a genuine pre-persha-fix baseline this way"
+  echo "SKIP: commit ${SEC12_BASELINE_SHA} not reachable — SEC-12 (d) fail-first proof could not run"
+fi
+
+
+# =============================================================================
+# SEC-17 (security review, 2026-08-21): merge-gate.sh copies the SAME
+# split_segments_quote_aware tokenizer. Its old `>|` glue inspected the
+# last EMITTED character, which cannot tell an escaped '>' from a genuine
+# one -- an escaped '>' immediately followed by a REAL pipe (e.g. a merge
+# command built as `echo a\>|gh pr merge ...`) got the real pipe wrongly
+# glued away, hiding the ENTIRE merge command inside one never-evaluated
+# segment. Reproduced live: at 349ce29, `gh pr merge 999 --squash` alone
+# correctly DENIES (no verdict/ledger for this bare fixture), but prefixing
+# it with `echo a\>` and gluing via the bug made merge-gate never recognize
+# ANY segment as a merge attempt at all -- 0 decisions, a SILENT ALLOW.
+# =============================================================================
+FSEC17="$TMP/case-sec17"
+mkrepo "$FSEC17"
+git -C "$FSEC17" commit --allow-empty -qm "sec17 fixture"
+HEAD_SEC17="$(git -C "$FSEC17" rev-parse HEAD)"
+mkgh_mock "$HEAD_SEC17"
+SEC17_ESCAPED_CMD="$(printf 'echo a\\>|%s' "$GH_MERGE_CMD")"
+SEC17_PAYLOAD="$(jq -cn --arg c "$SEC17_ESCAPED_CMD" --arg cwd "$FSEC17" '{tool_input:{command:$c},cwd:$cwd}')"
+OUT_SEC17="$(printf '%s' "$SEC17_PAYLOAD" | CLAUDE_PROJECT_DIR="$FSEC17" PATH="$MOCKBIN:$PATH" bash "$HOOK" 2>&1)"
+if is_deny "$OUT_SEC17"; then
+  ok "SEC-17: an escaped '>' immediately before a REAL pipe into \`gh pr merge\` still splits into its own segment and DENIES (no verdict/ledger for this bare fixture)"
+else
+  notok "SEC-17: expected DENY -- the merge command must still be recognized as its own segment even preceded by \`echo a\\>|\`, got no-deny (out: [$OUT_SEC17])"
+fi
+
+SEC17_BASELINE_SHA="349ce29"
+if git -C "$ROOT" cat-file -e "${SEC17_BASELINE_SHA}:.claude/hooks/merge-gate.sh" 2>/dev/null; then
+  SEC17_BASELINE="$TMP/sec17-baseline-merge-gate.sh"
+  git -C "$ROOT" show "${SEC17_BASELINE_SHA}:.claude/hooks/merge-gate.sh" > "$SEC17_BASELINE"
+  BASE_OUT_SEC17="$(printf '%s' "$SEC17_PAYLOAD" | CLAUDE_PROJECT_DIR="$FSEC17" PATH="$MOCKBIN:$PATH" bash "$SEC17_BASELINE" 2>&1)"
+  BASE_SEC17_BYTES=$(printf '%s' "$BASE_OUT_SEC17" | wc -c | tr -d ' ')
+  if is_deny "$BASE_OUT_SEC17"; then
+    notok "SEC-17 FAIL-FIRST: the pre-fix baseline ($SEC17_BASELINE_SHA) unexpectedly already denies the escaped-payload (out: [$BASE_OUT_SEC17]) — cannot demonstrate the fix is real"
+  elif [ "$BASE_SEC17_BYTES" -eq 0 ]; then
+    ok "SEC-17 FAIL-FIRST: the pre-fix baseline ($SEC17_BASELINE_SHA) produces 0 decision bytes (SILENT ALLOW) for the identical escaped-payload -- the merge command was never recognized as its own segment at all; proving this fix is real"
+  else
+    notok "SEC-17 FAIL-FIRST: the pre-fix baseline did not deny, but also was not a clean silent-allow either (out: [$BASE_OUT_SEC17]) — ambiguous, cannot cleanly demonstrate the fix"
+  fi
+else
+  echo "SKIP: commit ${SEC17_BASELINE_SHA} not reachable — SEC-17 fail-first proof could not run"
 fi
 
 echo

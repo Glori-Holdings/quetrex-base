@@ -185,14 +185,29 @@ CAPMENTION2=$(printf '%s' "$OUT2" | grep -ci 'cap')
 [ "$CAPMENTION2" -ge 1 ] && ok "AC2: stdout names the cap" || notok "AC2: stdout does not mention the cap (out: [$OUT2])"
 
 # =============================================================================
-# SEC-15 (security review, 2026-08-21): a genuine EARLIER command in the same
-# run, followed by a LATER command the cap cuts, must leave the ledger's
-# LAST LINE as the genuine result — never the cap-cut boundedQuick skip.
-# Before this fix the boundedQuick lines were appended straight after
-# whatever genuine lines this SAME run had already written, so the ledger's
-# tail read exit:null even though a real, executed result exists earlier in
-# the very same run -- exactly git-workflow.md Gate 2's refusal test ("last
-# verify command exited null").
+# SEC-15 (LOW, security review 2026-08-21 — downgraded after a REJECTED
+# ordering fix). An earlier round made the CAP-HIT path read the ledger's
+# byte size, truncate it, write the boundedQuick lines, then re-append the
+# captured tail, so the ledger's LAST line would be a genuine EARLIER
+# result rather than the cap-cut boundedQuick skip. Security correctly
+# rejected that as SEC-19 (CRITICAL enough to require a redesign, not just
+# a fix): a read-modify-write against a file OTHER PROCESSES also append to
+# (parallel subagents sharing one worktree are a real writer) can lose a
+# concurrently-appended line, and truncation itself breaks the append-only
+# invariant merge-gate.sh's own GATE 3 reasoning depends on.
+#
+# THE ACCEPTED TRADE (operator directive, 2026-08-21): append-only wins.
+# Every ledger write stays a plain `>>` of one complete line — no read, no
+# truncate, no reorder, ever. The residual is exactly what this section now
+# PINS rather than "fixes": a genuine EARLIER command's ledger line can
+# still be followed by a LATER command's cap-cut boundedQuick skip, so the
+# ledger's tail is not always the genuine result. That is DISCLOSED, LOW
+# severity, and intentionally left open — qx_filter_heavy_chain's
+# exclusions stay "accidentally correct" only because THAT set is known
+# statically before the run loop starts, with nothing yet written this run
+# to reorder around; a wall-clock CAP_HIT is discovered dynamically,
+# mid-loop, after earlier commands already genuinely ran, and cannot
+# reproduce that property without the read-modify-write this trade removes.
 # =============================================================================
 F15="$TMP/sec15"
 mkrepo "$F15" '{"verify":["sh -c \"exit 0\"","sh -c \"sleep 20\""],"verifyQuick":["sh -c \"exit 0\"","sh -c \"sleep 20\""]}'
@@ -206,35 +221,19 @@ BOUNDED15="$(is_bounded_skip_line "$F15" 'sh -c "sleep 20"')"
 
 [ "$CODE15" -eq 0 ] && ok "SEC-15: hook exit 0 (cap-allow, not a block)" || notok "SEC-15: expected exit 0, got $CODE15"
 [ "$BLOCKS15" -eq 0 ] && ok "SEC-15: 0 block decisions" || notok "SEC-15: expected 0 block decisions, got $BLOCKS15 (out: [$OUT15])"
-[ "$GENUINE15" = "1" ] && ok "SEC-15: the earlier genuine command still has exactly 1 ledger line" \
+[ "$GENUINE15" = "1" ] && ok "SEC-15: the earlier genuine command still has exactly 1 ledger line (append-only preserves it, never lost)" \
   || notok "SEC-15: expected 1 genuine ledger line for the earlier command, got $GENUINE15"
 [ "$BOUNDED15" = "1" ] && ok "SEC-15: the cap-cut command still has exactly 1 boundedQuick ledger line" \
   || notok "SEC-15: expected 1 boundedQuick line for the cap-cut command, got $BOUNDED15"
-[ "$LAST_LINE_CMD" = 'sh -c "exit 0"' ] && ok "SEC-15: the ledger's LAST LINE is the genuine earlier command, not the cap-cut boundedQuick skip" \
-  || notok "SEC-15: expected the ledger's last line .cmd to be the genuine earlier command, got [$LAST_LINE_CMD] (full: [$(cat "$LEDGER15_FILE" 2>/dev/null)])"
-[ "$LAST_LINE_EXIT" = "0" ] && ok "SEC-15: the ledger's LAST LINE .exit is 0 (a real result), never null" \
-  || notok "SEC-15: expected the ledger's last line .exit to be 0, got [$LAST_LINE_EXIT] — this is exactly git-workflow.md Gate 2's refusal test"
-
-# --- SEC-15 FAIL-FIRST: the pre-fix baseline (4bd824f, before this run's
-# reordering landed) genuinely leaves the boundedQuick skip as the ledger's
-# last line for the identical fixture.
-SEC15_BASELINE_SHA="4bd824f"
-if git -C "$ROOT" cat-file -e "${SEC15_BASELINE_SHA}:.claude/hooks/verify-gate.sh" 2>/dev/null; then
-  SEC15_BASELINE="$TMP/sec15-baseline-verify-gate.sh"
-  git -C "$ROOT" show "${SEC15_BASELINE_SHA}:.claude/hooks/verify-gate.sh" > "$SEC15_BASELINE"
-  FB15="$TMP/sec15-baseline-fixture"
-  mkrepo "$FB15" '{"verify":["sh -c \"exit 0\"","sh -c \"sleep 20\""],"verifyQuick":["sh -c \"exit 0\"","sh -c \"sleep 20\""]}'
-  printf '{"hook_event_name":"Stop","cwd":"%s"}' "$FB15" \
-    | ( cd "$FB15" && CLAUDE_PROJECT_DIR="$FB15" QUETREX_VERIFY_QUICK_CAP=2 bash "$SEC15_BASELINE" >/dev/null 2>&1 )
-  BASE_LAST_EXIT="$(tail -n 1 "$FB15/.quetrex/verify-ledger.jsonl" 2>/dev/null | jq -r '.exit' 2>/dev/null)"
-  if [ "$BASE_LAST_EXIT" != "0" ]; then
-    ok "SEC-15 FAIL-FIRST: the pre-fix baseline ($SEC15_BASELINE_SHA) leaves a non-genuine last ledger line (.exit=[$BASE_LAST_EXIT]) for the identical fixture — proving the reordering fix is genuine"
-  else
-    notok "SEC-15 FAIL-FIRST: the pre-fix baseline already has a genuine last line either (.exit=[$BASE_LAST_EXIT]) — cannot demonstrate the fix is real"
-  fi
-else
-  echo "SKIP: commit ${SEC15_BASELINE_SHA} not reachable — SEC-15 fail-first proof could not run"
-fi
+# PINS the accepted, disclosed, LOW-severity residual — the ledger's LAST
+# line is the CUT command's boundedQuick skip, not the earlier genuine
+# result, because nothing is ever reordered. If a future change makes this
+# assertion fail (i.e. the last line becomes genuine again), verify it did
+# NOT reintroduce a ledger read-modify-write before treating that as
+# progress — SEC-19 is the reason this residual exists at all.
+[ "$LAST_LINE_CMD" = 'sh -c "sleep 20"' ] && [ "$LAST_LINE_EXIT" = "null" ] \
+  && ok "SEC-15 (accepted residual, LOW): the ledger's last line is the cap-cut boundedQuick skip, not the earlier genuine result — strict append-only, no reordering, exactly the operator-approved trade" \
+  || notok "SEC-15: expected the ledger's last line to be the boundedQuick skip (sh -c \"sleep 20\", exit null) per the accepted append-only design, got cmd=[$LAST_LINE_CMD] exit=[$LAST_LINE_EXIT]"
 
 # =============================================================================
 # AC3 — a genuinely failing CHEAP command still blocks (red stays red).

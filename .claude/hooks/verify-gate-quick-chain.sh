@@ -150,32 +150,32 @@ split_segments_quote_aware() {
   # runs, against the enclosing scope's state -- `n=${#s}` on the same
   # line as `s="$1"` would see `s` as unset under `set -u`.
   local s="$1"
-  local i=0 n=${#s} c two nc out='' in_sq=0 in_dq=0 in_cm=0 have=0
+  local i=0 n=${#s} c two nc out='' in_sq=0 in_dq=0 in_cm=0 have=0 gt=0
   while [ "$i" -lt "$n" ]; do
     c="${s:$i:1}"
     if [ "$in_cm" -eq 1 ]; then
-      out+="$c"
+      out+="$c"; gt=0
       if [ "$c" = $'\n' ]; then in_cm=0; have=0; fi
     elif [ "$in_sq" -eq 1 ]; then
-      out+="$c"; have=1
+      out+="$c"; have=1; gt=0
       [ "$c" = "'" ] && in_sq=0
     elif [ "$in_dq" -eq 1 ]; then
-      out+="$c"; have=1
+      out+="$c"; have=1; gt=0
       if [ "$c" = '\' ] && [ $((i + 1)) -lt "$n" ]; then
-        i=$((i + 1)); out+="${s:$i:1}"
+        i=$((i + 1)); out+="${s:$i:1}"; gt=0
       elif [ "$c" = '"' ]; then
         in_dq=0
       fi
     else
       case "$c" in
         ' ' | $'\t')
-          out+="$c"; have=0
+          out+="$c"; have=0; gt=0
           ;;
         $'\n')
-          out+="$c"; have=0
+          out+="$c"; have=0; gt=0
           ;;
-        "'") in_sq=1; out+="$c"; have=1 ;;
-        '"') in_dq=1; out+="$c"; have=1 ;;
+        "'") in_sq=1; out+="$c"; have=1; gt=0 ;;
+        '"') in_dq=1; out+="$c"; have=1; gt=0 ;;
         '#')
           # A `#` starts a shell comment only at the START of a word --
           # tracked with the SAME `have` flag tokenize_argv uses (whether
@@ -191,9 +191,19 @@ split_segments_quote_aware() {
           if [ "$have" -eq 0 ]; then
             in_cm=1
           fi
-          out+="$c"; have=1
+          out+="$c"; have=1; gt=0
           ;;
         '\')
+          # SEC-17 (security review, 2026-08-21): an escaped character is
+          # emitted VERBATIM here, so `a\>` leaves a literal '>' as the
+          # LAST EMITTED character -- indistinguishable, by inspecting
+          # `out` alone, from a real unescaped redirect operator. This is
+          # exactly the trap the '#' branch's own comment above already
+          # warns about ("could not tell an escaped separator from a real
+          # one"). `gt` is explicitly cleared on every path through this
+          # branch (never inferred from the emitted bytes), so the
+          # '&'|'|' branch below never mistakes an escaped '>' for a real
+          # one and never wrongly glues away a REAL following pipe.
           if [ $((i + 1)) -lt "$n" ]; then
             nc="${s:$((i + 1)):1}"
             if [ "$nc" = $'\n' ]; then
@@ -208,23 +218,46 @@ split_segments_quote_aware() {
           else
             out+="$c"; have=1
           fi
+          gt=0
           ;;
         '&' | '|')
-          two="${s:$i:2}"
-          if [ "$two" = "&&" ] || [ "$two" = "||" ]; then
-            out+=$'\n'
-            i=$((i + 1))
+          # SEC-13/SEC-17 (security review, 2026-08-21): '>|' is bash own
+          # noclobber-override redirect operator, not a pipe -- without
+          # this a bare unquoted '|' immediately after a genuine '>' was
+          # always read as a pipe/segment separator, splitting
+          # "cat x >| protected-path" into two unrelated segments and
+          # losing the redirect target entirely. Glue it onto the
+          # preceding '>' instead, exactly like '>>' already reaches
+          # normalize_segment as one token -- gated on the `gt` flag (set
+          # ONLY in the default `*)` branch below when a raw, unescaped,
+          # unquoted '>' is emitted; cleared on every other path,
+          # including the escape branch above), NEVER by inspecting the
+          # last emitted character. SEC-17: `${out: -1}` cannot
+          # distinguish `a\>|cmd` (an ESCAPED '>' followed by a REAL pipe)
+          # from a genuine `>|` operator, and wrongly glued the real pipe
+          # away -- hiding an entire second command from every downstream
+          # segment-based scanner (merge-gate GATE 1-4, the floor-script
+          # guard) at both DENY sites.
+          if [ "$c" = '|' ] && [ "$gt" -eq 1 ]; then
+            out+="$c"; have=1; gt=0
           else
-            out+=$'\n'
+            two="${s:$i:2}"
+            if [ "$two" = "&&" ] || [ "$two" = "||" ]; then
+              out+=$'\n'
+              i=$((i + 1))
+            else
+              out+=$'\n'
+            fi
+            have=0; gt=0
           fi
-          have=0
           ;;
         ';')
           out+=$'\n'
-          have=0
+          have=0; gt=0
           ;;
         *)
           out+="$c"; have=1
+          if [ "$c" = '>' ]; then gt=1; else gt=0; fi
           ;;
       esac
     fi
@@ -389,43 +422,39 @@ qx_write_bounded_skip() {
   return 0
 }
 
-# qx_write_bounded_skips_for_cap <start-idx> -- SEC-15 (security review,
-# 2026-08-21): on a CAP_HIT, verify-gate.sh's run loop used to append the
-# boundedQuick lines for CHAIN[start-idx..end] straight after whatever
-# genuine result an EARLIER command in this SAME run already wrote, so the
-# ledger's `tail -n 1` yielded a boundedQuick (exit:null) line even when a
-# real, executed result exists elsewhere in this run -- exactly git-
-# workflow.md Gate 2's refusal test ("last verify command exited null").
-# The heavy-filter path (qx_filter_heavy_chain, above) is accidentally safe
-# because ITS boundedQuick lines are written BEFORE the run loop starts.
-# Made consistent here: pull this run's own genuine lines (everything
-# appended since the caller's LEDGER_RUN_START_BYTES) off the ledger tail,
-# write the cap-cut boundedQuick lines in their place, then re-append the
-# genuine lines -- so the ledger's last line is a genuine executed result
-# from this run whenever one exists. Reads CHAIN (array), LEDGER,
-# LEDGER_RUN_START_BYTES from the caller's scope (verify-gate.sh globals).
+# qx_write_bounded_skips_for_cap <start-idx> -- writes a boundedQuick line
+# for CHAIN[start-idx..end], the commands a CAP_HIT excluded.
+#
+# SEC-15 / SEC-19 (security review, 2026-08-21): an earlier version of this
+# function tried to make the ledger's LAST line a genuine result whenever
+# one exists in this run, by reading the ledger's current byte size,
+# truncating it, writing these boundedQuick lines, then re-appending the
+# captured tail. SEC-19 (CONFIRMED, security review) correctly rejected
+# that: a read-modify-write against a file other processes also append to
+# (parallel subagents sharing one worktree ARE a real writer, not a
+# theoretical one) can lose a concurrently-appended line between the byte
+# count and the `mv`, and the truncate-then-rewrite itself breaks the
+# append-only invariant merge-gate.sh's own reasoning depends on.
+#
+# THE FIX (operator directive): restore STRICT append-only. Every ledger
+# write in this file is a plain `>>` of one complete line, full stop -- no
+# read, no truncate, no temp file. This function is back to exactly what
+# qx_write_bounded_skip already does in a loop. The residual SEC-15
+# ordering concern (a boundedQuick line for the CUT command can still land
+# after an earlier genuine line from the SAME run, so the ledger's tail is
+# not always the genuine result) is DOWNGRADED to LOW and left OPEN by the
+# operator's explicit call: correct ordering is not worth reintroducing a
+# read-modify-write on the ledger. The heavy-filter path above stays
+# "accidentally correct" because ITS exclusions are known statically before
+# the run loop starts, with nothing yet written this run to reorder around
+# -- a structural property a wall-clock CAP_HIT (only known dynamically,
+# mid-loop, after earlier commands have already genuinely run) cannot
+# reproduce without the read-modify-write this fix removes.
 qx_write_bounded_skips_for_cap() {
-  local start_idx="$1" i cur_bytes this_run_tail=""
-  if [ -n "${LEDGER:-}" ] && [ -f "$LEDGER" ]; then
-    cur_bytes=$(wc -c < "$LEDGER" 2>/dev/null | tr -d ' ')
-    case "$cur_bytes" in ''|*[!0-9]*) cur_bytes=0 ;; esac
-    if [ "$cur_bytes" -gt "${LEDGER_RUN_START_BYTES:-0}" ]; then
-      this_run_tail=$(tail -c "+$(( ${LEDGER_RUN_START_BYTES:-0} + 1 ))" "$LEDGER" 2>/dev/null)
-      # BSD `head -c 0` (macOS stock head) errors and exits non-zero rather
-      # than emitting an empty file, silently no-op-ing the truncate and
-      # duplicating the genuine line when it gets re-appended below.
-      if [ "${LEDGER_RUN_START_BYTES:-0}" -eq 0 ]; then
-        : > "$LEDGER.qxtmp" 2>/dev/null && mv "$LEDGER.qxtmp" "$LEDGER" 2>/dev/null
-      else
-        head -c "${LEDGER_RUN_START_BYTES:-0}" "$LEDGER" > "$LEDGER.qxtmp" 2>/dev/null \
-          && mv "$LEDGER.qxtmp" "$LEDGER" 2>/dev/null
-      fi
-    fi
-  fi
+  local start_idx="$1" i
   for ((i = start_idx; i < ${#CHAIN[@]}; i++)); do
     qx_write_bounded_skip "${CHAIN[$i]}"
   done
-  [ -n "$this_run_tail" ] && [ -n "${LEDGER:-}" ] && printf '%s\n' "$this_run_tail" >> "$LEDGER" 2>/dev/null
   return 0
 }
 

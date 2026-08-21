@@ -33,6 +33,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GUARD="${QX_PROTECTED_FILES_GUARD_HOOK:-$ROOT/.claude/hooks/protected-files-guard.sh}"
 VERIFY_HOOK="${QX_VERIFY_GATE_HOOK:-$ROOT/.claude/hooks/verify-gate.sh}"
 MERGE_HOOK="$ROOT/.claude/hooks/merge-gate.sh"
+QUICK_CHAIN_HOOK="$ROOT/.claude/hooks/verify-gate-quick-chain.sh"
 
 PASS=0; FAIL=0
 ok()    { PASS=$((PASS+1)); echo "ok - $1"; }
@@ -137,8 +138,27 @@ check15 "cp notes.txt /tmp/notes.txt" \
 
 # =============================================================================
 # AC16 — the copied tokenizer (split_segments_quote_aware, normalize_segment)
-# is byte-identical to merge-gate.sh's own copy, extracted by function-name
-# boundary from BOTH files. A 0-byte extraction is a FAIL, not a vacuous pass.
+# is byte-identical across ALL THREE copies -- merge-gate.sh,
+# protected-files-guard.sh, and verify-gate-quick-chain.sh -- extracted by
+# function-name boundary from each file. A 0-byte extraction is a FAIL, not
+# a vacuous pass.
+#
+# SEC-18 (security review, 2026-08-21): this used to compare only TWO of the
+# three copies (merge-gate.sh vs protected-files-guard.sh). verify-gate-
+# quick-chain.sh carries its OWN copy (its header claims verbatim parity)
+# but was never checked here -- so when the SEC-17 '>|' tokenizer fix landed
+# in merge-gate.sh and protected-files-guard.sh but NOT in verify-gate-
+# quick-chain.sh, nothing caught the drift.
+#
+# QA CORRECTION (2026-08-21): comparing every copy only against ONE assumed
+# "source of truth" leaves the THIRD pairwise relationship unchecked -- if
+# protected-files-guard.sh and verify-gate-quick-chain.sh ever drifted from
+# EACH OTHER in a way that both still happened to match merge-gate.sh's
+# extraction boundary but not each other's content, a source-of-truth-only
+# comparison would still miss it. All THREE pairs are diffed explicitly:
+# merge-gate.sh vs protected-files-guard.sh, merge-gate.sh vs
+# verify-gate-quick-chain.sh, and protected-files-guard.sh vs
+# verify-gate-quick-chain.sh.
 # =============================================================================
 extract_fn() {  # extract_fn <file> <fn-name>
   awk -v fn="$2" '
@@ -150,17 +170,30 @@ extract_fn() {  # extract_fn <file> <fn-name>
 for fn in split_segments_quote_aware normalize_segment; do
   extract_fn "$MERGE_HOOK" "$fn" > "$TMP/mg_$fn.txt"
   extract_fn "$GUARD" "$fn" > "$TMP/pg_$fn.txt"
+  extract_fn "$QUICK_CHAIN_HOOK" "$fn" > "$TMP/qc_$fn.txt"
   MGN=$(wc -l < "$TMP/mg_$fn.txt" | tr -d ' ')
   PGN=$(wc -l < "$TMP/pg_$fn.txt" | tr -d ' ')
-  if [ "$MGN" -eq 0 ] || [ "$PGN" -eq 0 ]; then
-    notok "AC16: extraction of $fn found an EMPTY region (merge-gate.sh: $MGN lines, protected-files-guard.sh: $PGN lines) — a 0-byte extraction is a FAIL"
+  QCN=$(wc -l < "$TMP/qc_$fn.txt" | tr -d ' ')
+  if [ "$MGN" -eq 0 ] || [ "$PGN" -eq 0 ] || [ "$QCN" -eq 0 ]; then
+    notok "AC16: extraction of $fn found an EMPTY region (merge-gate.sh: $MGN, protected-files-guard.sh: $PGN, verify-gate-quick-chain.sh: $QCN lines) — a 0-byte extraction is a FAIL"
     continue
   fi
-  ok "AC16: extracted a non-empty $fn from both files (merge-gate.sh: $MGN lines, protected-files-guard.sh: $PGN lines)"
-  DIFFLINES=$(diff "$TMP/mg_$fn.txt" "$TMP/pg_$fn.txt" | grep -c . || true)
-  [ "${DIFFLINES:-0}" -eq 0 ] \
+  ok "AC16: extracted a non-empty $fn from all three files (merge-gate.sh: $MGN, protected-files-guard.sh: $PGN, verify-gate-quick-chain.sh: $QCN lines)"
+
+  DIFFLINES_MG_PG=$(diff "$TMP/mg_$fn.txt" "$TMP/pg_$fn.txt" | grep -c . || true)
+  [ "${DIFFLINES_MG_PG:-0}" -eq 0 ] \
     && ok "AC16: $fn is byte-identical between merge-gate.sh and protected-files-guard.sh (diff produces 0 lines)" \
-    || notok "AC16: $fn DIFFERS between merge-gate.sh and protected-files-guard.sh ($DIFFLINES diff line(s)) — the copy has drifted from its source of truth"
+    || notok "AC16: $fn DIFFERS between merge-gate.sh and protected-files-guard.sh ($DIFFLINES_MG_PG diff line(s)) — the copy has drifted"
+
+  DIFFLINES_MG_QC=$(diff "$TMP/mg_$fn.txt" "$TMP/qc_$fn.txt" | grep -c . || true)
+  [ "${DIFFLINES_MG_QC:-0}" -eq 0 ] \
+    && ok "AC16: $fn is byte-identical between merge-gate.sh and verify-gate-quick-chain.sh (diff produces 0 lines)" \
+    || notok "AC16: $fn DIFFERS between merge-gate.sh and verify-gate-quick-chain.sh ($DIFFLINES_MG_QC diff line(s)) — the copy has drifted (SEC-18: this exact gap let the SEC-17 fix land in only two of three copies undetected)"
+
+  DIFFLINES_PG_QC=$(diff "$TMP/pg_$fn.txt" "$TMP/qc_$fn.txt" | grep -c . || true)
+  [ "${DIFFLINES_PG_QC:-0}" -eq 0 ] \
+    && ok "AC16: $fn is byte-identical between protected-files-guard.sh and verify-gate-quick-chain.sh (diff produces 0 lines)" \
+    || notok "AC16: $fn DIFFERS between protected-files-guard.sh and verify-gate-quick-chain.sh ($DIFFLINES_PG_QC diff line(s)) — the copy has drifted (the third pairwise relationship — never assumed close enough just because both matched merge-gate.sh)"
 done
 
 # =============================================================================
@@ -386,15 +419,72 @@ if git -C "$ROOT" cat-file -e "${SEC13_BASELINE_SHA}:.claude/hooks/protected-fil
   git -C "$ROOT" show "${SEC13_BASELINE_SHA}:.claude/hooks/protected-files-guard.sh" > "$SEC13_BASELINE"
   SEC13_BASE_DIR_PAYLOAD="$(jq -cn --arg c "cp /tmp/hooks/verify-gate.sh $SEC13_TARGET_SLASH" '{tool_name:"Bash",tool_input:{command:$c}}')"
   SEC13_BASE_DIR_OUT="$(printf '%s' "$SEC13_BASE_DIR_PAYLOAD" | bash "$SEC13_BASELINE" 2>&1)"
+  SEC13_BASE_DIR_BYTES=$(printf '%s' "$SEC13_BASE_DIR_OUT" | wc -c | tr -d ' ')
   SEC13_BASE_1G_PAYLOAD="$(jq -cn --arg c "cat /tmp/evil 1> $SEC_TARGET" '{tool_name:"Bash",tool_input:{command:$c}}')"
   SEC13_BASE_1G_OUT="$(printf '%s' "$SEC13_BASE_1G_PAYLOAD" | bash "$SEC13_BASELINE" 2>&1)"
+  SEC13_BASE_1G_BYTES=$(printf '%s' "$SEC13_BASE_1G_OUT" | wc -c | tr -d ' ')
+  # QA STRICTER STANDARD (2026-08-21): "not a deny" alone is satisfied by a
+  # CRASH too (a syntax/runtime error produces no `"permissionDecision":
+  # "deny"` text either), which would let a broken baseline invocation
+  # pass this assertion for a reason that has NOTHING to do with the
+  # claimed old-allowed behavior — the exact class of bug QA already found
+  # and fixed in the SEC-15 baseline elsewhere in this suite. Require
+  # EXACTLY 0 output bytes (empirically confirmed: the real 4bd824f
+  # behavior for both payloads is a clean exit-0, 0-byte silent allow, not
+  # an error) so a crashing baseline (which emits SOME text, even if it
+  # never contains the word "deny") correctly FAILS this assertion instead
+  # of accidentally satisfying it.
   if is_deny "$SEC13_BASE_DIR_OUT" || is_deny "$SEC13_BASE_1G_OUT"; then
     notok "SEC-13 FAIL-FIRST: the pre-fix baseline ($SEC13_BASELINE_SHA) unexpectedly already denies (dir: [$SEC13_BASE_DIR_OUT], 1>: [$SEC13_BASE_1G_OUT]) — cannot demonstrate either fix is real"
+  elif [ "$SEC13_BASE_DIR_BYTES" -eq 0 ] && [ "$SEC13_BASE_1G_BYTES" -eq 0 ]; then
+    ok "SEC-13 FAIL-FIRST: the pre-fix baseline ($SEC13_BASELINE_SHA) produces a clean, 0-byte silent ALLOW for both the directory-destination cp and the 1> numbered redirect — proving both closures are genuine, deliberate fixes, not an artifact of a crashing baseline"
   else
-    ok "SEC-13 FAIL-FIRST: the pre-fix baseline ($SEC13_BASELINE_SHA) WRONGLY ALLOWS both the directory-destination cp and the 1> numbered redirect — proving both closures are genuine, deliberate fixes"
+    notok "SEC-13 FAIL-FIRST: the pre-fix baseline did not cleanly allow either — non-empty, non-deny output (dir bytes=$SEC13_BASE_DIR_BYTES [$SEC13_BASE_DIR_OUT], 1> bytes=$SEC13_BASE_1G_BYTES [$SEC13_BASE_1G_OUT]) — ambiguous, possibly a crash, cannot cleanly demonstrate the fix"
   fi
 else
   echo "SKIP: commit ${SEC13_BASELINE_SHA} not reachable — SEC-13 fail-first proof could not run"
+fi
+
+# =============================================================================
+# SEC-17 (security review, 2026-08-21): the SEC-13 '>|' glue used to inspect
+# `${out: -1}` (the last EMITTED character), which cannot tell an ESCAPED
+# '>' from a genuine unescaped one -- `echo x\>|cp ... verify-gate.sh`
+# (escaped '>' immediately followed by a REAL pipe) got the real pipe wrongly
+# glued away, hiding `cp ... verify-gate.sh` inside a single, never-evaluated
+# segment. Real bash semantics: the right-hand side of that pipe genuinely
+# executes. Fixed with a `gt` flag set ONLY when an unescaped, unquoted '>'
+# is emitted by the tokenizer's own default branch (never inferred from
+# `out`), matching the existing `have`-flag pattern the '#'-comment branch
+# already documents for the identical class of trap.
+# =============================================================================
+sec_deny "SEC-17: escaped '>' then a REAL pipe into a floor-script write must still split and DENY" \
+  "$(printf 'echo x\\>|cp /tmp/evil.sh %s' "$SEC_TARGET")"
+sec_allow "SEC-17: plain '>|' clobber form is still glued as one redirect token (control)" \
+  "cat /tmp/evil >| $TMP/sec17-unrelated.txt"
+sec_deny "SEC-17: a genuine (unescaped) pipe still splits into its own evaluated segment" \
+  "echo hi | cp /tmp/evil.sh $SEC_TARGET"
+
+SEC17_BASELINE_SHA="349ce29"
+if git -C "$ROOT" cat-file -e "${SEC17_BASELINE_SHA}:.claude/hooks/protected-files-guard.sh" 2>/dev/null; then
+  SEC17_BASELINE="$TMP/sec17-baseline-guard.sh"
+  git -C "$ROOT" show "${SEC17_BASELINE_SHA}:.claude/hooks/protected-files-guard.sh" > "$SEC17_BASELINE"
+  SEC17_BASE_PAYLOAD="$(jq -cn --arg c "$(printf 'echo x\\>|cp /tmp/evil.sh %s' "$SEC_TARGET")" '{tool_name:"Bash",tool_input:{command:$c}}')"
+  SEC17_BASE_OUT="$(printf '%s' "$SEC17_BASE_PAYLOAD" | bash "$SEC17_BASELINE" 2>&1)"
+  SEC17_BASE_BYTES=$(printf '%s' "$SEC17_BASE_OUT" | wc -c | tr -d ' ')
+  # QA STRICTER STANDARD (2026-08-21): "not a deny" alone is also satisfied
+  # by a crash (no "deny" text either) -- require EXACTLY 0 output bytes,
+  # empirically confirmed as the real 349ce29 behavior (clean exit 0, 0
+  # bytes), so a crashing baseline correctly FAILS this assertion instead
+  # of accidentally satisfying it.
+  if is_deny "$SEC17_BASE_OUT"; then
+    notok "SEC-17 FAIL-FIRST: the pre-fix baseline ($SEC17_BASELINE_SHA) unexpectedly already denies the escaped-'>'-then-real-pipe payload (out: [$SEC17_BASE_OUT]) — cannot demonstrate the fix is real"
+  elif [ "$SEC17_BASE_BYTES" -eq 0 ]; then
+    ok "SEC-17 FAIL-FIRST: the pre-fix baseline ($SEC17_BASELINE_SHA) produces a clean, 0-byte silent ALLOW for the escaped-'>'-then-real-pipe payload — its \`\${out: -1}\`-based glue hid the real \`cp\` write inside one never-evaluated segment; proving this fix is real, not a crash artifact"
+  else
+    notok "SEC-17 FAIL-FIRST: the baseline produced non-empty, non-deny output (bytes=$SEC17_BASE_BYTES [$SEC17_BASE_OUT]) — ambiguous, possibly a crash, cannot cleanly demonstrate the fix"
+  fi
+else
+  echo "SKIP: commit ${SEC17_BASELINE_SHA} not reachable — SEC-17 fail-first proof could not run"
 fi
 
 # =============================================================================

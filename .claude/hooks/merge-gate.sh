@@ -299,32 +299,32 @@ split_segments_quote_aware() {
   # runs, against the enclosing scope's state -- `n=${#s}` on the same
   # line as `s="$1"` would see `s` as unset under `set -u`.
   local s="$1"
-  local i=0 n=${#s} c two nc out='' in_sq=0 in_dq=0 in_cm=0 have=0
+  local i=0 n=${#s} c two nc out='' in_sq=0 in_dq=0 in_cm=0 have=0 gt=0
   while [ "$i" -lt "$n" ]; do
     c="${s:$i:1}"
     if [ "$in_cm" -eq 1 ]; then
-      out+="$c"
+      out+="$c"; gt=0
       if [ "$c" = $'\n' ]; then in_cm=0; have=0; fi
     elif [ "$in_sq" -eq 1 ]; then
-      out+="$c"; have=1
+      out+="$c"; have=1; gt=0
       [ "$c" = "'" ] && in_sq=0
     elif [ "$in_dq" -eq 1 ]; then
-      out+="$c"; have=1
+      out+="$c"; have=1; gt=0
       if [ "$c" = '\' ] && [ $((i + 1)) -lt "$n" ]; then
-        i=$((i + 1)); out+="${s:$i:1}"
+        i=$((i + 1)); out+="${s:$i:1}"; gt=0
       elif [ "$c" = '"' ]; then
         in_dq=0
       fi
     else
       case "$c" in
         ' ' | $'\t')
-          out+="$c"; have=0
+          out+="$c"; have=0; gt=0
           ;;
         $'\n')
-          out+="$c"; have=0
+          out+="$c"; have=0; gt=0
           ;;
-        "'") in_sq=1; out+="$c"; have=1 ;;
-        '"') in_dq=1; out+="$c"; have=1 ;;
+        "'") in_sq=1; out+="$c"; have=1; gt=0 ;;
+        '"') in_dq=1; out+="$c"; have=1; gt=0 ;;
         '#')
           # A `#` starts a shell comment only at the START of a word --
           # tracked with the SAME `have` flag tokenize_argv uses (whether
@@ -340,9 +340,19 @@ split_segments_quote_aware() {
           if [ "$have" -eq 0 ]; then
             in_cm=1
           fi
-          out+="$c"; have=1
+          out+="$c"; have=1; gt=0
           ;;
         '\')
+          # SEC-17 (security review, 2026-08-21): an escaped character is
+          # emitted VERBATIM here, so `a\>` leaves a literal '>' as the
+          # LAST EMITTED character -- indistinguishable, by inspecting
+          # `out` alone, from a real unescaped redirect operator. This is
+          # exactly the trap the '#' branch's own comment above already
+          # warns about ("could not tell an escaped separator from a real
+          # one"). `gt` is explicitly cleared on every path through this
+          # branch (never inferred from the emitted bytes), so the
+          # '&'|'|' branch below never mistakes an escaped '>' for a real
+          # one and never wrongly glues away a REAL following pipe.
           if [ $((i + 1)) -lt "$n" ]; then
             nc="${s:$((i + 1)):1}"
             if [ "$nc" = $'\n' ]; then
@@ -357,18 +367,28 @@ split_segments_quote_aware() {
           else
             out+="$c"; have=1
           fi
+          gt=0
           ;;
         '&' | '|')
-          # SEC-13 (security review, 2026-08-21): '>|' is bash own
+          # SEC-13/SEC-17 (security review, 2026-08-21): '>|' is bash own
           # noclobber-override redirect operator, not a pipe -- without
-          # this check a bare unquoted '|' immediately after an emitted
-          # '>' was always read as a pipe/segment separator, splitting
+          # this a bare unquoted '|' immediately after a genuine '>' was
+          # always read as a pipe/segment separator, splitting
           # "cat x >| protected-path" into two unrelated segments and
           # losing the redirect target entirely. Glue it onto the
           # preceding '>' instead, exactly like '>>' already reaches
-          # normalize_segment as one token.
-          if [ "$c" = '|' ] && [ "${out: -1}" = '>' ]; then
-            out+="$c"; have=1
+          # normalize_segment as one token -- gated on the `gt` flag (set
+          # ONLY in the default `*)` branch below when a raw, unescaped,
+          # unquoted '>' is emitted; cleared on every other path,
+          # including the escape branch above), NEVER by inspecting the
+          # last emitted character. SEC-17: `${out: -1}` cannot
+          # distinguish `a\>|cmd` (an ESCAPED '>' followed by a REAL pipe)
+          # from a genuine `>|` operator, and wrongly glued the real pipe
+          # away -- hiding an entire second command from every downstream
+          # segment-based scanner (merge-gate GATE 1-4, the floor-script
+          # guard) at both DENY sites.
+          if [ "$c" = '|' ] && [ "$gt" -eq 1 ]; then
+            out+="$c"; have=1; gt=0
           else
             two="${s:$i:2}"
             if [ "$two" = "&&" ] || [ "$two" = "||" ]; then
@@ -377,15 +397,16 @@ split_segments_quote_aware() {
             else
               out+=$'\n'
             fi
-            have=0
+            have=0; gt=0
           fi
           ;;
         ';')
           out+=$'\n'
-          have=0
+          have=0; gt=0
           ;;
         *)
           out+="$c"; have=1
+          if [ "$c" = '>' ]; then gt=1; else gt=0; fi
           ;;
       esac
     fi
