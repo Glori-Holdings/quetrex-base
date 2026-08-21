@@ -363,6 +363,48 @@ LEDGER8_TOTAL="$(ledger_lines_total "$F8")"
   || notok "PRECISION: expected 3 ledger lines (all cheap, this fixture's tmpdir path itself contains \"test\"), got $LEDGER8_TOTAL"
 
 # =============================================================================
+# REQUIREDENV-HEAVY (QA-added, GREEN-PROOF review of HOOKFIX): a command that
+# is BOTH heavy AND requiredEnv-skip-eligible must still be RECORDED as a
+# declarative skip, never silently dropped by the heavy filter, under the
+# REAL QUICK=1 (Stop) code path — not just under QUETREX_VERIFY_FULL=1, which
+# is the only way test/verify-gate-env-derive-integration.test.sh drives this
+# contract (see that file's own header note). qx_filter_heavy_chain's
+# `should_skip_for_env "$_c" || ! qx_is_heavy_command "$_c"` ordering is the
+# code under test here: dropping the `should_skip_for_env` half would make a
+# heavy, missing-env command vanish with ZERO ledger evidence, which is
+# exactly the merge-deadlock class HOOKFIX's notes[17]/security_surface
+# exist to prevent (see verify-gate.sh's ledger-append comment at the
+# requiredEnv skip site).
+# =============================================================================
+F9="$TMP/reqenv-heavy"
+mkdir -p "$F9/.quetrex"
+git -C "$F9" init --quiet -b main
+git -C "$F9" config user.email t@t; git -C "$F9" config user.name t
+printf '%s' '{"verify":["sh -c \"echo cheap\"","npm run build"],"requiredEnv":{"npm run build":["QX_REQENV_HEAVY_VAR"]}}' > "$F9/.quetrex/verify.json"
+printf 'QX_REQENV_HEAVY_VAR=\n' > "$F9/.env.example"
+git -C "$F9" add -A
+git -C "$F9" commit -qm init
+OUT9="$(printf '{"hook_event_name":"Stop","cwd":"%s"}' "$F9" \
+  | ( cd "$F9" && CLAUDE_PROJECT_DIR="$F9" env -u QX_REQENV_HEAVY_VAR bash "$HOOK" 2>&1 ) )"; CODE9=$?
+BLOCKS9=$(block_count "$OUT9")
+SKIPLINE9=$(printf '%s\n' "$OUT9" | grep -c '^VERIFY SKIPPED')
+LEDGER9="$(jq -s -c --arg c "npm run build" '[.[] | select(.cmd==$c)]' "$F9/.quetrex/verify-ledger.jsonl" 2>/dev/null)"
+LEDGER9_N="$(printf '%s' "$LEDGER9" | jq 'length' 2>/dev/null)"
+LEDGER9_SKIPPED="$(printf '%s' "$LEDGER9" | jq -r '.[0].skipped // empty' 2>/dev/null)"
+LEDGER9_REASON="$(printf '%s' "$LEDGER9" | jq -r '.[0].skipReason // empty' 2>/dev/null)"
+LEDGER9_EXIT="$(printf '%s' "$LEDGER9" | jq -r '.[0].exit' 2>/dev/null)"
+
+[ "$CODE9" -eq 0 ] && ok "REQUIREDENV-HEAVY: hook exit 0" || notok "REQUIREDENV-HEAVY: expected exit 0, got $CODE9"
+[ "$BLOCKS9" -eq 0 ] && ok "REQUIREDENV-HEAVY: 0 block decisions" || notok "REQUIREDENV-HEAVY: expected 0 block decisions, got $BLOCKS9 (out: [$OUT9])"
+[ "$SKIPLINE9" -eq 1 ] && ok "REQUIREDENV-HEAVY: exactly 1 VERIFY SKIPPED line for the heavy, env-missing command" \
+  || notok "REQUIREDENV-HEAVY: expected exactly 1 VERIFY SKIPPED line, got $SKIPLINE9 (out: [$OUT9])"
+[ "$LEDGER9_N" = "1" ] && ok "REQUIREDENV-HEAVY: exactly 1 ledger line for \`npm run build\` — the heavy filter did NOT silently drop it" \
+  || notok "REQUIREDENV-HEAVY: expected exactly 1 ledger line for the heavy+skip-eligible command, got $LEDGER9_N — a 0-line result here would be an unprovable, undetected drop (the exact merge-deadlock class HOOKFIX exists to prevent)"
+[ "$LEDGER9_SKIPPED" = "true" ] && [ "$LEDGER9_REASON" = "requiredEnv" ] && [ "$LEDGER9_EXIT" = "null" ] \
+  && ok "REQUIREDENV-HEAVY: ledger line is skipped:true/skipReason:requiredEnv/exit:null — recorded as a skip, never as a pass" \
+  || notok "REQUIREDENV-HEAVY: expected skipped:true/skipReason:requiredEnv/exit:null, got skipped=$LEDGER9_SKIPPED reason=$LEDGER9_REASON exit=$LEDGER9_EXIT"
+
+# =============================================================================
 # AC11 — FAIL-FIRST: each key fixture above genuinely fails against the
 # pre-change baseline resolved from origin/main (fallback main).
 # =============================================================================
