@@ -67,15 +67,20 @@
 # TOKENIZER: split_segments_quote_aware() and normalize_segment(), copied
 # VERBATIM (not sourced — merge-gate.sh executes at load, so it cannot be
 # sourced without running the merge gate) from .claude/hooks/merge-gate.sh,
-# between the `# >>> QX-CMDSCAN BEGIN/END` sentinels below. merge-gate.sh
-# itself is UNCHANGED (see the plan's design.G4_protected_file_guard.
-# tokenizer_decision — the untouched-merge-gate variant was preferred so this
-# task does not force a PARITY regeneration of the product's most
-# security-critical hook for no functional gain). The copy is pinned
-# MECHANICALLY, not just by convention: test/protected-files-guard.test.sh's
-# AC16 extracts BOTH functions from BOTH files by their function-name
-# boundaries and asserts byte-identity, so a future fix to merge-gate's parser
-# cannot silently leave this guard on an older, weaker one.
+# between the `# >>> QX-CMDSCAN BEGIN/END` sentinels below.
+#
+# REVIEWER FIX (2026-08-21): this comment used to say "merge-gate.sh itself
+# is UNCHANGED" — no longer true. SEC-17 (security review, 2026-08-21)
+# found a Critical in this shared tokenizer's `>|` handling that required
+# fixing all THREE copies (this file, merge-gate.sh, and verify-gate-
+# quick-chain.sh) in the same commit, so merge-gate.sh's own PARITY digest
+# was regenerated then too. The copy is pinned MECHANICALLY, not just by
+# convention: test/protected-files-guard.test.sh's AC16 extracts BOTH
+# tokenizer functions from ALL THREE files (merge-gate.sh, this file, and
+# verify-gate-quick-chain.sh) by their function-name boundaries and asserts
+# byte-identity PAIRWISE across all three, so a future fix to any one
+# copy's parser cannot silently leave the other two on an older, weaker
+# one.
 #
 # Registered: PreToolUse, matcher "Bash|Write|Edit", in this repo's
 # hooks/hooks.json, command bash "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/protected-files-guard.sh".
@@ -238,9 +243,10 @@ is_unlocked() { [ "${QUETREX_UNLOCK_FLOOR:-}" = "1" ]; }
 # =============================================================================
 # >>> QX-CMDSCAN BEGIN — copied verbatim from .claude/hooks/merge-gate.sh
 # (split_segments_quote_aware, normalize_segment). Do NOT hand-edit this
-# region independently of merge-gate.sh; test/protected-files-guard.test.sh's
-# AC16 asserts byte-identity against merge-gate.sh's own copy of these two
-# functions, extracted by function-name boundary.
+# region independently of merge-gate.sh OR verify-gate-quick-chain.sh (the
+# THIRD copy); test/protected-files-guard.test.sh's AC16 asserts byte-
+# identity across all three copies pairwise, extracted by function-name
+# boundary.
 # =============================================================================
 split_segments_quote_aware() {
   # Two `local` statements, same reason as tokenize_argv below: word

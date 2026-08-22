@@ -21,9 +21,22 @@ PASS=0; FAIL=0
 ok()      { PASS=$((PASS+1)); echo "ok - $1"; }
 notok()   { FAIL=$((FAIL+1)); echo "NOT OK - $1"; }
 
-# The five scripts that constitute the safety floor. Registered by the factory
-# plugin's hooks/hooks.json via ${CLAUDE_PLUGIN_ROOT}/scripts/<name>.sh.
-FLOOR="deny-guard secret-scan enforce-branch merge-gate verify-gate"
+# The safety-floor scripts. Registered by the factory plugin's
+# hooks/hooks.json via ${CLAUDE_PLUGIN_ROOT}/scripts/<name>.sh.
+#
+# REVIEWER FIX (2026-08-21): verify-gate.sh now `source`s verify-gate-
+# quick-chain.sh and exit-2 blocks EVERY turn if it cannot load (fail-
+# closed by design -- see verify-gate.sh's own SEC-8 comment). PARITY.sha256
+# already carried its digest, but FLOOR here still named only the original
+# five, so none of this file's three assertions ever looked at it --
+# ASSERTION 3 in particular ("<name>.sh is NOT published in quetrex-factory
+# -- armed repos run without it") was structurally blind to the one file
+# verify-gate.sh cannot run without. A publish that copies only the
+# original five scripts into quetrex-factory's scripts/ therefore hard-
+# blocks every turn in every armed repo, and this suite would have reported
+# green. verify-gate-quick-chain.sh is now first-class FLOOR, exactly like
+# the file that sources it.
+FLOOR="deny-guard secret-scan enforce-branch merge-gate verify-gate verify-gate-quick-chain"
 
 sha_of() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
 
@@ -73,26 +86,28 @@ done
 if [ -n "$FACTORY" ]; then
   echo "# comparing published copies at $FACTORY against main's hooks"
   TMPMAIN="$(mktemp -d)"; trap 'rm -rf "$TMPMAIN"' EXIT
-  BASELINE_OK=1
   for n in $FLOOR; do
     # NO SILENT FALLBACK TO THE WORKING TREE. This used to `|| cp "$HOOKS/$n.sh"`, so in a
     # single-branch clone (where `main` does not resolve) the baseline BECAME the branch — and
     # the test reported 16/16 PASS on a published copy that leads main, while printing
     # "comparing against main's hooks". Fail-closed: if no baseline resolves, say so and stop.
+    #
+    # REVIEWER FIX (2026-08-21): a single missing baseline used to zero a
+    # GLOBAL BASELINE_OK flag, which then skipped the SECOND loop's actual
+    # comparison for EVERY floor file, not just the one that was missing --
+    # so adding a brand-new floor script (verify-gate-quick-chain.sh, not
+    # yet on main because this branch has not merged) would have silently
+    # cancelled drift detection for ALL FIVE already-published scripts too.
+    # Scoped per-file now: a floor script with no main baseline yet is a
+    # legitimate, transient, self-resolving feature-branch state (main
+    # literally cannot have it before this branch lands) -- reported, never
+    # silent, and never counted as a false pass, but it no longer disables
+    # verification of any OTHER floor script in the same run.
     if ! git -C "$ROOT" show "origin/main:.claude/hooks/$n.sh" > "$TMPMAIN/$n.sh" 2>/dev/null \
     && ! git -C "$ROOT" show "main:.claude/hooks/$n.sh" > "$TMPMAIN/$n.sh" 2>/dev/null; then
-      notok "ASSERTION 3: cannot resolve a main baseline for $n.sh (no origin/main, no main) — refusing to compare the published copy against the working tree, which would pass a copy that LEADS main"
-      BASELINE_OK=0
+      echo "# ASSERTION 3: $n.sh has no main baseline yet (new on this branch, not yet merged) -- its published-copy comparison is deferred until it lands on main; every OTHER floor script is still fully compared below"
+      continue
     fi
-  done
-  for n in $FLOOR; do
-    # COMPARE AGAINST main, NOT THE WORKING TREE. The invariant is "what ships equals what is
-    # on main" — armed repos and cloud routines run the published copy, so it must never LEAD
-    # main. A feature branch that legitimately changes a hook is ahead of both, and comparing
-    # the working tree here failed every such branch and, worse, tempted a premature republish
-    # (which then made the published copy lead main — the exact hazard, inverted). Publishing
-    # is part of landing on main, not part of the branch.
-    [ "$BASELINE_OK" = "1" ] || continue
     a="$TMPMAIN/$n.sh"; b="$FACTORY/$n.sh"
     if [ ! -f "$b" ]; then
       notok "ASSERTION 3: $n.sh is NOT published in quetrex-factory — armed repos run without it"
