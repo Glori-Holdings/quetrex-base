@@ -40,6 +40,18 @@
 # glob over every verify-gate log file, never a single hardcoded name (see
 # reset_gate_state below).
 #
+# HOOKFIX (.quetrex/plan/HOOKFIX.json, notes list): every hook invocation
+# below sets QUETREX_VERIFY_FULL=1. Stop/SubagentStop now runs a BOUNDED quick
+# chain by default (declared verifyQuick if a valid subset, else verify[] with
+# heavy commands filtered out) — and this fixture's chain command is literally
+# `npm run build`, which contains the heavy keyword "build", so under the
+# default derived chain it would never run at all and every rung below would
+# go red for the WRONG reason (never proving anything about the env-derive ->
+# requiredEnv -> recorded-skip contract this file exists to pin). This file's
+# subject is that contract, not the quick-chain policy, so it opts into the
+# FULL chain — the widen-only override that restores the exact pre-HOOKFIX
+# fail-closed behavior this file was written against. Do not remove it.
+#
 # Run: bash test/verify-gate-env-derive-integration.test.sh
 
 set -uo pipefail
@@ -138,7 +150,7 @@ hook_payload() {  # hook_payload <cwd>
 run_gate() {  # run_gate <cwd> -> combined stdout+stderr on stdout
   local cwd="$1"
   env -u QX_INTEG_DATABASE_URL bash -c '
-    printf "%s" "$1" | CLAUDE_PROJECT_DIR="$2" QUETREX_VERIFY_MAX=3 "$3"
+    printf "%s" "$1" | CLAUDE_PROJECT_DIR="$2" QUETREX_VERIFY_MAX=3 QUETREX_VERIFY_FULL=1 "$3"
   ' _ "$(hook_payload "$cwd")" "$cwd" "$GATE_HOOK" 2>&1
 }
 
@@ -317,7 +329,7 @@ printf '%s' "$MERGE_OUT" | grep -q '"permissionDecision":"deny"' && IS_DENY=1
 # =============================================================================
 reset_gate_state "$FIX"
 PAYLOAD7="$(hook_payload "$FIX")"
-OUT7="$(printf '%s' "$PAYLOAD7" | QX_INTEG_DATABASE_URL="postgres://fixture" CLAUDE_PROJECT_DIR="$FIX" QUETREX_VERIFY_MAX=3 "$GATE_HOOK" 2>&1)"
+OUT7="$(printf '%s' "$PAYLOAD7" | QX_INTEG_DATABASE_URL="postgres://fixture" CLAUDE_PROJECT_DIR="$FIX" QUETREX_VERIFY_MAX=3 QUETREX_VERIFY_FULL=1 "$GATE_HOOK" 2>&1)"
 CODE7=$?
 BLOCKS7="$(block_decisions "$OUT7")"
 SKIPS7="$(skip_lines "$OUT7")"

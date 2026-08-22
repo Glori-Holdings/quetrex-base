@@ -13,6 +13,23 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/quetrex-update-check.sh\"",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/quetrex-bound-version-guard.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/protected-files-guard.sh\"",
+            "timeout": 10
           }
         ]
       }
