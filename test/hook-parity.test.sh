@@ -120,8 +120,27 @@ if [ -n "$FACTORY" ]; then
   elif git -C "$ROOT" rev-parse --verify -q main >/dev/null 2>&1; then
     BASEREF="main"
   fi
+  # A shallow, single-branch clone (the checkout shape a cloud routine
+  # uses, e.g. `git clone --depth 1 --branch <branch>`) has no origin/main
+  # tracking ref at all -- and its remote.origin.fetch refspec is scoped to
+  # ONLY the checked-out branch, so a bare `git fetch origin main` fetches
+  # the commit into FETCH_HEAD but does NOT populate refs/remotes/origin/
+  # main (confirmed empirically). An explicit destination refspec sidesteps
+  # that scoping. Unlike the fail-first shas elsewhere in this suite,
+  # `main` is a live BRANCH, not a fixed object, so a plain branch fetch
+  # (no explicit sha, no allowReachableSHA1InWant dependency) is a normal,
+  # always-supported operation: best-effort self-heal before giving up,
+  # never a fallback to comparing against the working tree.
   if [ -z "$BASEREF" ]; then
-    notok "ASSERTION 3: cannot resolve a main baseline ref (no origin/main, no main) — refusing to compare the published copy against the working tree, which would pass a copy that LEADS main"
+    git -C "$ROOT" fetch --quiet --depth=1 origin +main:refs/remotes/origin/main 2>/dev/null || true
+    if git -C "$ROOT" rev-parse --verify -q origin/main >/dev/null 2>&1; then
+      BASEREF="origin/main"
+    elif git -C "$ROOT" rev-parse --verify -q main >/dev/null 2>&1; then
+      BASEREF="main"
+    fi
+  fi
+  if [ -z "$BASEREF" ]; then
+    notok "ASSERTION 3: cannot resolve a main baseline ref (no origin/main, no main) even after \`git fetch --depth=1 origin main\` — refusing to compare the published copy against the working tree, which would pass a copy that LEADS main"
   else
     echo "# comparing published copies at $FACTORY against $BASEREF's hooks"
     TMPMAIN="$(mktemp -d)"; trap 'rm -rf "$TMPMAIN"' EXIT
