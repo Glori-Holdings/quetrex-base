@@ -493,8 +493,16 @@ fi
 # Pinned to ff16905 (main's tip immediately before #119 merged the guard) —
 # NOT origin/main or main, which become the post-fix code once #119 lands
 # and would flip this assertion. Do not change this back to origin/main.
+#
+# `git show <sha>:<path>` exits non-zero for TWO different reasons: the path
+# is absent at that sha (what this proof means to detect), or the sha itself
+# is unreachable (e.g. a shallow clone). Collapsing both into one `else -> ok`
+# reports a pass having compared against nothing. Assert the sha resolves
+# FIRST, so an unreachable ff16905 fails loudly instead of silently.
 # =============================================================================
-if git -C "$ROOT" show ff16905:.claude/hooks/protected-files-guard.sh >/dev/null 2>&1; then
+if ! git -C "$ROOT" cat-file -e ff16905^{commit} 2>/dev/null; then
+  notok "AC11 FAIL-FIRST: baseline commit ff16905 is not reachable in this checkout (shallow clone?) — cannot prove the guard is new, refusing to report a pass having compared against nothing"
+elif git -C "$ROOT" show ff16905:.claude/hooks/protected-files-guard.sh >/dev/null 2>&1; then
   notok "AC11 FAIL-FIRST: protected-files-guard.sh unexpectedly EXISTS at ff16905"
 else
   ok "AC11 FAIL-FIRST: protected-files-guard.sh does not exist at ff16905 (pre-#119 baseline) — this is new machinery"

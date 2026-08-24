@@ -201,8 +201,16 @@ printf '%s' "$STDERRC" | grep -Eq 'Traceback|SyntaxError|line [0-9]+:' \
 # "main" IS the post-fix code, and this assertion would flip from proving the
 # pre-change baseline to being vacuous (or, if #119 is later reverted,
 # outright wrong). Do not change this back to origin/main.
+#
+# `git show <sha>:<path>` exits non-zero for TWO different reasons: the path
+# is absent at that sha (what this proof means to detect), or the sha itself
+# is unreachable (e.g. a shallow clone). Collapsing both into one `else -> ok`
+# reports a pass having compared against nothing. Assert the sha resolves
+# FIRST, so an unreachable ff16905 fails loudly instead of silently.
 BASELINE_MISSING=0
-if git -C "$ROOT" show ff16905:.claude/hooks/quetrex-bound-version-guard.sh >/dev/null 2>&1; then
+if ! git -C "$ROOT" cat-file -e ff16905^{commit} 2>/dev/null; then
+  notok "AC11 FAIL-FIRST: baseline commit ff16905 is not reachable in this checkout (shallow clone?) — cannot prove the guard is new, refusing to report a pass having compared against nothing"
+elif git -C "$ROOT" show ff16905:.claude/hooks/quetrex-bound-version-guard.sh >/dev/null 2>&1; then
   notok "AC11 FAIL-FIRST: quetrex-bound-version-guard.sh unexpectedly EXISTS at ff16905 — it should be new in this branch"
 else
   BASELINE_MISSING=1
