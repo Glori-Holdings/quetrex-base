@@ -1417,16 +1417,25 @@ fi
 # a hardcoded quetrex-base path — otherwise pointing this suite at a foreign
 # hook would silently re-prove quetrex-base's own SEC-2 fix and report a pass
 # that says nothing about the file under test.
+#
+# SCOPE WIDENED (operator-approved, 2026-08-21): AC10's size guard forced
+# should_skip_for_env — and both of its $HEAD_SHA: pinned reads — out of
+# verify-gate.sh into its sourced verify-gate-quick-chain.sh, so a scan of
+# $HOOK alone now only finds 1. Scanning BOTH files together, still
+# requiring >= 2 combined, preserves the load-bearing count without lowering
+# the threshold; the sourced helper is exactly as much "verify-gate.sh" for
+# this purpose as the file that sources it.
 HOOK_SRC28="$HOOK"
-N_LITERAL_HEAD="$(grep -c 'show "HEAD:' "$HOOK_SRC28" 2>/dev/null)"; N_LITERAL_HEAD="${N_LITERAL_HEAD:-0}"
-N_PINNED="$(grep -c '\$HEAD_SHA:' "$HOOK_SRC28" 2>/dev/null)"; N_PINNED="${N_PINNED:-0}"
+HOOK_SRC28_HELPER="$(dirname "$HOOK_SRC28")/verify-gate-quick-chain.sh"
+N_LITERAL_HEAD="$(grep -ch 'show "HEAD:' "$HOOK_SRC28" "$HOOK_SRC28_HELPER" 2>/dev/null | awk '{s+=$1} END{print s+0}')"
+N_PINNED="$(grep -ch '\$HEAD_SHA:' "$HOOK_SRC28" "$HOOK_SRC28_HELPER" 2>/dev/null | awk '{s+=$1} END{print s+0}')"
 if [ "$N_LITERAL_HEAD" = "0" ]; then
-  pass "AC28: 0 occurrences of the literal 'show \"HEAD:' in verify-gate.sh"
+  pass "AC28: 0 occurrences of the literal 'show \"HEAD:' across verify-gate.sh + verify-gate-quick-chain.sh"
 else
   fail "AC28: found $N_LITERAL_HEAD occurrence(s) of 'show \"HEAD:' — an unpinned read remains"
 fi
 if [ "$N_PINNED" -ge 2 ]; then
-  pass "AC28: >= 2 occurrences of the pinned '\$HEAD_SHA:' read pattern (got $N_PINNED)"
+  pass "AC28: >= 2 occurrences of the pinned '\$HEAD_SHA:' read pattern across verify-gate.sh + verify-gate-quick-chain.sh (got $N_PINNED)"
 else
   fail "AC28: expected >= 2 '\$HEAD_SHA:' reads, got $N_PINNED"
 fi

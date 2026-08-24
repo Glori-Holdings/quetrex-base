@@ -274,10 +274,19 @@ EOF
   else
     fail "AC20(ii): expected 0 VERIFY SKIPPED lines, got $SKIPS20ii (out: [$OUT20ii])"
   fi
-  if [ "$LEDGER_LINES20ii" = "1" ] && [ "$LEDGER_EXITS20ii" = "127" ]; then
-    pass "AC20(ii): the ledger gains exactly 1 line with .exit == 127"
+  # SEC-1/SEC-3 (security review, 2026-08-21): expected ledger line count
+  # changed from 1 to 2. `npm run test` is heavy (verify-gate.sh's bounded
+  # quick chain filters it at Stop) and, per the SEC-1 fix, an excluded
+  # command now ALWAYS gets its own boundedQuick ledger line — the exact
+  # opposite of the pre-fix behavior this assertion originally pinned ("an
+  # excluded command leaves no evidence"), which was the SEC-1 vulnerability
+  # itself. `npm run typecheck` is unaffected: it still genuinely runs,
+  # still exits 127, and the chain still blocks immediately on it.
+  LEDGER_BOUNDED20ii="$(jq -s '[.[] | select(.cmd=="npm run test" and .skipped==true and .skipReason=="boundedQuick" and .exit==null)] | length' "$F20ii/.quetrex/verify-ledger.jsonl" 2>/dev/null)"
+  if [ "$LEDGER_LINES20ii" = "2" ] && [ "$LEDGER_EXITS20ii" = "127" ] && [ "$LEDGER_BOUNDED20ii" = "1" ]; then
+    pass "AC20(ii): the ledger gains exactly 2 lines — the genuine exit-127 line for typecheck, plus 1 boundedQuick line for the heavy-filtered 'npm run test' (SEC-1: the whole resolved chain is always recorded, never silently shrunk)"
   else
-    fail "AC20(ii): expected 1 ledger line with exit 127, got $LEDGER_LINES20ii line(s), exits=[$LEDGER_EXITS20ii]"
+    fail "AC20(ii): expected 2 ledger lines (typecheck exit 127 + npm run test boundedQuick), got $LEDGER_LINES20ii line(s), typecheck exits=[$LEDGER_EXITS20ii], boundedQuick-for-test=$LEDGER_BOUNDED20ii"
   fi
 
   # --- NEGATIVE CONTROL --------------------------------------------------

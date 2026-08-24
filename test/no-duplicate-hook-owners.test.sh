@@ -53,7 +53,9 @@ auto-format.sh
 right-size-router.sh'
 QUETREX_OWNED='session-state.sh
 quetrex-update-check.sh
-edit-gate.sh'
+edit-gate.sh
+quetrex-bound-version-guard.sh
+protected-files-guard.sh'
 
 # WHICH PLUGINS ARE ACTUALLY ENABLED HERE. This is the whole point, and getting it
 # wrong inverts the test into a hazard. A script is only a DUPLICATE if the plugin
