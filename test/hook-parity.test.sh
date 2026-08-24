@@ -217,6 +217,15 @@ fi
 # of this same file, before the base-ref-once restructure) genuinely
 # reports green while comparing nothing.
 A4_BASELINE_SHA="753c3f2"
+# Self-heal an unreachable sha (e.g. a shallow clone — the checkout shape a
+# cloud routine uses) with a depth-1 fetch of that EXACT sha (never a moving
+# ref) before giving up. Fetch by the FULL 40-char object id, not the 7-char
+# abbreviation: a git server only honors a direct commit fetch for an exact,
+# full object id (uploadpack.allowReachableSHA1InWant).
+A4_BASELINE_SHA_FULL="753c3f28d0cf68860a267bda757c9c96adf4c818"
+if ! git -C "$ROOT" cat-file -e "${A4_BASELINE_SHA}^{commit}" 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$A4_BASELINE_SHA_FULL" 2>/dev/null || true
+fi
 if git -C "$ROOT" cat-file -e "${A4_BASELINE_SHA}:test/hook-parity.test.sh" 2>/dev/null; then
   A4B_FIXTURE="$(mktemp -d)"
   build_no_baseref_fixture "$A4B_FIXTURE"
@@ -230,7 +239,7 @@ if git -C "$ROOT" cat-file -e "${A4_BASELINE_SHA}:test/hook-parity.test.sh" 2>/d
     notok "ASSERTION 4 FAIL-FIRST: the pre-fix baseline did not exit 0 either (exit=$A4B_CODE) -- cannot demonstrate the fix is real"
   fi
 else
-  echo "SKIP: commit ${A4_BASELINE_SHA} not reachable — ASSERTION 4 fail-first proof could not run"
+  notok "ASSERTION 4 FAIL-FIRST: baseline commit ${A4_BASELINE_SHA} (or the path at it) is not reachable even after \`git fetch --depth=1 origin ${A4_BASELINE_SHA_FULL}\` — refusing to report a pass having compared against nothing"
 fi
 
 fi  # end QX_HOOK_PARITY_FIXTURE guard (ASSERTION 4)

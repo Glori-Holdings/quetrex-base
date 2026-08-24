@@ -204,12 +204,23 @@ printf '%s' "$STDERRC" | grep -Eq 'Traceback|SyntaxError|line [0-9]+:' \
 #
 # `git show <sha>:<path>` exits non-zero for TWO different reasons: the path
 # is absent at that sha (what this proof means to detect), or the sha itself
-# is unreachable (e.g. a shallow clone). Collapsing both into one `else -> ok`
-# reports a pass having compared against nothing. Assert the sha resolves
-# FIRST, so an unreachable ff16905 fails loudly instead of silently.
+# is unreachable (e.g. a shallow clone — the checkout shape a cloud routine
+# uses). Collapsing both into one `else -> ok` reports a pass having compared
+# against nothing. Assert the sha resolves FIRST; self-heal with a depth-1
+# fetch of that EXACT sha (never a moving ref — that is the bug this whole
+# branch exists to fix) before giving up; only then report loudly.
+# Fetch by the FULL 40-char object id, not the 7-char abbreviation: a git
+# server (GitHub included) only honors a direct commit fetch for an exact,
+# full object id (uploadpack.allowReachableSHA1InWant) — an abbreviated sha
+# cannot even be typed correctly for an object the local repo does not yet
+# have, since there is nothing local to disambiguate the prefix against.
+FF16905_FULL="ff16905d1690e7553ed26cf871c4d4cd3b82ea44"
 BASELINE_MISSING=0
 if ! git -C "$ROOT" cat-file -e ff16905^{commit} 2>/dev/null; then
-  notok "AC11 FAIL-FIRST: baseline commit ff16905 is not reachable in this checkout (shallow clone?) — cannot prove the guard is new, refusing to report a pass having compared against nothing"
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$FF16905_FULL" 2>/dev/null || true
+fi
+if ! git -C "$ROOT" cat-file -e ff16905^{commit} 2>/dev/null; then
+  notok "AC11 FAIL-FIRST: baseline commit ff16905 is not reachable in this checkout even after \`git fetch --depth=1 origin $FF16905_FULL\` — cannot prove the guard is new, refusing to report a pass having compared against nothing"
 elif git -C "$ROOT" show ff16905:.claude/hooks/quetrex-bound-version-guard.sh >/dev/null 2>&1; then
   notok "AC11 FAIL-FIRST: quetrex-bound-version-guard.sh unexpectedly EXISTS at ff16905 — it should be new in this branch"
 else
