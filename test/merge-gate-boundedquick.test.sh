@@ -25,10 +25,12 @@
 # via a real `gh pr merge` PreToolUse payload (with a mocked `gh pr view` —
 # the same seam test/merge-gate.test.sh already uses — so this file never
 # depends on a real, authenticated `gh`), and the (b) direction has a
-# fail-first proof against the pre-fix baseline resolved from origin/main
-# (fallback main) — the same convention every other new HOOKFIX test file
-# uses (see its own FAIL-FIRST section for why this replaced a literal
-# `HEAD` resolution, which this test's own commit made self-referential).
+# fail-first proof against the pre-fix baseline pinned at the immutable sha
+# ff16905 — the same convention every other new HOOKFIX test file uses (see
+# its own FAIL-FIRST section for why this replaced a literal `HEAD`
+# resolution, which this test's own commit made self-referential, and why
+# it is not origin/main or main either, which become the post-fix code once
+# #119 lands).
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -360,20 +362,20 @@ fi
 # is empty at this commit. Switched to the SAME convention every other new
 # HOOKFIX test file already uses (see stop-bounded-by-construction.test.sh,
 # bound-version-guard.test.sh, protected-files-guard.test.sh's own AC11
-# sections): resolve a STABLE pre-branch reference, origin/main (fallback
-# main), which genuinely predates this entire branch's boundedQuick work
-# (0 occurrences of "boundedQuick" in that copy — checked) rather than a
-# commit-relative offset that silently stops meaning "pre-fix" the moment a
-# later commit lands on this branch.
+# sections): resolve a STABLE, IMMUTABLE pre-branch reference — ff16905
+# (main's tip immediately before #119 merged this branch's boundedQuick
+# work), which genuinely predates it (0 occurrences of "boundedQuick" in
+# that copy — checked). NOT origin/main or main: those are moving refs that
+# become the post-fix code the moment #119 lands, at which point this proof
+# would stop demonstrating anything (or worse, silently invert). A
+# commit-relative offset has the same problem for the same reason.
 BASELINE=""
-if git -C "$ROOT" show origin/main:.claude/hooks/merge-gate.sh > "$TMP/baseline-merge-gate.sh" 2>/dev/null; then
-  BASELINE="$TMP/baseline-merge-gate.sh"
-elif git -C "$ROOT" show main:.claude/hooks/merge-gate.sh > "$TMP/baseline-merge-gate.sh" 2>/dev/null; then
+if git -C "$ROOT" show ff16905:.claude/hooks/merge-gate.sh > "$TMP/baseline-merge-gate.sh" 2>/dev/null; then
   BASELINE="$TMP/baseline-merge-gate.sh"
 fi
 
 if [ -z "$BASELINE" ]; then
-  echo "SKIP: could not resolve a pre-fix merge-gate.sh baseline from HEAD — fail-first proof could not run"
+  echo "SKIP: could not resolve ff16905:.claude/hooks/merge-gate.sh (pre-#119 baseline) — fail-first proof could not run"
 else
   # (a) baseline: does the pre-fix hook also deny the boundedQuick-only case?
   # The PRE-fix hook has NO boundedQuick concept at all -- a skipReason other

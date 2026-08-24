@@ -44,7 +44,9 @@
 # "test" — pinned directly against the exact two collision shapes the
 # coordinator's own review found.
 # AC11 (fail-first): every new assertion below is proven to fail against the
-# pre-change baseline resolved from origin/main (fallback main).
+# pre-change baseline pinned at ff16905 (main's tip immediately before #119
+# merged this fix — an immutable sha, never origin/main or main, which
+# become the post-fix code once #119 lands and would make this a no-op).
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -511,17 +513,18 @@ LEDGER9_EXIT="$(printf '%s' "$LEDGER9" | jq -r '.[0].exit' 2>/dev/null)"
 
 # =============================================================================
 # AC11 — FAIL-FIRST: each key fixture above genuinely fails against the
-# pre-change baseline resolved from origin/main (fallback main).
+# pre-change baseline pinned at ff16905 (main's tip immediately before #119
+# merged this fix). NOT origin/main or main — those are moving refs: once
+# #119 lands on main, "main" IS the post-fix code, and this proof would stop
+# demonstrating anything. Do not change this back to origin/main.
 # =============================================================================
 BASELINE=""
-if git -C "$ROOT" show origin/main:.claude/hooks/verify-gate.sh > "$TMP/baseline.sh" 2>/dev/null; then
-  BASELINE="$TMP/baseline.sh"
-elif git -C "$ROOT" show main:.claude/hooks/verify-gate.sh > "$TMP/baseline.sh" 2>/dev/null; then
+if git -C "$ROOT" show ff16905:.claude/hooks/verify-gate.sh > "$TMP/baseline.sh" 2>/dev/null; then
   BASELINE="$TMP/baseline.sh"
 fi
 
 if [ -z "$BASELINE" ]; then
-  echo "SKIP: no origin/main or main baseline resolvable for .claude/hooks/verify-gate.sh — fail-first proof could not run"
+  echo "SKIP: ff16905:.claude/hooks/verify-gate.sh not resolvable — fail-first proof could not run"
 else
   # --- baseline AC1: the heavy (sleeping) command DID run under the old code.
   FB1="$TMP/base-ac1"

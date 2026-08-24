@@ -490,13 +490,14 @@ fi
 # =============================================================================
 # AC11 — FAIL-FIRST: protected-files-guard.sh does not exist on the
 # pre-change baseline, and NO existing hook on main intercepts this vector.
+# Pinned to ff16905 (main's tip immediately before #119 merged the guard) —
+# NOT origin/main or main, which become the post-fix code once #119 lands
+# and would flip this assertion. Do not change this back to origin/main.
 # =============================================================================
-if git -C "$ROOT" show origin/main:.claude/hooks/protected-files-guard.sh >/dev/null 2>&1; then
-  notok "AC11 FAIL-FIRST: protected-files-guard.sh unexpectedly EXISTS at origin/main"
-elif git -C "$ROOT" show main:.claude/hooks/protected-files-guard.sh >/dev/null 2>&1; then
-  notok "AC11 FAIL-FIRST: protected-files-guard.sh unexpectedly EXISTS at main"
+if git -C "$ROOT" show ff16905:.claude/hooks/protected-files-guard.sh >/dev/null 2>&1; then
+  notok "AC11 FAIL-FIRST: protected-files-guard.sh unexpectedly EXISTS at ff16905"
 else
-  ok "AC11 FAIL-FIRST: protected-files-guard.sh does not exist at origin/main or main — this is new machinery"
+  ok "AC11 FAIL-FIRST: protected-files-guard.sh does not exist at ff16905 (pre-#119 baseline) — this is new machinery"
 fi
 
 DENY_GUARD="$ROOT/.claude/hooks/deny-guard.sh"

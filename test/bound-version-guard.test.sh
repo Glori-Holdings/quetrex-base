@@ -196,14 +196,17 @@ printf '%s' "$STDERRC" | grep -Eq 'Traceback|SyntaxError|line [0-9]+:' \
 # the pre-change mechanism (quetrex-update-check.sh) cannot see this class of
 # staleness — proven by driving IT against the same AC8 fixture.
 # =============================================================================
+# Pinned to ff16905 (main's tip immediately before #119 merged the guard) —
+# NOT origin/main or main. Those are moving refs: once #119 lands on main,
+# "main" IS the post-fix code, and this assertion would flip from proving the
+# pre-change baseline to being vacuous (or, if #119 is later reverted,
+# outright wrong). Do not change this back to origin/main.
 BASELINE_MISSING=0
-if git -C "$ROOT" show origin/main:.claude/hooks/quetrex-bound-version-guard.sh >/dev/null 2>&1; then
-  notok "AC11 FAIL-FIRST: quetrex-bound-version-guard.sh unexpectedly EXISTS at origin/main — it should be new in this branch"
-elif git -C "$ROOT" show main:.claude/hooks/quetrex-bound-version-guard.sh >/dev/null 2>&1; then
-  notok "AC11 FAIL-FIRST: quetrex-bound-version-guard.sh unexpectedly EXISTS at main — it should be new in this branch"
+if git -C "$ROOT" show ff16905:.claude/hooks/quetrex-bound-version-guard.sh >/dev/null 2>&1; then
+  notok "AC11 FAIL-FIRST: quetrex-bound-version-guard.sh unexpectedly EXISTS at ff16905 — it should be new in this branch"
 else
   BASELINE_MISSING=1
-  ok "AC11 FAIL-FIRST: quetrex-bound-version-guard.sh does not exist at origin/main or main — this is new machinery, not a modification"
+  ok "AC11 FAIL-FIRST: quetrex-bound-version-guard.sh does not exist at ff16905 (pre-#119 baseline) — this is new machinery, not a modification"
 fi
 
 OLD_CHECK="$ROOT/.claude/hooks/quetrex-update-check.sh"
