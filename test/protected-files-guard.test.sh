@@ -339,6 +339,15 @@ rm -f "$SEC_LINK"
 # replaced) — resolved by sha, not by branch name, since this defect was
 # introduced and fixed within the same feature branch.
 SEC_BASELINE_SHA="e2dadea"
+# Self-heal an unreachable sha (e.g. a shallow clone — the checkout shape a
+# cloud routine uses) with a depth-1 fetch of that EXACT sha (never a moving
+# ref) before giving up. Fetch by the FULL 40-char object id, not the 7-char
+# abbreviation: a git server only honors a direct commit fetch for an exact,
+# full object id (uploadpack.allowReachableSHA1InWant).
+SEC_BASELINE_SHA_FULL="e2dadeaabdd10ef993ef6022e95b41db072934cb"
+if ! git -C "$ROOT" cat-file -e "${SEC_BASELINE_SHA}^{commit}" 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$SEC_BASELINE_SHA_FULL" 2>/dev/null || true
+fi
 if git -C "$ROOT" cat-file -e "${SEC_BASELINE_SHA}:.claude/hooks/protected-files-guard.sh" 2>/dev/null; then
   SEC_BASELINE="$TMP/sec-baseline-guard.sh"
   git -C "$ROOT" show "${SEC_BASELINE_SHA}:.claude/hooks/protected-files-guard.sh" > "$SEC_BASELINE"
@@ -350,7 +359,7 @@ if git -C "$ROOT" cat-file -e "${SEC_BASELINE_SHA}:.claude/hooks/protected-files
     notok "SEC-7 FAIL-FIRST: the pre-fix guard did not deny the grep case either (out: [$BASE_OUT]) — cannot demonstrate the fix is real"
   fi
 else
-  echo "SKIP: commit ${SEC_BASELINE_SHA} not reachable — SEC-7 fail-first proof could not run"
+  notok "SEC-7 FAIL-FIRST: baseline commit ${SEC_BASELINE_SHA} (or the path at it) is not reachable even after \`git fetch --depth=1 origin ${SEC_BASELINE_SHA_FULL}\` — refusing to report a pass having compared against nothing"
 fi
 
 # =============================================================================
@@ -414,6 +423,15 @@ sec_allow "SEC-7 non-regression: grep reads the protected path, writes elsewhere
 # immediately pre-fix commit (4bd824f, before this round's directory-
 # destination and numbered/clobber-redirection handling landed).
 SEC13_BASELINE_SHA="4bd824f"
+# Self-heal an unreachable sha (e.g. a shallow clone — the checkout shape a
+# cloud routine uses) with a depth-1 fetch of that EXACT sha (never a moving
+# ref) before giving up. Fetch by the FULL 40-char object id, not the 7-char
+# abbreviation: a git server only honors a direct commit fetch for an exact,
+# full object id (uploadpack.allowReachableSHA1InWant).
+SEC13_BASELINE_SHA_FULL="4bd824f792daeb9d0a51987f78d293d91cf60d29"
+if ! git -C "$ROOT" cat-file -e "${SEC13_BASELINE_SHA}^{commit}" 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$SEC13_BASELINE_SHA_FULL" 2>/dev/null || true
+fi
 if git -C "$ROOT" cat-file -e "${SEC13_BASELINE_SHA}:.claude/hooks/protected-files-guard.sh" 2>/dev/null; then
   SEC13_BASELINE="$TMP/sec13-baseline-guard.sh"
   git -C "$ROOT" show "${SEC13_BASELINE_SHA}:.claude/hooks/protected-files-guard.sh" > "$SEC13_BASELINE"
@@ -442,7 +460,7 @@ if git -C "$ROOT" cat-file -e "${SEC13_BASELINE_SHA}:.claude/hooks/protected-fil
     notok "SEC-13 FAIL-FIRST: the pre-fix baseline did not cleanly allow either — non-empty, non-deny output (dir bytes=$SEC13_BASE_DIR_BYTES [$SEC13_BASE_DIR_OUT], 1> bytes=$SEC13_BASE_1G_BYTES [$SEC13_BASE_1G_OUT]) — ambiguous, possibly a crash, cannot cleanly demonstrate the fix"
   fi
 else
-  echo "SKIP: commit ${SEC13_BASELINE_SHA} not reachable — SEC-13 fail-first proof could not run"
+  notok "SEC-13 FAIL-FIRST: baseline commit ${SEC13_BASELINE_SHA} (or the path at it) is not reachable even after \`git fetch --depth=1 origin ${SEC13_BASELINE_SHA_FULL}\` — refusing to report a pass having compared against nothing"
 fi
 
 # =============================================================================
@@ -465,6 +483,18 @@ sec_deny "SEC-17: a genuine (unescaped) pipe still splits into its own evaluated
   "echo hi | cp /tmp/evil.sh $SEC_TARGET"
 
 SEC17_BASELINE_SHA="349ce29"
+# `git cat-file -e <sha>:<path>` exits non-zero for TWO different reasons:
+# the path is absent at that sha, or the sha itself is unreachable (e.g. a
+# shallow clone — the checkout shape a cloud routine uses). Self-heal with a
+# depth-1 fetch of that EXACT sha (never a moving ref) before giving up.
+# Fetch by the FULL 40-char object id, not the 7-char abbreviation: a git
+# server only honors a direct commit fetch for an exact, full object id
+# (uploadpack.allowReachableSHA1InWant) — an abbreviated sha cannot even be
+# typed correctly for an object the local repo does not yet have.
+SEC17_BASELINE_SHA_FULL="349ce29b4ab189b4496d8f79c2ddf3736e1dc020"
+if ! git -C "$ROOT" cat-file -e "${SEC17_BASELINE_SHA}^{commit}" 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$SEC17_BASELINE_SHA_FULL" 2>/dev/null || true
+fi
 if git -C "$ROOT" cat-file -e "${SEC17_BASELINE_SHA}:.claude/hooks/protected-files-guard.sh" 2>/dev/null; then
   SEC17_BASELINE="$TMP/sec17-baseline-guard.sh"
   git -C "$ROOT" show "${SEC17_BASELINE_SHA}:.claude/hooks/protected-files-guard.sh" > "$SEC17_BASELINE"
@@ -484,19 +514,37 @@ if git -C "$ROOT" cat-file -e "${SEC17_BASELINE_SHA}:.claude/hooks/protected-fil
     notok "SEC-17 FAIL-FIRST: the baseline produced non-empty, non-deny output (bytes=$SEC17_BASE_BYTES [$SEC17_BASE_OUT]) — ambiguous, possibly a crash, cannot cleanly demonstrate the fix"
   fi
 else
-  echo "SKIP: commit ${SEC17_BASELINE_SHA} not reachable — SEC-17 fail-first proof could not run"
+  notok "SEC-17 FAIL-FIRST: baseline commit ${SEC17_BASELINE_SHA} (or the path at it) is not reachable even after \`git fetch --depth=1 origin ${SEC17_BASELINE_SHA_FULL}\` — refusing to report a pass having compared against nothing"
 fi
 
 # =============================================================================
 # AC11 — FAIL-FIRST: protected-files-guard.sh does not exist on the
 # pre-change baseline, and NO existing hook on main intercepts this vector.
+# Pinned to ff16905 (main's tip immediately before #119 merged the guard) —
+# NOT origin/main or main, which become the post-fix code once #119 lands
+# and would flip this assertion. Do not change this back to origin/main.
+#
+# `git show <sha>:<path>` exits non-zero for TWO different reasons: the path
+# is absent at that sha (what this proof means to detect), or the sha itself
+# is unreachable (e.g. a shallow clone — the checkout shape a cloud routine
+# uses). Collapsing both into one `else -> ok` reports a pass having compared
+# against nothing. Assert the sha resolves FIRST; self-heal with a depth-1
+# fetch of that EXACT sha (never a moving ref) before giving up. Fetch by
+# the FULL 40-char object id, not the 7-char abbreviation: a git server
+# only honors a direct commit fetch for an exact, full object id
+# (uploadpack.allowReachableSHA1InWant) — an abbreviated sha cannot even be
+# typed correctly for an object the local repo does not yet have.
 # =============================================================================
-if git -C "$ROOT" show origin/main:.claude/hooks/protected-files-guard.sh >/dev/null 2>&1; then
-  notok "AC11 FAIL-FIRST: protected-files-guard.sh unexpectedly EXISTS at origin/main"
-elif git -C "$ROOT" show main:.claude/hooks/protected-files-guard.sh >/dev/null 2>&1; then
-  notok "AC11 FAIL-FIRST: protected-files-guard.sh unexpectedly EXISTS at main"
+FF16905_FULL="ff16905d1690e7553ed26cf871c4d4cd3b82ea44"
+if ! git -C "$ROOT" cat-file -e ff16905^{commit} 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$FF16905_FULL" 2>/dev/null || true
+fi
+if ! git -C "$ROOT" cat-file -e ff16905^{commit} 2>/dev/null; then
+  notok "AC11 FAIL-FIRST: baseline commit ff16905 is not reachable in this checkout even after \`git fetch --depth=1 origin $FF16905_FULL\` — cannot prove the guard is new, refusing to report a pass having compared against nothing"
+elif git -C "$ROOT" show ff16905:.claude/hooks/protected-files-guard.sh >/dev/null 2>&1; then
+  notok "AC11 FAIL-FIRST: protected-files-guard.sh unexpectedly EXISTS at ff16905"
 else
-  ok "AC11 FAIL-FIRST: protected-files-guard.sh does not exist at origin/main or main — this is new machinery"
+  ok "AC11 FAIL-FIRST: protected-files-guard.sh does not exist at ff16905 (pre-#119 baseline) — this is new machinery"
 fi
 
 DENY_GUARD="$ROOT/.claude/hooks/deny-guard.sh"

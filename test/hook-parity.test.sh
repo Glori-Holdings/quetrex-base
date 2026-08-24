@@ -120,8 +120,27 @@ if [ -n "$FACTORY" ]; then
   elif git -C "$ROOT" rev-parse --verify -q main >/dev/null 2>&1; then
     BASEREF="main"
   fi
+  # A shallow, single-branch clone (the checkout shape a cloud routine
+  # uses, e.g. `git clone --depth 1 --branch <branch>`) has no origin/main
+  # tracking ref at all -- and its remote.origin.fetch refspec is scoped to
+  # ONLY the checked-out branch, so a bare `git fetch origin main` fetches
+  # the commit into FETCH_HEAD but does NOT populate refs/remotes/origin/
+  # main (confirmed empirically). An explicit destination refspec sidesteps
+  # that scoping. Unlike the fail-first shas elsewhere in this suite,
+  # `main` is a live BRANCH, not a fixed object, so a plain branch fetch
+  # (no explicit sha, no allowReachableSHA1InWant dependency) is a normal,
+  # always-supported operation: best-effort self-heal before giving up,
+  # never a fallback to comparing against the working tree.
   if [ -z "$BASEREF" ]; then
-    notok "ASSERTION 3: cannot resolve a main baseline ref (no origin/main, no main) — refusing to compare the published copy against the working tree, which would pass a copy that LEADS main"
+    git -C "$ROOT" fetch --quiet --depth=1 origin +main:refs/remotes/origin/main 2>/dev/null || true
+    if git -C "$ROOT" rev-parse --verify -q origin/main >/dev/null 2>&1; then
+      BASEREF="origin/main"
+    elif git -C "$ROOT" rev-parse --verify -q main >/dev/null 2>&1; then
+      BASEREF="main"
+    fi
+  fi
+  if [ -z "$BASEREF" ]; then
+    notok "ASSERTION 3: cannot resolve a main baseline ref (no origin/main, no main) even after \`git fetch --depth=1 origin main\` — refusing to compare the published copy against the working tree, which would pass a copy that LEADS main"
   else
     echo "# comparing published copies at $FACTORY against $BASEREF's hooks"
     TMPMAIN="$(mktemp -d)"; trap 'rm -rf "$TMPMAIN"' EXIT
@@ -217,6 +236,15 @@ fi
 # of this same file, before the base-ref-once restructure) genuinely
 # reports green while comparing nothing.
 A4_BASELINE_SHA="753c3f2"
+# Self-heal an unreachable sha (e.g. a shallow clone — the checkout shape a
+# cloud routine uses) with a depth-1 fetch of that EXACT sha (never a moving
+# ref) before giving up. Fetch by the FULL 40-char object id, not the 7-char
+# abbreviation: a git server only honors a direct commit fetch for an exact,
+# full object id (uploadpack.allowReachableSHA1InWant).
+A4_BASELINE_SHA_FULL="753c3f28d0cf68860a267bda757c9c96adf4c818"
+if ! git -C "$ROOT" cat-file -e "${A4_BASELINE_SHA}^{commit}" 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$A4_BASELINE_SHA_FULL" 2>/dev/null || true
+fi
 if git -C "$ROOT" cat-file -e "${A4_BASELINE_SHA}:test/hook-parity.test.sh" 2>/dev/null; then
   A4B_FIXTURE="$(mktemp -d)"
   build_no_baseref_fixture "$A4B_FIXTURE"
@@ -230,7 +258,7 @@ if git -C "$ROOT" cat-file -e "${A4_BASELINE_SHA}:test/hook-parity.test.sh" 2>/d
     notok "ASSERTION 4 FAIL-FIRST: the pre-fix baseline did not exit 0 either (exit=$A4B_CODE) -- cannot demonstrate the fix is real"
   fi
 else
-  echo "SKIP: commit ${A4_BASELINE_SHA} not reachable — ASSERTION 4 fail-first proof could not run"
+  notok "ASSERTION 4 FAIL-FIRST: baseline commit ${A4_BASELINE_SHA} (or the path at it) is not reachable even after \`git fetch --depth=1 origin ${A4_BASELINE_SHA_FULL}\` — refusing to report a pass having compared against nothing"
 fi
 
 fi  # end QX_HOOK_PARITY_FIXTURE guard (ASSERTION 4)

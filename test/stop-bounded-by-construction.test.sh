@@ -44,7 +44,9 @@
 # "test" — pinned directly against the exact two collision shapes the
 # coordinator's own review found.
 # AC11 (fail-first): every new assertion below is proven to fail against the
-# pre-change baseline resolved from origin/main (fallback main).
+# pre-change baseline pinned at ff16905 (main's tip immediately before #119
+# merged this fix — an immutable sha, never origin/main or main, which
+# become the post-fix code once #119 lands and would make this a no-op).
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -511,17 +513,36 @@ LEDGER9_EXIT="$(printf '%s' "$LEDGER9" | jq -r '.[0].exit' 2>/dev/null)"
 
 # =============================================================================
 # AC11 — FAIL-FIRST: each key fixture above genuinely fails against the
-# pre-change baseline resolved from origin/main (fallback main).
+# pre-change baseline pinned at ff16905 (main's tip immediately before #119
+# merged this fix). NOT origin/main or main — those are moving refs: once
+# #119 lands on main, "main" IS the post-fix code, and this proof would stop
+# demonstrating anything. Do not change this back to origin/main.
+#
+# `git show <sha>:<path>` exits non-zero for TWO different reasons: the path
+# is absent at that sha, or the sha itself is unreachable (e.g. a shallow
+# clone — the checkout shape a cloud routine uses). A silent SKIP here is
+# worse than it looks: run-all.sh only classifies a unit as SKIP when it
+# emits ZERO assertion lines, so a lone SKIP among this file's many other
+# assertions is captured and DISCARDED, not surfaced. Self-heal with a
+# depth-1 fetch of that EXACT sha (never a moving ref) before giving up, and
+# report loudly (notok), not a swallowed SKIP, if it is still unreachable.
+# Fetch by the FULL 40-char object id, not the 7-char abbreviation: a git
+# server only honors a direct commit fetch for an exact, full object id
+# (uploadpack.allowReachableSHA1InWant) — an abbreviated sha cannot even be
+# typed correctly for an object the local repo does not yet have.
 # =============================================================================
+FF16905_FULL="ff16905d1690e7553ed26cf871c4d4cd3b82ea44"
+if ! git -C "$ROOT" cat-file -e ff16905^{commit} 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$FF16905_FULL" 2>/dev/null || true
+fi
 BASELINE=""
-if git -C "$ROOT" show origin/main:.claude/hooks/verify-gate.sh > "$TMP/baseline.sh" 2>/dev/null; then
-  BASELINE="$TMP/baseline.sh"
-elif git -C "$ROOT" show main:.claude/hooks/verify-gate.sh > "$TMP/baseline.sh" 2>/dev/null; then
+if git -C "$ROOT" cat-file -e ff16905^{commit} 2>/dev/null \
+  && git -C "$ROOT" show ff16905:.claude/hooks/verify-gate.sh > "$TMP/baseline.sh" 2>/dev/null; then
   BASELINE="$TMP/baseline.sh"
 fi
 
 if [ -z "$BASELINE" ]; then
-  echo "SKIP: no origin/main or main baseline resolvable for .claude/hooks/verify-gate.sh — fail-first proof could not run"
+  notok "AC11 FAIL-FIRST: ff16905:.claude/hooks/verify-gate.sh not resolvable even after \`git fetch --depth=1 origin $FF16905_FULL\` — refusing to report a pass having compared against nothing"
 else
   # --- baseline AC1: the heavy (sleeping) command DID run under the old code.
   FB1="$TMP/base-ac1"

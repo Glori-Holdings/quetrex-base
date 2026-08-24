@@ -25,10 +25,12 @@
 # via a real `gh pr merge` PreToolUse payload (with a mocked `gh pr view` —
 # the same seam test/merge-gate.test.sh already uses — so this file never
 # depends on a real, authenticated `gh`), and the (b) direction has a
-# fail-first proof against the pre-fix baseline resolved from origin/main
-# (fallback main) — the same convention every other new HOOKFIX test file
-# uses (see its own FAIL-FIRST section for why this replaced a literal
-# `HEAD` resolution, which this test's own commit made self-referential).
+# fail-first proof against the pre-fix baseline pinned at the immutable sha
+# ff16905 — the same convention every other new HOOKFIX test file uses (see
+# its own FAIL-FIRST section for why this replaced a literal `HEAD`
+# resolution, which this test's own commit made self-referential, and why
+# it is not origin/main or main either, which become the post-fix code once
+# #119 lands).
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -272,6 +274,15 @@ fi
 # all, so case (e) must ESCALATE_HUMAN-deny there even with a fully green
 # ledger for both commands -- proving this is a genuine, deliberate fix.
 SEC14_BASELINE_SHA="4bd824f"
+# Self-heal an unreachable sha (e.g. a shallow clone) with a depth-1 fetch of
+# that EXACT sha (never a moving ref) before giving up. Fetch by the FULL
+# 40-char object id, not the 7-char abbreviation: a git server only honors a
+# direct commit fetch for an exact, full object id
+# (uploadpack.allowReachableSHA1InWant).
+SEC14_BASELINE_SHA_FULL="4bd824f792daeb9d0a51987f78d293d91cf60d29"
+if ! git -C "$ROOT" cat-file -e "${SEC14_BASELINE_SHA}^{commit}" 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$SEC14_BASELINE_SHA_FULL" 2>/dev/null || true
+fi
 if git -C "$ROOT" cat-file -e "${SEC14_BASELINE_SHA}:.claude/hooks/merge-gate.sh" 2>/dev/null; then
   SEC14_BASELINE="$TMP/sec14-baseline-merge-gate.sh"
   git -C "$ROOT" show "${SEC14_BASELINE_SHA}:.claude/hooks/merge-gate.sh" > "$SEC14_BASELINE"
@@ -283,7 +294,7 @@ if git -C "$ROOT" cat-file -e "${SEC14_BASELINE_SHA}:.claude/hooks/merge-gate.sh
     notok "SEC-14 FAIL-FIRST: the pre-fix baseline did not deny case (e) either (out: [$BASE_E_OUT]) -- cannot demonstrate the fix is real"
   fi
 else
-  echo "SKIP: commit ${SEC14_BASELINE_SHA} not reachable -- SEC-14 fail-first proof could not run"
+  notok "SEC-14 FAIL-FIRST: baseline commit ${SEC14_BASELINE_SHA} (or the path at it) is not reachable even after \`git fetch --depth=1 origin ${SEC14_BASELINE_SHA_FULL}\` — refusing to report a pass having compared against nothing"
 fi
 
 # =============================================================================
@@ -360,20 +371,37 @@ fi
 # is empty at this commit. Switched to the SAME convention every other new
 # HOOKFIX test file already uses (see stop-bounded-by-construction.test.sh,
 # bound-version-guard.test.sh, protected-files-guard.test.sh's own AC11
-# sections): resolve a STABLE pre-branch reference, origin/main (fallback
-# main), which genuinely predates this entire branch's boundedQuick work
-# (0 occurrences of "boundedQuick" in that copy — checked) rather than a
-# commit-relative offset that silently stops meaning "pre-fix" the moment a
-# later commit lands on this branch.
+# sections): resolve a STABLE, IMMUTABLE pre-branch reference — ff16905
+# (main's tip immediately before #119 merged this branch's boundedQuick
+# work), which genuinely predates it (0 occurrences of "boundedQuick" in
+# that copy — checked). NOT origin/main or main: those are moving refs that
+# become the post-fix code the moment #119 lands, at which point this proof
+# would stop demonstrating anything (or worse, silently invert). A
+# commit-relative offset has the same problem for the same reason.
+# `git show <sha>:<path>` exits non-zero for TWO different reasons: the path
+# is absent at that sha, or the sha itself is unreachable (e.g. a shallow
+# clone — the checkout shape a cloud routine uses). A silent SKIP here is
+# worse than it looks: run-all.sh only classifies a unit as SKIP when it
+# emits ZERO assertion lines, so a lone SKIP among this file's many other
+# assertions is captured and DISCARDED, not surfaced. Self-heal with a
+# depth-1 fetch of that EXACT sha (never a moving ref) before giving up, and
+# report loudly (notok), not a swallowed SKIP, if it is still unreachable.
+# Fetch by the FULL 40-char object id, not the 7-char abbreviation: a git
+# server only honors a direct commit fetch for an exact, full object id
+# (uploadpack.allowReachableSHA1InWant) — an abbreviated sha cannot even be
+# typed correctly for an object the local repo does not yet have.
+FF16905_FULL="ff16905d1690e7553ed26cf871c4d4cd3b82ea44"
+if ! git -C "$ROOT" cat-file -e ff16905^{commit} 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$FF16905_FULL" 2>/dev/null || true
+fi
 BASELINE=""
-if git -C "$ROOT" show origin/main:.claude/hooks/merge-gate.sh > "$TMP/baseline-merge-gate.sh" 2>/dev/null; then
-  BASELINE="$TMP/baseline-merge-gate.sh"
-elif git -C "$ROOT" show main:.claude/hooks/merge-gate.sh > "$TMP/baseline-merge-gate.sh" 2>/dev/null; then
+if git -C "$ROOT" cat-file -e ff16905^{commit} 2>/dev/null \
+  && git -C "$ROOT" show ff16905:.claude/hooks/merge-gate.sh > "$TMP/baseline-merge-gate.sh" 2>/dev/null; then
   BASELINE="$TMP/baseline-merge-gate.sh"
 fi
 
 if [ -z "$BASELINE" ]; then
-  echo "SKIP: could not resolve a pre-fix merge-gate.sh baseline from HEAD — fail-first proof could not run"
+  notok "FAIL-FIRST (b): could not resolve ff16905:.claude/hooks/merge-gate.sh even after \`git fetch --depth=1 origin $FF16905_FULL\` — refusing to report a pass having compared against nothing"
 else
   # (a) baseline: does the pre-fix hook also deny the boundedQuick-only case?
   # The PRE-fix hook has NO boundedQuick concept at all -- a skipReason other
@@ -423,6 +451,15 @@ fi
 # reduce/dominance step) — so pin to that immutable sha instead, the same
 # durable pattern SEC-14/SEC-15's fail-firsts already use.
 SEC12_BASELINE_SHA="4bd824f"
+# Self-heal an unreachable sha (e.g. a shallow clone) with a depth-1 fetch of
+# that EXACT sha (never a moving ref) before giving up. Fetch by the FULL
+# 40-char object id, not the 7-char abbreviation: a git server only honors a
+# direct commit fetch for an exact, full object id
+# (uploadpack.allowReachableSHA1InWant).
+SEC12_BASELINE_SHA_FULL="4bd824f792daeb9d0a51987f78d293d91cf60d29"
+if ! git -C "$ROOT" cat-file -e "${SEC12_BASELINE_SHA}^{commit}" 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$SEC12_BASELINE_SHA_FULL" 2>/dev/null || true
+fi
 if git -C "$ROOT" cat-file -e "${SEC12_BASELINE_SHA}:.claude/hooks/merge-gate.sh" 2>/dev/null; then
   D_BASELINE="$TMP/baseline-merge-gate-d.sh"
   git -C "$ROOT" show "${SEC12_BASELINE_SHA}:.claude/hooks/merge-gate.sh" > "$D_BASELINE"
@@ -435,7 +472,7 @@ if git -C "$ROOT" cat-file -e "${SEC12_BASELINE_SHA}:.claude/hooks/merge-gate.sh
     notok "FAIL-FIRST (d) SEC-12: the pre-persha-fix baseline did not deny case (d) either (out: [$BASE_OUT_D]) — cannot demonstrate the fix is real"
   fi
 else
-  echo "SKIP: commit ${SEC12_BASELINE_SHA} not reachable — SEC-12 (d) fail-first proof could not run"
+  notok "FAIL-FIRST (d) SEC-12: baseline commit ${SEC12_BASELINE_SHA} (or the path at it) is not reachable even after \`git fetch --depth=1 origin ${SEC12_BASELINE_SHA_FULL}\` — refusing to report a pass having compared against nothing"
 fi
 
 
@@ -466,6 +503,15 @@ else
 fi
 
 SEC17_BASELINE_SHA="349ce29"
+# Self-heal an unreachable sha (e.g. a shallow clone) with a depth-1 fetch of
+# that EXACT sha (never a moving ref) before giving up. Fetch by the FULL
+# 40-char object id, not the 7-char abbreviation: a git server only honors a
+# direct commit fetch for an exact, full object id
+# (uploadpack.allowReachableSHA1InWant).
+SEC17_BASELINE_SHA_FULL="349ce29b4ab189b4496d8f79c2ddf3736e1dc020"
+if ! git -C "$ROOT" cat-file -e "${SEC17_BASELINE_SHA}^{commit}" 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$SEC17_BASELINE_SHA_FULL" 2>/dev/null || true
+fi
 if git -C "$ROOT" cat-file -e "${SEC17_BASELINE_SHA}:.claude/hooks/merge-gate.sh" 2>/dev/null; then
   SEC17_BASELINE="$TMP/sec17-baseline-merge-gate.sh"
   git -C "$ROOT" show "${SEC17_BASELINE_SHA}:.claude/hooks/merge-gate.sh" > "$SEC17_BASELINE"
@@ -479,7 +525,7 @@ if git -C "$ROOT" cat-file -e "${SEC17_BASELINE_SHA}:.claude/hooks/merge-gate.sh
     notok "SEC-17 FAIL-FIRST: the pre-fix baseline did not deny, but also was not a clean silent-allow either (out: [$BASE_OUT_SEC17]) — ambiguous, cannot cleanly demonstrate the fix"
   fi
 else
-  echo "SKIP: commit ${SEC17_BASELINE_SHA} not reachable — SEC-17 fail-first proof could not run"
+  notok "SEC-17 FAIL-FIRST: baseline commit ${SEC17_BASELINE_SHA} (or the path at it) is not reachable even after \`git fetch --depth=1 origin ${SEC17_BASELINE_SHA_FULL}\` — refusing to report a pass having compared against nothing"
 fi
 
 echo

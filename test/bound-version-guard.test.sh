@@ -196,14 +196,36 @@ printf '%s' "$STDERRC" | grep -Eq 'Traceback|SyntaxError|line [0-9]+:' \
 # the pre-change mechanism (quetrex-update-check.sh) cannot see this class of
 # staleness — proven by driving IT against the same AC8 fixture.
 # =============================================================================
+# Pinned to ff16905 (main's tip immediately before #119 merged the guard) —
+# NOT origin/main or main. Those are moving refs: once #119 lands on main,
+# "main" IS the post-fix code, and this assertion would flip from proving the
+# pre-change baseline to being vacuous (or, if #119 is later reverted,
+# outright wrong). Do not change this back to origin/main.
+#
+# `git show <sha>:<path>` exits non-zero for TWO different reasons: the path
+# is absent at that sha (what this proof means to detect), or the sha itself
+# is unreachable (e.g. a shallow clone — the checkout shape a cloud routine
+# uses). Collapsing both into one `else -> ok` reports a pass having compared
+# against nothing. Assert the sha resolves FIRST; self-heal with a depth-1
+# fetch of that EXACT sha (never a moving ref — that is the bug this whole
+# branch exists to fix) before giving up; only then report loudly.
+# Fetch by the FULL 40-char object id, not the 7-char abbreviation: a git
+# server (GitHub included) only honors a direct commit fetch for an exact,
+# full object id (uploadpack.allowReachableSHA1InWant) — an abbreviated sha
+# cannot even be typed correctly for an object the local repo does not yet
+# have, since there is nothing local to disambiguate the prefix against.
+FF16905_FULL="ff16905d1690e7553ed26cf871c4d4cd3b82ea44"
 BASELINE_MISSING=0
-if git -C "$ROOT" show origin/main:.claude/hooks/quetrex-bound-version-guard.sh >/dev/null 2>&1; then
-  notok "AC11 FAIL-FIRST: quetrex-bound-version-guard.sh unexpectedly EXISTS at origin/main — it should be new in this branch"
-elif git -C "$ROOT" show main:.claude/hooks/quetrex-bound-version-guard.sh >/dev/null 2>&1; then
-  notok "AC11 FAIL-FIRST: quetrex-bound-version-guard.sh unexpectedly EXISTS at main — it should be new in this branch"
+if ! git -C "$ROOT" cat-file -e ff16905^{commit} 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$FF16905_FULL" 2>/dev/null || true
+fi
+if ! git -C "$ROOT" cat-file -e ff16905^{commit} 2>/dev/null; then
+  notok "AC11 FAIL-FIRST: baseline commit ff16905 is not reachable in this checkout even after \`git fetch --depth=1 origin $FF16905_FULL\` — cannot prove the guard is new, refusing to report a pass having compared against nothing"
+elif git -C "$ROOT" show ff16905:.claude/hooks/quetrex-bound-version-guard.sh >/dev/null 2>&1; then
+  notok "AC11 FAIL-FIRST: quetrex-bound-version-guard.sh unexpectedly EXISTS at ff16905 — it should be new in this branch"
 else
   BASELINE_MISSING=1
-  ok "AC11 FAIL-FIRST: quetrex-bound-version-guard.sh does not exist at origin/main or main — this is new machinery, not a modification"
+  ok "AC11 FAIL-FIRST: quetrex-bound-version-guard.sh does not exist at ff16905 (pre-#119 baseline) — this is new machinery, not a modification"
 fi
 
 OLD_CHECK="$ROOT/.claude/hooks/quetrex-update-check.sh"
