@@ -204,9 +204,22 @@ The verdict is computed, not remembered:
 #     - probe says `dead`/`gone` → RECOVERABLE, bounded by `maxDispatchAttempts`
 #       (default 2 — one automatic recovery, then a human).
 #     - probe says `running` → REFUSE however old it is.
+#     - probe says `refused` → REFUSE, to a HUMAN, and never auto-refired.
 #   `liveness` is the 5th argument precisely because `RemoteTrigger` is a TOOL,
 #   not a shell command: the probe cannot happen inside this function, so its
 #   result is passed in and the decision stays executable and testable.
+#
+# HOW TO PROBE FOR `refused`, since it is not a routine state the API reports.
+#   `RemoteTrigger action:"get"` answers running/dead/gone. It does NOT answer
+#   "did this run do anything", and a refusal reports success. So when a run has
+#   ENDED, check the two artifacts a completed build always leaves on origin:
+#       git ls-remote --heads origin '<prefix><TASK>' '<prefix><TASK>-gates-*'
+#   Ended + neither ref present + no PR  -> `refused`.
+#   Ended + refs present                 -> the build got somewhere; treat as
+#                                           dead/gone and recover normally.
+#   Confirm the reason with `RemoteTrigger action:"get_run_log"` before reporting
+#   it to the operator: the session states why, and that sentence is the whole
+#   value of this verdict.
 qx_actionability() {           # qx_actionability <status> <single|epic> <full|build|tick> <payload-file> [running|dead|gone|unknown]
   local status="$1" kind="$2" mode="$3" payload="$4" liveness="${5:-unknown}"
   local approved="" dispatched="" monitor="" routine="" attempts="" maxatt="" horizon="" age=""
@@ -250,6 +263,19 @@ qx_actionability() {           # qx_actionability <status> <single|epic> <full|b
       fi
       if [ -n "$approved" ] && [ -n "$dispatched" ]; then
         case "$liveness" in
+          refused)
+            # A run that STARTED, ENDED CLEANLY, and produced nothing — no unit branch,
+            # no gates branch, no PR. MEASURED on QDM-5.1: the cloud session declined the
+            # routine prompt on safety grounds and exited `result: success is_error=false
+            # turns=5`. Nothing distinguished that from a completed build, the epic sat at
+            # 0/5 children for twelve days, and the platform itself documents that a green
+            # run status "does not mean the task in your prompt succeeded".
+            #
+            # This is deliberately NOT `dead`. A dead container is worth re-firing; a
+            # refusal is not. The same prompt refused for the same reason will be refused
+            # again, and auto-retrying spends the attempt budget proving that. A refusal is
+            # a defect in what we asked for, so it goes to a human with the run attached.
+            echo "REFUSE — the cloud routine for $TASK_ID (${routine:-unknown}) ran and REFUSED: it ended without opening a PR or publishing a gates branch, having made no changes. This is not a crash and re-firing it unchanged will refuse again. Read the run at ${monitor:-the routine list} for the stated reason, fix the prompt or the plan, then /quetrex:task-rework $TASK_ID"; return 1 ;;
           dead|gone)
             if [ "$attempts" -ge "$maxatt" ] 2>/dev/null; then
               echo "REFUSE — the cloud routine for $TASK_ID (${routine:-unknown}) is not running and this task has already been dispatched $attempts time(s), which is its maxDispatchAttempts. Refusing a third fire at the same branch namespace: this needs a human. Read the run at ${monitor:-the routine list}, then either /quetrex:task-rework $TASK_ID or raise maxDispatchAttempts in $payload deliberately"; return 1
@@ -644,7 +670,10 @@ worktree still existing. Materialize it into a disposable, detached worktree and
 its own throwaway branch — never onto the unit branch, never onto `main`:
 
 ```bash
-SPEC_BRANCH="quetrex-spec/$TASK_ID"
+# SPEC_BRANCH is NOT fixed. It is named after the spec commit's own sha (assigned below,
+# once that commit exists), so every dispatch publishes a NEW ref and none is ever
+# replaced. A fixed name forced a delete-then-push on re-dispatch; that destructive step
+# is gone.
 PLAN_JSON="$(node -e '
   const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
   if(!p.planSnapshot){ console.error("No embedded plan snapshot in the payload — run the plan half again."); process.exit(1); }
@@ -758,47 +787,29 @@ STAMPED_BASE="$(quetrex-api json-get "$TMP_WT/.quetrex/plan/$TASK_ID.json" base_
 # patched the published spec branch mid-run to rescue it. Union-only: it never
 # removes an architect-authored entry, only adds names the architect missed.
 quetrex-env-derive plan "$TMP_WT/.quetrex/plan/$TASK_ID.json" "$REPO_ROOT" || exit 1
-git -C "$TMP_WT" checkout -q -B "$SPEC_BRANCH"
+# Commit on the DETACHED head first, then name the branch after the commit that resulted.
+# That is what makes the ref unique per dispatch without inventing a counter or a clock:
+# the name is a function of the content being published.
 git -C "$TMP_WT" add -f ".quetrex/plan/$TASK_ID.json"
 git -C "$TMP_WT" -c user.name='quetrex-bot' -c user.email='quetrex-bot@users.noreply.github.com' \
   commit -q -m "chore(spec): $TASK_ID build payload for cloud routine"
+SPEC_SHA="$(git -C "$TMP_WT" rev-parse HEAD)" || exit 1
+SPEC_BRANCH="quetrex-spec/$TASK_ID-$(printf '%.7s' "$SPEC_SHA")"
+git -C "$TMP_WT" branch -q "$SPEC_BRANCH" || exit 1
 ```
 
-Publish it — idempotently, and never with a force-push:
+Publish it. This is a plain create-and-push: the ref is named after a commit that did not
+exist until a moment ago, so it cannot already be on the remote and nothing is replaced or
+removed. A re-dispatch adds a ref beside the old one rather than overwriting it.
 
 ```bash
-# WHY NOT AN UNCONDITIONAL FORCE-PUSH. This repo's own PreToolUse guard
-# (.claude/hooks/deny-guard.sh, check_git -> push) DENIES the unconditional
-# force flags outright. This step used to publish the spec branch that way, and
-# it only ever survived because the spec branch was BRAND NEW on that run and
-# the dispatching session happened to hand-retry without the flag. Any
-# RE-dispatch of a task whose spec branch already exists hits the deny and the
-# dispatch dies with the plan unpublished — the cloud session then has nothing
-# to fetch in its step 2.
-#
-# WHY DELETE-THEN-PUSH AND NOT `--force-with-lease`. `--force-with-lease` IS
-# permitted by the guard, but it compares against the remote-TRACKING ref, and
-# $TMP_WT is a freshly-detached worktree that has never fetched
-# refs/remotes/origin/$SPEC_BRANCH — so the lease has no basis and git refuses
-# with "stale info" on exactly the re-dispatch this is meant to fix. Deleting
-# first needs no lease and no tracking ref. The spec branch is disposable by
-# construction (it carries only the plan JSON for one dispatch), so replacing it
-# wholesale is the correct semantic, not a workaround.
-#
-# WHY THE DELETE NAMES THE BRANCH LITERALLY.
-# A remote ref delete removes the ref outright, so which ref is being removed
-# should be legible to the human reading the command and to the tooling that
-# inspects it — and a PreToolUse hook is handed the command text BEFORE the
-# shell expands it, so `--delete "$SPEC_BRANCH"` shows a reader nothing about
-# the target. `quetrex-spec/$TASK_ID` is the same value SPEC_BRANCH was defined
-# from, written so the target is visible rather than inferred. Keep it that way
-# for the same reason you would not hide a destructive path behind a variable.
-#
-# If your own judgement says this delete is unsafe, do NOT rephrase it to get it
-# through. Stop and report `transport_failure` naming this step.
-if git -C "$TMP_WT" ls-remote --exit-code --heads origin "$SPEC_BRANCH" >/dev/null 2>&1; then
-  git -C "$TMP_WT" push --quiet origin --delete "quetrex-spec/$TASK_ID" || exit 1
-fi
+# A create-and-push, nothing more. $SPEC_BRANCH is named after the spec commit's
+# own sha, so the ref is new by construction: there is no existing ref to force
+# over, no lease to establish, and nothing to delete. The earlier versions of this
+# step force-pushed (denied outright by deny-guard.sh) and then delete-then-pushed
+# (a remote ref deletion on every re-dispatch). Both existed only because the name
+# was fixed. Naming the ref after its content removed the problem instead of
+# managing it.
 git -C "$TMP_WT" push --quiet origin "$SPEC_BRANCH" || exit 1
 ```
 
@@ -954,6 +965,21 @@ no board change, no PR and no notification to diagnose from.
 place a bearer token or any other secret in `name`, `message.content`, or anywhere else in
 this body: the CCR authenticates to GitHub with its own credentials, never one this session
 hands it.
+
+**`allowed_tools` is the ONLY permission channel that reaches a cloud run. The repo's
+`permissions.allow` does not.** MEASURED on a real run (2026-08-24): a cloud session's
+workspace is never trusted — there is no trust dialog and nobody to accept it — so Claude
+Code discards the repo's project-scoped `.claude/settings.json`:
+
+    Dropped 19 project-scoped permissions.allow entries — workspace not yet trusted
+
+Every entry a repo lists there is gone before the first stage runs. This is the same
+mechanism that stops declared plugins installing (see `.claude/lib/cloud-build-routine.md`),
+and it is why QDM-4 stalled at `gh pr create` with a `permissions.allow` block that looked
+correct in the repo and was never actually in force. So a tool the pipeline needs
+unattended must be named HERE, in `allowed_tools`, and adding it to the repo's settings is
+not a substitute and not a fallback — it is a no-op in cloud. Do not "fix" a cloud
+permission failure by editing `.claude/settings.json`; that change cannot take effect.
 
 **Dispatch call order — exactly ONE run armed, and the disarm is part of dispatch.**
 
@@ -1281,7 +1307,11 @@ fails, the tick is unaffected.
        }
        console.log("CHILD_ID="+childId);
        console.log("CHILD_TITLE="+(c.title||""));
-       console.log("CHILD_SPEC_BRANCH=quetrex-spec/"+childId);
+       // NOTE: no CHILD_SPEC_BRANCH here. As in 6A, the spec branch for a child is
+       // named after the sha of its own spec commit, so it is only knowable AFTER
+       // that commit exists. Step 6A assigns it. Emitting a fixed name here would
+       // reintroduce the collision that forced a remote ref delete on re-dispatch.
+       // (No apostrophes in this block: it lives inside a single-quoted node -e.)
        console.log("CHILD_BASE_BRANCH="+base);
        console.log("CHILD_BRANCH_PREFIX="+p.branchPrefix);
      ' "$1" "$2"
@@ -1293,8 +1323,10 @@ fails, the tick is unaffected.
    - `TASK_ID` → `CHILD_ID`, `TASK_TITLE` → `CHILD_TITLE`,
    - the plan published to the spec branch → the child's `children[].plan` from the payload
      (that is the child's `planSnapshot`; there is no separate plan file),
-   - `SPEC_BRANCH` → `CHILD_SPEC_BRANCH`, `BASE_BRANCH_FOR_SPEC` → `CHILD_BASE_BRANCH`
-     (the **integration branch** — a child PR targets it, never `main`),
+   - `BASE_BRANCH_FOR_SPEC` → `CHILD_BASE_BRANCH` (the **integration branch** — a child PR
+     targets it, never `main`). `SPEC_BRANCH` is **not** passed in: 6A derives it from the
+     child's own spec commit sha, exactly as it does for a standalone unit, and the value
+     it derives is what gets recorded and substituted into the routine prompt,
    - `environment_id` → the same `$QX_CLOUD_ENV_ID` resolved at Step 1a,
    - routine `name` → `<CHILD_ID> <child title>`, same phone-scannable rule as 6A.
 
@@ -1333,7 +1365,8 @@ fails, the tick is unaffected.
    }
    # ── end quetrex:exec-block qx_record_child_dispatch ─────────────────────────
 
-   qx_record_child_dispatch "$PAYLOAD" "$CHILD_ID" "$ROUTINE_ID" "$CHILD_SPEC_BRANCH" "$CHILD_BASE_SHA"
+   # $SPEC_BRANCH here is the value Step 6A derived from this child's spec commit sha.
+   qx_record_child_dispatch "$PAYLOAD" "$CHILD_ID" "$ROUTINE_ID" "$SPEC_BRANCH" "$CHILD_BASE_SHA"
    # For the human watching the board from a phone — never read by the tick.
    quetrex-api task-status "$CHILD_ID" in_progress || true
    ```

@@ -3,12 +3,26 @@
 This file is not run by anything locally. It is the **exact prompt text** that
 `.claude/commands/task-build.md` (Step 6A) fills and posts as the `message.content` of a
 `RemoteTrigger` event — the body of a fired Claude Code cloud Routine (a CCR). The CCR that
-receives it has **zero context**: no prior conversation, no plugin installed, nothing but a
-fresh unauthenticated clone of the public repo named in `sources[0].git_repository.url` and
-whatever the delegating session pastes below. The routine fires inside a
-`job_config.ccr.environment_id: "env_011CUpkAEM4fzsAD6dx1zW3r"` session, `run_once_at` a
-couple of minutes in the future, exactly as `.claude/commands/task-build.md` Step 6A builds
-it.
+receives it has **zero conversational context**: no prior conversation, nothing but a fresh
+clone of the repo named in `sources[0].git_repository.url` and whatever the delegating
+session pastes below. The routine fires inside the cloud environment this repo is bound to
+(`.quetrex/project.json`'s `cloudEnvironmentId` — **never** a literal id in this file, see
+`.claude/commands/task-build.md` Step 1a), `run_once_at` a couple of minutes in the future,
+exactly as Step 6A builds it.
+
+**The engine is already installed when this prompt is read.** The bound environment's
+**setup script** runs before Claude Code launches and installs `quetrex@quetrex` and
+`quetrex-factory@quetrex` at user scope; the environment cache keeps them, so it costs
+nothing per run. That is why this prompt contains no install step.
+
+MEASURED, and the reason this is not left to the prompt: a cloud session does **not**
+auto-install the plugins a repo declares in `.claude/settings.json`. The workspace is never
+trusted (there is no trust dialog and nobody to accept it), so the project settings file is
+discarded wholesale — `Skipping orphaned enabledPlugins entry quetrex@quetrex: marketplace
+not registered` / `installPluginsForHeadless: no marketplaces declared`. Asking the session
+to install the engine itself put an unauthenticated third-party marketplace install into an
+unattended prompt, which is one of the things a cloud session refused outright on QDM-5.1.
+The environment owns provisioning; the prompt owns the task.
 
 **Placeholders** — filled by task-build.md before the prompt is pasted into the event:
 
@@ -54,21 +68,29 @@ build runs. So the prompt now LEADS with `{{TASK}} — {{TITLE}}` on a line of i
 ```
 {{TASK}} — {{TITLE}}
 You are a fresh Claude Code cloud session. You have just cloned {{REPO_URL}} with zero
-prior context — no conversation history, no plugin installed, and /quetrex:task-build is
-NOT registered as a slash command here. Do the following, in order, and stop only at one of
-the two termini in step 5.
+prior conversational context. Do the following, in order, and stop only at one of the two
+termini in step 5.
 
-### 1. Install the engine
-Both engine repos are public specifically so this clone can install them unauthenticated:
+### 1. Confirm the engine is present — it was installed for you, do not install it
+The Quetrex engine is provisioned by this environment's setup script, before you started.
+Nothing here installs software. Confirm it landed:
 
-    claude plugin marketplace add Glori-Holdings/quetrex-plugins
-    claude plugin install quetrex@quetrex quetrex-factory@quetrex
+    claude plugin list
 
-This lands the agent definitions (.claude/agents/architect.md, developer.md, qa.md,
-reviewer.md, security-reviewer.md, git-workflow.md) and .claude/lib/dev-pipeline.md on
-disk. A mid-session plugin install does NOT register new slash commands without a restart
-this session will not get — so /quetrex:task-build is never invoked here. Steps 3-4 below
-drive the pipeline directly instead, by reading those installed files.
+You should see `quetrex@quetrex` and `quetrex-factory@quetrex`. Their agent definitions
+(architect.md, developer.md, qa.md, reviewer.md, security-reviewer.md, git-workflow.md) and
+`.claude/lib/dev-pipeline.md` are on disk under the plugin cache, and `quetrex-api`,
+`quetrex-cloud-prep`, `quetrex-env-derive` and `quetrex-plan-stamp` are on PATH.
+
+If they are NOT present, stop and report `transport_failure` (rule 5) saying the environment
+is missing its setup script. **Do not install them yourself** — a build that provisions its
+own toolchain from an unattended prompt is exactly what this design removed, and an
+environment without the script is a configuration problem a human fixes once, not something
+to work around per run.
+
+`/quetrex:task-build` is NOT registered as a slash command here — plugin commands register
+at launch and this session's engine came from the setup script, so steps 3-4 drive the
+pipeline directly by reading the agent files off disk.
 
 ### 2. Fetch the human-approved spec
 The spec was pushed to a disposable helper branch by the local half before you were fired.
@@ -178,7 +200,14 @@ test suite, so an edit here is an edit to tested behaviour:
 
     # >>> QUETREX GATE PUBLICATION >>>
     HEAD_SHA="$(git rev-parse HEAD)" || { echo "transport_failure: no HEAD to publish gates for" >&2; exit 1; }
-    GATES_BRANCH="{{BRANCH_PREFIX}}{{TASK}}-gates"
+    # The gates branch name carries the head sha it describes, so it is UNIQUE per run and
+    # never collides with a previous build's. Nothing has to be replaced or removed to
+    # publish it — a rebuild simply publishes a new ref alongside the old one, and
+    # /quetrex:merge selects the branch whose gates-head matches the PR head. The old
+    # fixed name forced a delete-then-push on every re-dispatch; that destructive step is
+    # gone, and with it the need to justify one.
+    SHORT_SHA="$(printf '%.7s' "$HEAD_SHA")"
+    GATES_BRANCH="{{BRANCH_PREFIX}}{{TASK}}-gates-$SHORT_SHA"
     mkdir -p .quetrex/plan || { echo "transport_failure: cannot create .quetrex/plan" >&2; exit 1; }
     # THE PLAN AND THE STATE ARE GATE EVIDENCE, not scratch. merge-gate.sh reads
     # .quetrex/plan/<TASK>.json for the file-ownership map (GATE 5) and for
@@ -212,27 +241,9 @@ test suite, so an edit here is an edit to tested behaviour:
     git -c user.name='quetrex-bot' -c user.email='quetrex-bot@users.noreply.github.com' \
       commit -q -m "chore(gates): {{TASK}} gate artifacts for $HEAD_SHA" \
       || { echo "transport_failure: cannot commit the gate artifacts" >&2; exit 1; }
-    # WHAT THIS BRANCH IS, and why replacing it is safe. `<prefix><TASK>-gates` is a
-    # DISPOSABLE evidence branch. It holds only this run's gate artifacts, it is
-    # never merged, and `/quetrex:merge` deletes it as soon as it has read them. It
-    # carries no source code and nothing else depends on it. Rebuilding a task
-    # legitimately republishes it, so the publication has to be idempotent.
-    #
-    # Replacing it is a delete-then-push rather than a force-push because this
-    # branch was just created locally and has no remote-tracking ref, so
-    # `--force-with-lease` would fail "stale info". Both the delete and the push
-    # name the branch literally rather than passing a variable, because the
-    # operator's own safety hooks read a command before the shell expands it and a
-    # destructive operation should be legible to them — an unexpanded variable
-    # hides which ref is being removed from the human and the tooling alike.
-    #
-    # If your own judgement says this delete is unsafe, DO NOT work around it and
-    # do not rephrase it. Stop and report `transport_failure` naming this step. A
-    # refused publication costs one re-dispatch; a mis-targeted ref delete does not
-    # come back.
-    if git ls-remote --exit-code --heads origin "$GATES_BRANCH" >/dev/null 2>&1; then
-      git push --quiet origin --delete "{{BRANCH_PREFIX}}{{TASK}}-gates" || exit 1
-    fi
+    # A plain create-and-push. The branch name carries this run's head sha, so the ref
+    # does not already exist and nothing is overwritten or removed. This publication
+    # adds a ref and never deletes one.
     git push --quiet origin "$GATES_BRANCH" \
       || { echo "transport_failure: cannot push $GATES_BRANCH" >&2; exit 1; }
     # <<< QUETREX GATE PUBLICATION <<<
@@ -246,8 +257,12 @@ Rules that make this evidence and not decoration:
   writes in the sandbox: `gates-head`, and `state.json`'s `.task` when the pipeline never
   seeded it (an existing `.task` is left exactly as the stages wrote it).
 - `gates-head` must be the **same commit the PR merges.** If you push more commits after
-  writing it, re-run this step; a mismatch makes the local gate reject the artifacts as
-  stale, which is the correct outcome.
+  writing it, re-run this step; because the branch name carries the head sha, the re-run
+  publishes a NEW gates branch for the new head rather than replacing anything, and
+  `/quetrex:merge` picks the one matching the PR head. A run whose gates describe a
+  superseded commit is simply never selected, which is the correct outcome.
+- Say the gates branch name — the full name, including the sha suffix — in your final
+  message. It is how the operator and `/quetrex:merge` find this run's evidence.
 - Five files are REQUIRED — `gates-head`, `review-verdict.json`, `verify-ledger.jsonl`,
   `plan/{{TASK}}.json`, `state.json`. If any one of them cannot be staged, the block above
   stops and pushes nothing: report `transport_failure` (rule 5) naming the artifact. Two are
