@@ -29,11 +29,24 @@
 #       resolves.
 
 set -uo pipefail
+
+# ONE-COPY round 2 hygiene (reviewer-reported): this session's ambient
+# environment can carry QUETREX_UNLOCK_FLOOR=1 from unrelated prior work in
+# the SAME shell (it is not cleared between unrelated commands), and every
+# floor script honors it as the intentional operator unlock. A test that
+# asserts a floor DENY without isolating this var silently asserts nothing
+# once that happens - unset it here so this file's own "locked" assertions
+# are never contaminated by ambient state; any assertion that WANTS the
+# unlocked case still sets QUETREX_UNLOCK_FLOOR=1 explicitly on that one
+# invocation, which overrides this.
+unset QUETREX_UNLOCK_FLOOR
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GUARD="${QX_PROTECTED_FILES_GUARD_HOOK:-$ROOT/.claude/hooks/protected-files-guard.sh}"
-VERIFY_HOOK="${QX_VERIFY_GATE_HOOK:-$ROOT/.claude/hooks/verify-gate.sh}"
-MERGE_HOOK="$ROOT/.claude/hooks/merge-gate.sh"
-QUICK_CHAIN_HOOK="$ROOT/.claude/hooks/verify-gate-quick-chain.sh"
+# The floor scripts now live in exactly ONE place: plugins/quetrex-factory/
+# scripts/ (the one-copy rule) — updated from their old .claude/hooks/ path.
+VERIFY_HOOK="${QX_VERIFY_GATE_HOOK:-$ROOT/plugins/quetrex-factory/scripts/verify-gate.sh}"
+MERGE_HOOK="$ROOT/plugins/quetrex-factory/scripts/merge-gate.sh"
+QUICK_CHAIN_HOOK="$ROOT/plugins/quetrex-factory/scripts/verify-gate-quick-chain.sh"
 
 PASS=0; FAIL=0
 ok()    { PASS=$((PASS+1)); echo "ok - $1"; }
@@ -56,11 +69,12 @@ is_ask()  { printf '%s' "$1" | grep -q '"permissionDecision":"ask"'; }
 decision_count() { printf '%s' "$1" | grep -c 'permissionDecision'; }
 
 # =============================================================================
-# AC13 — Write/Edit on all 5 floor scripts, both path shapes -> DENY.
+# AC13 — Write/Edit on all 5 floor scripts, at the new (post one-copy)
+# protected path shape -> DENY, never ask.
 # =============================================================================
 DENY13=0; ASK13=0; TOTAL13=0
 for name in $NAMES; do
-  for shape in "$TMP/repo/.claude/hooks/${name}.sh" "$TMP/plugin-root/scripts/${name}.sh"; do
+  for shape in "$TMP/repo/plugins/quetrex-factory/scripts/${name}.sh"; do
     for tool in Write Edit; do
       TOTAL13=$((TOTAL13+1))
       OUT="$(fire "$(jq -cn --arg t "$tool" --arg p "$shape" '{tool_name:$t,tool_input:{file_path:$p}}')")"
@@ -71,17 +85,141 @@ for name in $NAMES; do
     done
   done
 done
-[ "$TOTAL13" -eq 20 ] && ok "AC13: exercised all 20 combinations (5 names x 2 path shapes x Write|Edit)" \
-  || notok "AC13: expected 20 combinations, computed $TOTAL13"
-[ "$DENY13" -eq 20 ] && ok "AC13: 20 of 20 invocations emit permissionDecision:\"deny\"" \
-  || notok "AC13: expected 20 deny decisions, got $DENY13"
-[ "$ASK13" -eq 0 ] && ok "AC13: 0 of 20 invocations emit permissionDecision:\"ask\" (CORRECTION 2 — deny, never ask)" \
+[ "$TOTAL13" -eq 10 ] && ok "AC13: exercised all 10 combinations (5 names x 1 path shape x Write|Edit)" \
+  || notok "AC13: expected 10 combinations, computed $TOTAL13"
+[ "$DENY13" -eq 10 ] && ok "AC13: 10 of 10 invocations emit permissionDecision:\"deny\"" \
+  || notok "AC13: expected 10 deny decisions, got $DENY13"
+[ "$ASK13" -eq 0 ] && ok "AC13: 0 of 10 invocations emit permissionDecision:\"ask\" (CORRECTION 2 — deny, never ask)" \
   || notok "AC13: expected 0 ask decisions, got $ASK13"
+
+# =============================================================================
+# ONE-COPY AC14 (CORRECTED — C1 review finding, critical). The original
+# one-copy narrowing covered only quetrex-factory/scripts/<name>.sh
+# (repo-local, and a marketplace CLONE — no version segment interposed) and
+# claimed that was the same tail as "the installed marketplace copy". It is
+# not: the copy CLAUDE_PLUGIN_ROOT actually resolves and RUNS is the plugin
+# CACHE, which interposes a VERSION directory
+# (quetrex-factory/<version>/scripts/<name>.sh, e.g. .../1.7.3/scripts/
+# merge-gate.sh) — never matched by the narrowed regex, so a Write to the
+# copy that governs EVERY armed repo on the machine went from DENY (40feac8)
+# to silent ALLOW. The fix restores the pre-one-copy (hooks|scripts)/
+# <name>.sh floor ALONGSIDE the new shapes (closing SEC-ONECOPY-2 too — a
+# forked/older-layout repo that still ships the floor under hooks/ or a
+# bare scripts/ stays protected) and adds the versioned-cache shape. This AC
+# now reflects the CORRECTED protected set — four shapes, all DENY:
+#   1. plugins/quetrex-factory/scripts/<name>.sh                 (repo-local)
+#   2. .../marketplaces/.../quetrex-factory/scripts/<name>.sh    (marketplace clone)
+#   3. .../cache/.../quetrex-factory/<version>/scripts/<name>.sh (installed CACHE — the one that RUNS)
+#   4. (hooks|scripts)/<name>.sh anywhere                        (pre-one-copy floor, restored)
+# and the QUETREX_UNLOCK_FLOOR=1 unlock must still permit every true positive.
+# =============================================================================
+FLOOR_NAMES="deny-guard secret-scan enforce-branch merge-gate verify-gate verify-gate-quick-chain"
+
+# --- false positives: paths that carry NONE of the four protected shapes ---
+FALSE_POSITIVE_PATHS=(
+  "src/merge-gate.sh"
+  "./secret-scan.sh"
+  "notscripts/merge-gate.sh"
+  "myhooks/deny-guard.sh"
+)
+FP_DENY=0
+for p in "${FALSE_POSITIVE_PATHS[@]}"; do
+  OUT="$(fire "$(jq -cn --arg p "$p" '{tool_name:"Write",tool_input:{file_path:$p}}')")"
+  is_deny "$OUT" && { FP_DENY=$((FP_DENY+1)); echo "# ONE-COPY AC14 false-positive miss: [$p] -> [$OUT]"; }
+done
+[ "$FP_DENY" -eq 0 ] \
+  && ok "ONE-COPY AC14: 0 of ${#FALSE_POSITIVE_PATHS[@]} false-positive paths (no protected shape at all) produce a deny" \
+  || notok "ONE-COPY AC14: expected 0 deny decisions among the false-positive set, got $FP_DENY"
+
+# --- true positives: repo-local + marketplace-clone + versioned CACHE
+# (the shape that actually executes, C1) + the restored old floor (C1 /
+# SEC-ONECOPY-2) must ALL deny, and ALL allow once unlocked. -----------------
+TP_PATHS=()
+for name in $FLOOR_NAMES; do
+  TP_PATHS+=("$TMP/repo/plugins/quetrex-factory/scripts/${name}.sh")
+  TP_PATHS+=("$TMP/fakehome/.claude/plugins/marketplaces/quetrex/plugins/quetrex-factory/scripts/${name}.sh")
+  TP_PATHS+=("$TMP/fakehome/.claude/plugins/cache/quetrex/quetrex-factory/1.7.3/scripts/${name}.sh")
+  TP_PATHS+=("hooks/${name}.sh")
+  TP_PATHS+=("a/b/hooks/${name}.sh")
+  TP_PATHS+=("tools/scripts/${name}.sh")
+done
+TP_TOTAL="${#TP_PATHS[@]}"
+TP_DENY=0
+for p in "${TP_PATHS[@]}"; do
+  OUT="$(fire "$(jq -cn --arg p "$p" '{tool_name:"Write",tool_input:{file_path:$p}}')")"
+  is_deny "$OUT" || echo "# ONE-COPY AC14 true-positive miss (expected deny): [$p] -> [$OUT]"
+  is_deny "$OUT" && TP_DENY=$((TP_DENY+1))
+done
+[ "$TP_DENY" -eq "$TP_TOTAL" ] \
+  && ok "ONE-COPY AC14: $TP_TOTAL of $TP_TOTAL true-positive paths (repo-local + marketplace-clone + versioned cache + old floor) deny" \
+  || notok "ONE-COPY AC14: expected $TP_TOTAL deny decisions among the true-positive set, got $TP_DENY"
+
+TP_ALLOW=0
+for p in "${TP_PATHS[@]}"; do
+  OUT="$(printf '%s' "$(jq -cn --arg p "$p" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+    | QUETREX_UNLOCK_FLOOR=1 bash "$GUARD" 2>&1)"
+  is_deny "$OUT" && echo "# ONE-COPY AC14 unlock miss (expected allow): [$p] -> [$OUT]"
+  is_deny "$OUT" || TP_ALLOW=$((TP_ALLOW+1))
+done
+[ "$TP_ALLOW" -eq "$TP_TOTAL" ] \
+  && ok "ONE-COPY AC14: with QUETREX_UNLOCK_FLOOR=1, $TP_TOTAL of $TP_TOTAL true-positive paths are NOT denied (unlocked)" \
+  || notok "ONE-COPY AC14: expected 0 deny decisions with the unlock set, got $((TP_TOTAL-TP_ALLOW)) still denied"
+
+# --- C3 (review finding): the installed shapes (2 and 3 above) stay
+# protected even from an UNARMED session — they are machine-global, not a
+# property of the session's own repo. Fired with an explicit UNARMED cwd
+# (a fresh git repo with no .quetrex/project.json), never the ambient cwd
+# fire() uses elsewhere in this file (which is this armed checkout).
+UNARMED_C3="$(mktemp -d)"
+git -C "$UNARMED_C3" init -q -b main >/dev/null 2>&1
+C3_DENY=0; C3_TOTAL=0
+for name in $FLOOR_NAMES; do
+  for p in \
+    "$TMP/fakehome/.claude/plugins/marketplaces/quetrex/plugins/quetrex-factory/scripts/${name}.sh" \
+    "$TMP/fakehome/.claude/plugins/cache/quetrex/quetrex-factory/1.7.3/scripts/${name}.sh"
+  do
+    C3_TOTAL=$((C3_TOTAL+1))
+    OUT="$(printf '%s' "$(jq -cn --arg p "$p" --arg d "$UNARMED_C3" '{tool_name:"Write",tool_input:{file_path:$p},cwd:$d}')" | bash "$GUARD" 2>&1)"
+    is_deny "$OUT" && C3_DENY=$((C3_DENY+1)) || echo "# C3 miss (expected deny from an UNARMED session): [$p] -> [$OUT]"
+  done
+done
+rm -rf "$UNARMED_C3"
+[ "$C3_DENY" -eq "$C3_TOTAL" ] \
+  && ok "C3: $C3_TOTAL of $C3_TOTAL installed-plugin-shape writes deny from an UNARMED session (machine-global, not repo-scoped)" \
+  || notok "C3: expected $C3_TOTAL deny decisions from an unarmed session, got $C3_DENY"
+
+# C1 FAIL-FIRST (mechanical): at this task's own base sha (2ffde3a), the
+# versioned-cache shape (the one that actually EXECUTES) was a silent
+# ALLOW, and the pre-one-copy (hooks|scripts)/ floor was also a silent
+# ALLOW — both regressions this AC now proves fixed above.
+C1_BASE_SHA="2ffde3a"
+if ! git -C "$ROOT" cat-file -e "${C1_BASE_SHA}^{commit}" 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$C1_BASE_SHA" 2>/dev/null || true
+fi
+if ! git -C "$ROOT" cat-file -e "${C1_BASE_SHA}^{commit}" 2>/dev/null; then
+  notok "C1 FAIL-FIRST: baseline commit $C1_BASE_SHA is not reachable in this checkout — cannot prove the regression existed pre-fix"
+else
+  OLD_GUARD_C1="$TMP/.old-pfg-c1.sh"
+  git -C "$ROOT" show "$C1_BASE_SHA:.claude/hooks/protected-files-guard.sh" > "$OLD_GUARD_C1" 2>/dev/null
+  OLD_HITS=0
+  for p in \
+    "$TMP/fakehome/.claude/plugins/cache/quetrex/quetrex-factory/1.7.3/scripts/merge-gate.sh" \
+    "hooks/deny-guard.sh" \
+    "a/b/hooks/enforce-branch.sh" \
+    "tools/scripts/merge-gate.sh"
+  do
+    OUT_OLD="$(printf '%s' "$(jq -cn --arg p "$p" '{tool_name:"Write",tool_input:{file_path:$p}}')" | bash "$OLD_GUARD_C1" 2>&1)"
+    is_deny "$OUT_OLD" && OLD_HITS=$((OLD_HITS+1))
+  done
+  [ "$OLD_HITS" -eq 0 ] \
+    && ok "C1 FAIL-FIRST: at $C1_BASE_SHA, 0 of 4 regressed shapes (versioned cache + 3 old-floor variants) were denied — the regression is real, this is a genuine fix" \
+    || notok "C1 FAIL-FIRST: $OLD_HITS/4 regressed shapes were already denied at $C1_BASE_SHA — cannot demonstrate this is new coverage"
+fi
 
 # =============================================================================
 # AC14 — write-shaped Bash commands -> DENY; read-only controls -> silent.
 # =============================================================================
-TARGET14="$TMP/repo/.claude/hooks/verify-gate.sh"
+TARGET14="$TMP/repo/plugins/quetrex-factory/scripts/verify-gate.sh"
 WRITE_CMDS=(
   "cp /tmp/x $TARGET14"
   "mv /tmp/x $TARGET14"
@@ -203,10 +341,15 @@ done
 # so the fixture's own "npm test" is not filtered as heavy.
 # =============================================================================
 F17="$TMP/ac17"
-mkdir -p "$F17/.claude" "$F17/fakebin"
+mkdir -p "$F17/.claude" "$F17/.quetrex" "$F17/fakebin"
 git -C "$F17" init -q -b main 2>/dev/null || git -C "$F17" init -q 2>/dev/null
 git -C "$F17" config user.email t@t; git -C "$F17" config user.name t
 cp "$ROOT/.claude/CLAUDE.md" "$F17/.claude/CLAUDE.md"
+# ARMED: verify-gate.sh now gates on .quetrex/project.json ("unarmed repo =
+# no gates at all") — without this the hook would exit 0 before ever
+# resolving a chain, and this section's ledger assertions would go red for a
+# reason unrelated to what AC17 tests.
+echo '{}' > "$F17/.quetrex/project.json"
 git -C "$F17" add -A; git -C "$F17" commit -qm init
 
 # A `npm` shim on PATH so all 4 "## Verification" commands genuinely RUN and
@@ -247,12 +390,14 @@ OTHER17=$(jq -s --argjson known 4 '
 # records it (never silent).
 # =============================================================================
 REPO_UNLOCK="$TMP/repo-unlock"
-mkdir -p "$REPO_UNLOCK/.claude/hooks"
+mkdir -p "$REPO_UNLOCK/plugins/quetrex-factory/scripts" "$REPO_UNLOCK/.quetrex"
 git -C "$REPO_UNLOCK" init -q -b main 2>/dev/null || git -C "$REPO_UNLOCK" init -q 2>/dev/null
 git -C "$REPO_UNLOCK" config user.email t@t; git -C "$REPO_UNLOCK" config user.name t
-git -C "$REPO_UNLOCK" commit -q --allow-empty -m init
+# ARMED: the guard now gates on .quetrex/project.json.
+echo '{}' > "$REPO_UNLOCK/.quetrex/project.json"
+git -C "$REPO_UNLOCK" add -A; git -C "$REPO_UNLOCK" commit -q -m init
 
-OUT_UNLOCK="$(printf '%s' "$(jq -cn --arg p "$REPO_UNLOCK/.claude/hooks/verify-gate.sh" --arg cwd "$REPO_UNLOCK" \
+OUT_UNLOCK="$(printf '%s' "$(jq -cn --arg p "$REPO_UNLOCK/plugins/quetrex-factory/scripts/verify-gate.sh" --arg cwd "$REPO_UNLOCK" \
   '{tool_name:"Write",tool_input:{file_path:$p},cwd:$cwd}')" \
   | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR=1 bash "$GUARD" 2>&1)"
 
@@ -267,7 +412,7 @@ printf '%s' "$OUT_UNLOCK" | grep -q '"permissionDecision":"deny"' \
   || notok "CORRECTION 2: no unlock record was written"
 
 # --- unlock does NOT apply without the env var (default stays denied) ------
-OUT_STILL_DENIED="$(printf '%s' "$(jq -cn --arg p "$REPO_UNLOCK/.claude/hooks/verify-gate.sh" --arg cwd "$REPO_UNLOCK" \
+OUT_STILL_DENIED="$(printf '%s' "$(jq -cn --arg p "$REPO_UNLOCK/plugins/quetrex-factory/scripts/verify-gate.sh" --arg cwd "$REPO_UNLOCK" \
   '{tool_name:"Write",tool_input:{file_path:$p},cwd:$cwd}')" \
   | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" bash "$GUARD" 2>&1)"
 is_deny "$OUT_STILL_DENIED" \
@@ -283,7 +428,7 @@ is_deny "$OUT_STILL_DENIED" \
 # indirection) must be closed too. Every assertion below drives the SHIPPED
 # hook end to end.
 # =============================================================================
-SEC_TARGET="$TMP/repo/.claude/hooks/verify-gate.sh"
+SEC_TARGET="$TMP/repo/plugins/quetrex-factory/scripts/verify-gate.sh"
 
 sec_allow() {  # sec_allow <label> <raw-command-string>
   local label="$1" cmd="$2" payload out
@@ -309,8 +454,8 @@ sec_deny() {  # sec_deny <label> <raw-command-string>
 # SEC-7: the exact two commands the security review reported as wrongly denied.
 sec_allow "grep redirects elsewhere, protected path only a READ arg" \
   "grep -n QUICK $SEC_TARGET > $TMP/sec7-out.txt"
-sec_allow "PARITY regeneration procedure this repo's own CLAUDE.md mandates" \
-  "cd $TMP/repo/.claude/hooks && shasum -a 256 deny-guard.sh secret-scan.sh enforce-branch.sh merge-gate.sh verify-gate.sh > PARITY.sha256"
+sec_allow "hash-and-checksum procedure of the same read-many/write-elsewhere shape" \
+  "cd $TMP/repo/plugins/quetrex-factory/scripts && shasum -a 256 deny-guard.sh secret-scan.sh enforce-branch.sh merge-gate.sh verify-gate.sh > checksums.txt"
 sec_allow "cp READS the protected path, writes elsewhere" \
   "cp $SEC_TARGET $TMP/sec7-backup.sh"
 
@@ -323,8 +468,8 @@ sec_deny "python3 -c inline write" "python3 -c \"open('$SEC_TARGET','w').write('
 sec_deny "node -e inline write" "node -e \"require('fs').writeFileSync('$SEC_TARGET','x')\""
 
 # SEC-4: path normalization (./ and ../).
-sec_deny "./ path fragment" "cp $TMP/x $TMP/repo/.claude/hooks/./verify-gate.sh"
-sec_deny "../ path fragment" "cp $TMP/x $TMP/repo/.claude/hooks/sub/../verify-gate.sh"
+sec_deny "./ path fragment" "cp $TMP/x $TMP/repo/plugins/quetrex-factory/scripts/./verify-gate.sh"
+sec_deny "../ path fragment" "cp $TMP/x $TMP/repo/plugins/quetrex-factory/scripts/sub/../verify-gate.sh"
 
 # SEC-4: two-step symlink indirection (real sequential execution — the
 # symlink genuinely exists on disk by the time the second command is
@@ -374,11 +519,10 @@ fi
 # protected path as a pure READ argument still allows -- is re-asserted at
 # the end of this section.
 # =============================================================================
-# SEC13_DIR MUST be a real ".../hooks" path segment (not merely containing
-# the substring "hooks") -- names_protected_path's PROT_PATH_ERE requires
-# "hooks" or "scripts" as its OWN path segment, exactly the real vector
-# shape (`.claude/hooks/` / plugin `scripts/`), same directory SEC_TARGET
-# already lives in.
+# SEC13_DIR MUST be a real ".../quetrex-factory/scripts" path (not merely
+# containing the substring "scripts") -- names_protected_path's
+# PROT_PATH_ERE requires the "quetrex-factory/scripts/" segment specifically
+# (the one-copy location), same directory SEC_TARGET already lives in.
 SEC13_DIR="$(dirname "$SEC_TARGET")"
 mkdir -p "$SEC13_DIR"
 SEC13_TARGET_NOSLASH="$SEC13_DIR"
@@ -547,10 +691,10 @@ else
   ok "AC11 FAIL-FIRST: protected-files-guard.sh does not exist at ff16905 (pre-#119 baseline) — this is new machinery"
 fi
 
-DENY_GUARD="$ROOT/.claude/hooks/deny-guard.sh"
-SECRET_SCAN="$ROOT/.claude/hooks/secret-scan.sh"
+DENY_GUARD="$ROOT/plugins/quetrex-factory/scripts/deny-guard.sh"
+SECRET_SCAN="$ROOT/plugins/quetrex-factory/scripts/secret-scan.sh"
 BASELINE_HITS=0
-PAYLOAD_AC13="$(jq -cn '{tool_name:"Write",tool_input:{file_path:".claude/hooks/verify-gate.sh"}}')"
+PAYLOAD_AC13="$(jq -cn '{tool_name:"Write",tool_input:{file_path:"plugins/quetrex-factory/scripts/verify-gate.sh"}}')"
 for existing in "$DENY_GUARD" "$SECRET_SCAN"; do
   [ -f "$existing" ] || continue
   OUT_EXIST="$(printf '%s' "$PAYLOAD_AC13" | bash "$existing" 2>&1)"

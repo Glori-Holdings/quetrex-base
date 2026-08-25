@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test/enforce-branch.test.sh — contract test for .claude/hooks/enforce-branch.sh
+# test/enforce-branch.test.sh — contract test for plugins/quetrex-factory/scripts/enforce-branch.sh
 #
 # Run: bash test/enforce-branch.test.sh
 #
@@ -22,15 +22,27 @@
 # parses the command, and an invocation that NAMES a nonexistent directory is no
 # longer judged against the session repo.
 #
-# The gate ships in TWO copies -- this repo (the `quetrex` plugin) and
-# quetrex-factory/scripts/enforce-branch.sh (what every armed repo runs). Point
-# the suite at either:
+# ONE COPY (ONE-COPY task): the gate now lives in exactly one path,
+# plugins/quetrex-factory/scripts/enforce-branch.sh, published to the
+# quetrex-plugins marketplace by git-subdir from this exact tree. Point the
+# suite at an installed/cached copy on disk to prove that copy is current:
 #   QX_ENFORCE_BRANCH_HOOK=/path/to/enforce-branch.sh bash test/enforce-branch.test.sh
 
 set -uo pipefail
 
+# ONE-COPY round 2 hygiene (reviewer-reported): this session's ambient
+# environment can carry QUETREX_UNLOCK_FLOOR=1 from unrelated prior work in
+# the SAME shell (it is not cleared between unrelated commands), and every
+# floor script honors it as the intentional operator unlock. A test that
+# asserts a floor DENY without isolating this var silently asserts nothing
+# once that happens - unset it here so this file's own "locked" assertions
+# are never contaminated by ambient state; any assertion that WANTS the
+# unlocked case still sets QUETREX_UNLOCK_FLOOR=1 explicitly on that one
+# invocation, which overrides this.
+unset QUETREX_UNLOCK_FLOOR
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOOK="${QX_ENFORCE_BRANCH_HOOK:-$REPO_ROOT/.claude/hooks/enforce-branch.sh}"
+HOOK="${QX_ENFORCE_BRANCH_HOOK:-$REPO_ROOT/plugins/quetrex-factory/scripts/enforce-branch.sh}"
 
 if [ ! -f "$HOOK" ]; then
   echo "FAIL: hook not found at $HOOK"
@@ -57,14 +69,19 @@ git -C "$MAINREPO" config user.name T
 echo x > "$MAINREPO/README.md"
 git -C "$MAINREPO" add README.md
 git -C "$MAINREPO" commit -q -m "chore: initial"
+mkdir -p "$MAINREPO/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$MAINREPO/.quetrex/project.json"
 
 # A second checkout on a FEATURE branch — the normal place work happens.
 FEATREPO="$WORK/onfeature"
 git -C "$MAINREPO" worktree add -q -b claude/work "$FEATREPO" main
+mkdir -p "$FEATREPO/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$FEATREPO/.quetrex/project.json"
 
 # A repo with no commits at all (unborn HEAD, already named main).
 FRESH="$WORK/fresh"
-mkdir -p "$FRESH"
+mkdir -p "$FRESH/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$FRESH/.quetrex/project.json"
 git -C "$FRESH" init -q -b main
 
 NL=$'\n'

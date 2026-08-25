@@ -28,7 +28,7 @@
 #            name so a silent removal is caught here too.
 #
 # DEFECT 2 — the spec-branch push is denied by this repo's own force-push hook.
-#   Step 6A published the spec branch with `git push -f`. .claude/hooks/
+#   Step 6A published the spec branch with `git push -f`. plugins/quetrex-factory/scripts/
 #   deny-guard.sh DENIES unconditional force-push. QDM-4 only survived because
 #   the branch was brand new and the operator's session hand-retried without
 #   `-f`; ANY re-dispatch of an existing task hits the deny and the dispatch
@@ -65,10 +65,21 @@
 
 set -uo pipefail
 
+# ONE-COPY round 2 hygiene (reviewer-reported): this session's ambient
+# environment can carry QUETREX_UNLOCK_FLOOR=1 from unrelated prior work in
+# the SAME shell (it is not cleared between unrelated commands), and every
+# floor script honors it as the intentional operator unlock. A test that
+# asserts a floor DENY without isolating this var silently asserts nothing
+# once that happens - unset it here so this file's own "locked" assertions
+# are never contaminated by ambient state; any assertion that WANTS the
+# unlocked case still sets QUETREX_UNLOCK_FLOOR=1 explicitly on that one
+# invocation, which overrides this.
+unset QUETREX_UNLOCK_FLOOR
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEMPLATE="$REPO_ROOT/.claude/lib/cloud-build-routine.md"
 COMMAND="$REPO_ROOT/.claude/commands/task-build.md"
-DENY_GUARD="$REPO_ROOT/.claude/hooks/deny-guard.sh"
+DENY_GUARD="$REPO_ROOT/plugins/quetrex-factory/scripts/deny-guard.sh"
 
 for f in "$TEMPLATE" "$COMMAND" "$DENY_GUARD"; do
   if [ ! -f "$f" ]; then
@@ -91,7 +102,20 @@ pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'NOT OK - %s\n' "$1"; FAIL=1; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/qx-dispatch-transport.XXXXXX")"
-cleanup() { rm -rf "$WORK"; }
+# C5 (review finding, medium) FOLLOW-ON: deny-guard.sh now resolves a `git
+# -C <dir>` invocation's arming from THAT directory (per-invocation, not
+# just the ambient session — see test/cross-repo-arming.test.sh). The
+# AC2-b negative control below uses `-C /tmp/wt` as a stand-in for "some
+# worktree directory"; it needs to be a REAL, ARMED directory for the same
+# reason hook_verdict has always needed the process's own ambient cwd (this
+# repo) to be armed. Fixed literal path (not mktemp -d), matching
+# test/deny-guard-push-delete.test.sh's identical fixture and rationale.
+WT_FIXTURE="/tmp/wt"
+rm -rf "$WT_FIXTURE"
+mkdir -p "$WT_FIXTURE/.quetrex"
+git -C "$WT_FIXTURE" init -q -b main >/dev/null 2>&1
+printf '{"branchPrefix":"claude/"}' > "$WT_FIXTURE/.quetrex/project.json"
+cleanup() { rm -rf "$WORK" "$WT_FIXTURE"; }
 trap cleanup EXIT
 
 # --- extractors, anchored on TEXT so an inserted line above never breaks them --

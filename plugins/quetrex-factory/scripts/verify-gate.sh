@@ -54,14 +54,18 @@
 #      dependencies: {"requiredEnv": {"<exact command string from verify[]>":
 #      ["VAR_NAME", ...]}}. See "DECLARATIVE ENV SKIP" below.
 #   2. $ROOT/.claude/CLAUDE.md      "## Verification" fenced command block
-#   3. autodetect (package.json scripts / Makefile / pyproject / go.mod / Cargo)
 # If none resolves, there is nothing to gate -> allow finish (exit 0).
 #
 # Worktree-safe root: $CLAUDE_PROJECT_DIR first, then `git rev-parse` from the
 # session cwd. All artifacts live under $ROOT/.quetrex/.
 #
+# ARMED-ONLY (ONE-COPY): a repo with no $ROOT/.quetrex/project.json is not a
+# Quetrex-managed repo — per "unarmed repo = no gates at all" this hook exits 0
+# immediately after ROOT resolves, before any other decision (deliberate, not a bug).
+#
 # The ONLY conditions that allow finish without a block:
-#   - not a git repo / no verify chain resolvable anywhere (nothing to gate), or
+#   - not a git repo / repo is unarmed / no verify chain resolvable anywhere
+#     (nothing to gate), or
 #   - the chain resolved AND every command either exited 0 or was declaratively
 #     SKIPPED for a genuinely-absent required env var (PROVEN green by exit
 #     codes; a skip is never itself a pass — see "DECLARATIVE ENV SKIP").
@@ -149,6 +153,12 @@
 
 set -uo pipefail
 
+# --- qx_repo_armed: the ONE shared arming predicate (ONE-COPY round 2) -----
+QX_ARMED_HELPER="$(dirname "${BASH_SOURCE[0]}")/qx-armed.sh"
+if ! source "$QX_ARMED_HELPER" 2>/dev/null || ! command -v qx_repo_armed >/dev/null 2>&1; then
+  qx_repo_armed() { [ -n "${1:-}" ] && [ -f "$1/.quetrex/project.json" ]; }
+fi
+
 MAX_ATTEMPTS="${QUETREX_VERIFY_MAX:-3}"
 
 # --- read hook input (best-effort; absence is fine) ------------------------
@@ -176,6 +186,16 @@ if [ -z "$ROOT" ]; then
 fi
 # Nothing to gate if we cannot locate a repo root.
 [ -n "$ROOT" ] && [ -d "$ROOT" ] || exit 0
+
+# --- armed-only gate (ONE-COPY): an unarmed repo has no gates at all -------
+# Per the operator rule "unarmed repo = no gates at all", a repo with no
+# $ROOT/.quetrex/project.json is not Quetrex-managed. Exit before QDIR/mkdir
+# so an unarmed repo never gains a .quetrex/ directory as a side effect.
+# SEC-ONECOPY-1 (round 2): qx_repo_armed also honors project.json tracked at
+# HEAD / the default branch tip, not just the working-tree file, so deleting
+# the working-tree copy of an already-committed project.json no longer
+# disarms this gate.
+qx_repo_armed "$ROOT" || exit 0
 
 QDIR="$ROOT/.quetrex"
 LEDGER="$QDIR/verify-ledger.jsonl"
@@ -207,7 +227,7 @@ case "$EVENT" in Stop|SubagentStop) QUICK=1 ;; esac
 
 # --- fail-closed time budget -------------------------------------------------
 # The chain below runs synchronously inside a Stop (900s) / SubagentStop
-# (600s) hook timeout (wired in quetrex-install-project-gates.sh). If the
+# (600s) hook timeout (wired in plugins/quetrex-factory/hooks/hooks.json). If the
 # chain runs long enough for the hook to be killed mid-run, no block is ever
 # emitted -> the finish is silently allowed with the tree unproven (fail-open
 # via timeout). To fail CLOSED instead, every verify command below runs under
@@ -359,42 +379,26 @@ resolve_from_claude_md() {
   [ "${#CHAIN[@]}" -gt 0 ]
 }
 
-resolve_autodetect() {
-  local pkg="$ROOT/package.json"
-  if [ -f "$pkg" ]; then
-    local key
-    for key in typecheck type-check tsc lint build test; do
-      if jq -e --arg k "$key" '.scripts[$k] // empty' "$pkg" >/dev/null 2>&1; then
-        CHAIN+=("npm run $key")
-      fi
-    done
-    [ "${#CHAIN[@]}" -gt 0 ] && return 0
-  fi
-  if [ -f "$ROOT/Makefile" ] || [ -f "$ROOT/makefile" ]; then
-    local mk; mk="$ROOT/Makefile"; [ -f "$mk" ] || mk="$ROOT/makefile"
-    grep -qE '^(lint|build|test|check):' "$mk" 2>/dev/null && {
-      grep -qE '^lint:'  "$mk" && CHAIN+=("make lint")
-      grep -qE '^build:' "$mk" && CHAIN+=("make build")
-      grep -qE '^test:'  "$mk" && CHAIN+=("make test")
-      grep -qE '^check:' "$mk" && CHAIN+=("make check")
-      return 0
-    }
-  fi
-  if [ -f "$ROOT/pyproject.toml" ] || [ -f "$ROOT/setup.cfg" ]; then
-    CHAIN+=("python -m pytest -q"); return 0
-  fi
-  if [ -f "$ROOT/go.mod" ]; then
-    CHAIN+=("go build ./..." "go test ./..."); return 0
-  fi
-  if [ -f "$ROOT/Cargo.toml" ]; then
-    CHAIN+=("cargo build" "cargo test"); return 0
-  fi
-  return 1
-}
-
-resolve_from_verify_json || resolve_from_claude_md || resolve_autodetect || {
-  # No chain resolvable anywhere -> nothing to gate.
-  exit 0
+resolve_from_verify_json || resolve_from_claude_md || {
+  # C6 (review finding, medium): by this point in the script the repo IS
+  # armed — the ARMED-ONLY exit above (`[ -f "$ROOT/.quetrex/project.json" ]
+  # || exit 0`) already returned for any unarmed repo — so "no chain
+  # resolvable anywhere" here describes a MISCONFIGURED armed repo, never an
+  # unmanaged one. AC5 deleted resolve_autodetect (a sanctioned change) but
+  # left this path exiting 0 SILENTLY, which turns a repo that lost (or
+  # never got) both its verify.json and its CLAUDE.md Verification fence
+  # into a permanent, invisible no-op: Stop is allowed on any tree, red or
+  # not, with nothing anywhere signaling that the gate stopped gating.
+  # Unlike C2/SEC-ONECOPY-1 (an rm one command away), this leaves NO
+  # visible signal at all — measured: an always-red lint script, no
+  # verify.json, no CLAUDE.md fence, exit=0 out=[] (Stop allowed on red).
+  #
+  # THE FIX. Block once, with one labelled, actionable line, exactly the
+  # shape every other reason in this file already uses — self-resolving
+  # the moment /quetrex:init writes .quetrex/verify.json, same as any other
+  # blocked reason here resolves once its underlying cause is fixed. An
+  # UNARMED repo is unaffected: it already exited above, before this line.
+  block "VERIFY GATE: this repo is armed (.quetrex/project.json) but has no verify chain — run /quetrex:init to write .quetrex/verify.json. BLOCKS finish."
 }
 
 mkdir -p "$QDIR"
@@ -682,7 +686,46 @@ fi
 
 # Cap reached -> escalate. Persist a marker the merge gate reads so red code
 # physically cannot merge even once the agent is finally allowed to stop.
-touch "$ESCALATION" 2>/dev/null
+# ESCALATION-BRANCH-PIN (C4 FIX, review finding, high): the marker used to
+# record only the HEAD sha, and merge-gate.sh GATE 1 ignored it once that
+# sha was merely NOT AN ANCESTOR of HEAD — which a plain `git commit
+# --amend` satisfies despite preserving the branch and every bit of the
+# work, silently clearing a live escalation with no tampering required.
+# The marker now ALSO records the branch (CUR_BRANCH, already resolved
+# above), and GATE 1's staleness test is "does the marker name a DIFFERENT
+# branch than the one being evaluated", not "is the sha an ancestor" — an
+# amend or rebase that stays on the same branch no longer clears it. When
+# HEAD was detached at write time (CUR_BRANCH empty), the branch field is
+# omitted rather than written empty — GATE 1 treats a marker with no
+# resolvable branch as it always has treated a legacy/malformed one: fail
+# CLOSED, deny. When HEAD is unresolvable (e.g. a repo with 0 commits) the
+# legacy empty-file shape is written instead — `jq -e .sha` then fails,
+# which is the fail-closed default GATE 1 already had.
+# NOTE: `git rev-parse HEAD` on an unborn branch (0 commits) is NOT silent —
+# it prints the literal, unresolved string "HEAD" to STDOUT (its "fatal:
+# ambiguous argument" explanation goes to stderr instead), so a bare
+# `[ -n "$HEAD_SHA" ]` reads that literal as "resolved" and would embed the
+# word HEAD as if it were a real sha. Validate the SHAPE, not just presence.
+if [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  ESC_REASON=$(printf 'verify self-heal cap reached (%s attempts) on `%s`' "$MAX_ATTEMPTS" "$FAILED_CMD")
+  if command -v jq >/dev/null 2>&1; then
+    if [ -n "$CUR_BRANCH" ]; then
+      jq -cn --arg sha "$HEAD_SHA" --arg branch "$CUR_BRANCH" --arg reason "$ESC_REASON" '{sha:$sha, branch:$branch, reason:$reason}' > "$ESCALATION" 2>/dev/null
+    else
+      jq -cn --arg sha "$HEAD_SHA" --arg reason "$ESC_REASON" '{sha:$sha, reason:$reason}' > "$ESCALATION" 2>/dev/null
+    fi
+  else
+    esc_esc=$(printf '%s' "$ESC_REASON" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
+    if [ -n "$CUR_BRANCH" ]; then
+      esc_branch_esc=$(printf '%s' "$CUR_BRANCH" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
+      printf '{"sha":"%s","branch":"%s","reason":"%s"}' "$HEAD_SHA" "$esc_branch_esc" "$esc_esc" > "$ESCALATION" 2>/dev/null
+    else
+      printf '{"sha":"%s","reason":"%s"}' "$HEAD_SHA" "$esc_esc" > "$ESCALATION" 2>/dev/null
+    fi
+  fi
+else
+  : > "$ESCALATION" 2>/dev/null
+fi
 
 # ANNOUNCE ONCE, THEN ALLOW THE STOP. This is the fix for a measured defect.
 #

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # merge-gate-boundedquick.test.sh — proves the SEC-1/SEC-3 fix to
 # merge-gate.sh's GATE 3 (security review, 2026-08-21, coordinator-
-# authorized scope-limited edit — see .claude/hooks/merge-gate.sh's own
-# inline comments at the RED jq block and the :1647 chain-resolution
-# fallback for the full rationale).
+# authorized scope-limited edit — see
+# plugins/quetrex-factory/scripts/merge-gate.sh's own inline comments at the
+# RED jq block and the :1647 chain-resolution fallback for the full
+# rationale).
 #
 # THE DEFECT. verify-gate.sh's bounded quick chain can now write a
 # `skipReason:"boundedQuick"` ledger line for a command that was excluded
@@ -33,8 +34,19 @@
 # #119 lands).
 
 set -uo pipefail
+
+# ONE-COPY round 2 hygiene (reviewer-reported): this session's ambient
+# environment can carry QUETREX_UNLOCK_FLOOR=1 from unrelated prior work in
+# the SAME shell (it is not cleared between unrelated commands), and every
+# floor script honors it as the intentional operator unlock. A test that
+# asserts a floor DENY without isolating this var silently asserts nothing
+# once that happens - unset it here so this file's own "locked" assertions
+# are never contaminated by ambient state; any assertion that WANTS the
+# unlocked case still sets QUETREX_UNLOCK_FLOOR=1 explicitly on that one
+# invocation, which overrides this.
+unset QUETREX_UNLOCK_FLOOR
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOOK="${QX_MERGE_GATE_HOOK:-$ROOT/.claude/hooks/merge-gate.sh}"
+HOOK="${QX_MERGE_GATE_HOOK:-$ROOT/plugins/quetrex-factory/scripts/merge-gate.sh}"
 
 PASS=0; FAIL=0
 ok()    { PASS=$((PASS+1)); echo "ok - $1"; }
@@ -46,6 +58,7 @@ MOCKBIN="$TMP/mockbin"; mkdir -p "$MOCKBIN"
 
 mkrepo() {  # mkrepo <dir>
   mkdir -p "$1/.quetrex"
+  printf '{"branchPrefix":"claude/"}' > "$1/.quetrex/project.json"
   git -C "$1" init -q -b main
   git -C "$1" config user.email t@t
   git -C "$1" config user.name t
@@ -200,6 +213,7 @@ git -C "$FD" add .quetrex/marker.txt
 git -C "$FD" commit -qm "Y: artifact-only commit (touches only .quetrex/*)"
 HEAD_D_Y="$(git -C "$FD" rev-parse HEAD)"
 mkdir -p "$FD/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$FD/.quetrex/project.json" 2>/dev/null
 # Genuine green recorded AT X (the real code commit).
 jq -cn --arg ts "t1" --arg cmd "npm test" --arg cwd "$FD" --arg sha "$HEAD_D_X" \
   '{ts:$ts,cmd:$cmd,cwd:$cwd,sha:$sha,exit:0,tail:"ok"}' >> "$FD/.quetrex/verify-ledger.jsonl"
@@ -341,6 +355,7 @@ git -C "$FC" rm -q .quetrex/verify.json
 git -C "$FC" commit -qm "PR: delete verify.json"
 HEAD_C="$(git -C "$FC" rev-parse HEAD)"
 mkdir -p "$FC/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$FC/.quetrex/project.json" 2>/dev/null
 # lint and test genuinely ran and passed at HEAD_C. e2e -- still required at
 # BASE, still genuinely broken (exit 1) if it were ever invoked -- has NO
 # ledger entry at all: it was never run, and (per the defect above) autodetect

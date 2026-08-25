@@ -54,11 +54,22 @@
 
 set -uo pipefail
 
+# ONE-COPY round 2 hygiene (reviewer-reported): this session's ambient
+# environment can carry QUETREX_UNLOCK_FLOOR=1 from unrelated prior work in
+# the SAME shell (it is not cleared between unrelated commands), and every
+# floor script honors it as the intentional operator unlock. A test that
+# asserts a floor DENY without isolating this var silently asserts nothing
+# once that happens - unset it here so this file's own "locked" assertions
+# are never contaminated by ambient state; any assertion that WANTS the
+# unlocked case still sets QUETREX_UNLOCK_FLOOR=1 explicitly on that one
+# invocation, which overrides this.
+unset QUETREX_UNLOCK_FLOOR
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MERGE_MD="$REPO_ROOT/.claude/commands/merge.md"
-MERGE_GATE="$REPO_ROOT/.claude/hooks/merge-gate.sh"
-ENFORCE_BRANCH="$REPO_ROOT/.claude/hooks/enforce-branch.sh"
-DENY_GUARD="$REPO_ROOT/.claude/hooks/deny-guard.sh"
+MERGE_GATE="$REPO_ROOT/plugins/quetrex-factory/scripts/merge-gate.sh"
+ENFORCE_BRANCH="$REPO_ROOT/plugins/quetrex-factory/scripts/enforce-branch.sh"
+DENY_GUARD="$REPO_ROOT/plugins/quetrex-factory/scripts/deny-guard.sh"
 
 if [ ! -f "$MERGE_MD" ]; then
   echo "NOT OK - merge.md not found at $MERGE_MD"
@@ -190,6 +201,7 @@ git -C "$GATE_FIX" config user.name "Fixture"
 git -C "$GATE_FIX" remote add origin "https://github.com/glori-holdings/quetrex-base.git"
 echo "fixture" > "$GATE_FIX/README.md"
 mkdir -p "$GATE_FIX/.quetrex/plan"
+printf '{"branchPrefix":"claude/"}' > "$GATE_FIX/.quetrex/project.json" 2>/dev/null
 git -C "$GATE_FIX" add README.md
 git -C "$GATE_FIX" commit -q -m "chore: fixture commit"
 GATE_SHA="$(git -C "$GATE_FIX" rev-parse HEAD)"
@@ -398,6 +410,7 @@ git -C "$WORK" clone -q "$DEL_ORIGIN" del-repo 2>/dev/null
 git -C "$DEL_FIX" config user.email "test@example.com"
 git -C "$DEL_FIX" config user.name "Fixture"
 mkdir -p "$DEL_FIX/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$DEL_FIX/.quetrex/project.json" 2>/dev/null
 echo "fixture" > "$DEL_FIX/README.md"
 git -C "$DEL_FIX" add README.md
 git -C "$DEL_FIX" commit -q -m "chore: fixture"

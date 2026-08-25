@@ -36,7 +36,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ARCH="$REPO_ROOT/.claude/agents/architect.md"
+ARCH="$REPO_ROOT/plugins/quetrex-factory/agents/architect.md"
 DEVPIPE="$REPO_ROOT/.claude/lib/dev-pipeline.md"
 TASKBUILD="$REPO_ROOT/.claude/commands/task-build.md"
 DERIVE_TOOL="$REPO_ROOT/bin/quetrex-env-derive"

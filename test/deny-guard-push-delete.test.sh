@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test/deny-guard-push-delete.test.sh — remote REF DELETION is a catastrophic
-# command, and .claude/hooks/deny-guard.sh used to be blind to it.
+# command, and plugins/quetrex-factory/scripts/deny-guard.sh used to be blind to it.
 #
 # Run: bash test/deny-guard-push-delete.test.sh
 #
@@ -51,8 +51,19 @@
 
 set -uo pipefail
 
+# ONE-COPY round 2 hygiene (reviewer-reported): this session's ambient
+# environment can carry QUETREX_UNLOCK_FLOOR=1 from unrelated prior work in
+# the SAME shell (it is not cleared between unrelated commands), and every
+# floor script honors it as the intentional operator unlock. A test that
+# asserts a floor DENY without isolating this var silently asserts nothing
+# once that happens - unset it here so this file's own "locked" assertions
+# are never contaminated by ambient state; any assertion that WANTS the
+# unlocked case still sets QUETREX_UNLOCK_FLOOR=1 explicitly on that one
+# invocation, which overrides this.
+unset QUETREX_UNLOCK_FLOOR
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DENY_GUARD="$REPO_ROOT/.claude/hooks/deny-guard.sh"
+DENY_GUARD="$REPO_ROOT/plugins/quetrex-factory/scripts/deny-guard.sh"
 
 if [ ! -f "$DENY_GUARD" ]; then
   echo "NOT OK - required file not found: $DENY_GUARD"
@@ -67,6 +78,24 @@ fi
 FAIL=0
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'NOT OK - %s\n' "$1"; FAIL=1; }
+
+# C5 (review finding, medium) FOLLOW-ON: deny-guard.sh now resolves a `git
+# -C <dir>` invocation's arming from THAT directory (per-invocation, not
+# just the session's own repo — see test/cross-repo-arming.test.sh). Every
+# fixture below that uses `-C /tmp/wt` needs /tmp/wt to be a REAL, ARMED
+# directory for the SAME reason `hook_verdict` below has always needed the
+# process's own ambient cwd (this repo) to be armed: an explicit -C target
+# that does not exist has nothing for git to act on (mirrors
+# enforce-branch.sh's own rule), so pre-C5 these fixtures were only ever
+# proving the -C TOKENIZATION survives, not exercising a real target. Using
+# a fixed literal path (not mktemp -d) keeps every existing single-quoted
+# command string below byte-for-byte unchanged.
+WT_FIXTURE="/tmp/wt"
+rm -rf "$WT_FIXTURE"
+mkdir -p "$WT_FIXTURE/.quetrex"
+git -C "$WT_FIXTURE" init -q -b main >/dev/null 2>&1
+printf '{"branchPrefix":"claude/"}' > "$WT_FIXTURE/.quetrex/project.json"
+trap 'rm -rf "$WT_FIXTURE"' EXIT
 
 # The REAL hook, fed a REAL PreToolUse payload. No copy, no re-implementation.
 hook_verdict() {  # hook_verdict <command-string> -> "deny" | "allow"

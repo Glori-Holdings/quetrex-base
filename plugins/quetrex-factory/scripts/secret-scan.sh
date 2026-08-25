@@ -66,10 +66,16 @@ if command -v jq >/dev/null 2>&1 && printf '%s' "$input" | jq . >/dev/null 2>&1;
   JQ_OK=1
 fi
 
+# NOTE (C5 FIX, review finding, medium): TOOL_NAME/FILE_PATH extraction now
+# happens BEFORE the armed-only gate below (it used to happen after) — the
+# gate needs FILE_PATH to resolve a Write/Edit's own target repo, not just
+# the session's. Behavior for every EXISTING extraction shape is unchanged.
 TOOL_NAME=""
 CONTENT=""
+FILE_PATH=""
 if [ "$JQ_OK" -eq 1 ]; then
   TOOL_NAME=$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null)
+  FILE_PATH=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
   case "$TOOL_NAME" in
     Write) CONTENT=$(printf '%s' "$input" | jq -r '.tool_input.content // empty' 2>/dev/null) ;;
     Edit)  CONTENT=$(printf '%s' "$input" | jq -r '.tool_input.new_string // empty' 2>/dev/null) ;;
@@ -84,6 +90,7 @@ else
   # (merge-gate.sh:70-75), then FAIL CLOSED if the payload plainly carries a
   # field we were supposed to scan.
   TOOL_NAME=$(printf '%s' "$input" | tr -d '\n' | sed -n 's/.*"tool_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+  FILE_PATH=$(printf '%s' "$input" | tr -d '\n' | sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
   for k in command content new_string; do
     CONTENT=$(printf '%s' "$input" | tr -d '\n' | sed -n "s/.*\"$k\"[[:space:]]*:[[:space:]]*\"\\(.*\\)\".*/\\1/p")
     [ -n "$CONTENT" ] && break
@@ -95,6 +102,105 @@ else
     fi
     exit 0
   fi
+fi
+
+# --- armed-only gate (ONE-COPY), PER-INVOCATION for Write/Edit (C5 FIX) ----
+# SECRET-SCAN DECISION (operator-approved, most consequential line of this
+# change): per "unarmed repo = no gates at all", secret-scan IS armed-only
+# too, even though it is the one floor script whose absence can leak a
+# credential rather than merely permit sloppiness.
+#
+# C5 (review finding, medium): this used to resolve arming from the SESSION
+# alone (CLAUDE_PROJECT_DIR -> .cwd -> local git rev-parse), so a Write of a
+# high-entropy secret into an ARMED repo's own file sailed through silently
+# whenever the session happened to have been opened somewhere UNARMED — a
+# routine cross-repo shape (a scratch/onboarding session, a cloud container
+# before init). Measured: a Write payload targeting <armed>/leak.env from an
+# unarmed session cwd went from DENY (40feac8) to silent ALLOW (2ffde3a).
+#
+# THE FIX. Write/Edit resolve arming from FILE_PATH's OWN repo — the file
+# actually being written IS the target, unambiguously, with no -C/cd
+# inference needed the way deny-guard's Bash vector requires (see that
+# file's C5 fix). Bash keeps resolving from the SESSION (CLAUDE_PROJECT_DIR
+# -> .cwd -> local git rev-parse): a shell command's real target can move
+# across repos mid-command (cd, git -C, redirects to another tree) in ways
+# this file does not parse — see OBS-4 (secret-scan.sh's own history): it
+# already does NOT narrow what it scans to files under the resolved root, so
+# a Bash payload writing a secret to a path outside the session repo is
+# still caught by the SESSION being armed, unaffected by this fix.
+#
+# SEC-ONECOPY-4 (Medium, round 2): resolving Write/Edit arming from
+# FILE_PATH's own repo ALONE (with the session as a fallback only when the
+# file's own repo cannot be resolved) meant a Write into a SIBLING git repo
+# that merely lacked its own .quetrex/project.json (a scratch clone, a
+# vendored checkout, a fresh `git init` the agent made itself) went
+# unscanned even from a fully ARMED session — measured DENY at 40feac8/
+# 2ffde3a, silent ALLOW at e384c11. THE FIX (design A/C, round-2
+# orchestrator decision): same additive shape as deny-guard's SEC-ONECOPY-3
+# fix — scan iff the SESSION is armed OR the resolved target is armed. The
+# target-repo resolution below is an ADDITION to session-armed coverage,
+# never a replacement for it.
+QX_ARMED_HELPER="$(dirname "${BASH_SOURCE[0]}")/qx-armed.sh"
+if ! source "$QX_ARMED_HELPER" 2>/dev/null || ! command -v qx_repo_armed >/dev/null 2>&1; then
+  qx_repo_armed() { [ -n "$1" ] && [ -f "$1/.quetrex/project.json" ]; }
+fi
+_cwd=$(printf '%s' "$input" | tr -d '
+' | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+if [ "$JQ_OK" -eq 1 ]; then
+  _jq_cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
+  [ -n "$_jq_cwd" ] && _cwd="$_jq_cwd"
+fi
+_session_root=""
+if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "${CLAUDE_PROJECT_DIR:-}" ]; then
+  _session_root=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || _session_root="$CLAUDE_PROJECT_DIR"
+fi
+if [ -z "$_session_root" ] && [ -n "$_cwd" ] && [ -d "$_cwd" ]; then
+  _session_root=$(git -C "$_cwd" rev-parse --show-toplevel 2>/dev/null)
+fi
+[ -z "$_session_root" ] && _session_root=$(git rev-parse --show-toplevel 2>/dev/null)
+
+_target_root=""
+# A relative FILE_PATH can only be anchored against a KNOWN cwd (_cwd, from
+# the payload's own .cwd) -- never against this hook PROCESS's own ambient
+# cwd, which is an accident of where the harness happened to launch it from
+# and has nothing to do with either the session or the write's real target.
+# Resolving a bare "secrets.env" against "." silently picked up whatever
+# repo the hook process itself was invoked from (caught by this file's own
+# fixture: a relative file_path with no .cwd resolved to THIS repo, not the
+# unarmed test fixture, and wrongly denied).
+if { [ "$TOOL_NAME" = "Write" ] || [ "$TOOL_NAME" = "Edit" ]; } && [ -n "$FILE_PATH" ] \
+   && { case "$FILE_PATH" in /*) true ;; *) [ -n "$_cwd" ] ;; esac; }; then
+  _fp_dir="$FILE_PATH"
+  case "$_fp_dir" in
+    /*) : ;;
+    *) _fp_dir="$_cwd/$_fp_dir" ;;
+  esac
+  _fp_dir=$(dirname -- "$_fp_dir" 2>/dev/null)
+  # D4 (round-2 reviewer): the immediate parent may not exist yet AT ALL
+  # (a brand-new file in a brand-new, not-yet-created subdirectory —
+  # `<armed>/newdir/leak.env`, `<armed>/a/b/c/leak.env`) even though the
+  # ARMED repo it will land inside very much does. The old code required
+  # the immediate parent to already exist and fell all the way back to the
+  # session otherwise — measured ALLOW for both shapes above from an
+  # unarmed session. Walk up to the first EXISTING ancestor before asking
+  # git for its toplevel, exactly what `mkdir -p` + the eventual Write
+  # would actually land inside.
+  while [ -n "$_fp_dir" ] && [ "$_fp_dir" != "/" ] && [ ! -d "$_fp_dir" ]; do
+    _fp_dir=$(dirname -- "$_fp_dir" 2>/dev/null)
+  done
+  if [ -n "$_fp_dir" ] && [ -d "$_fp_dir" ]; then
+    _target_root=$(git -C "$_fp_dir" rev-parse --show-toplevel 2>/dev/null)
+  fi
+  # No existing ancestor resolves to a git repo at all -- fall back to the
+  # session, the same fallback the pre-C5 code always used, rather than
+  # judging a Write by NOTHING.
+  [ -z "$_target_root" ] && _target_root="$_session_root"
+else
+  _target_root="$_session_root"
+fi
+# SEC-ONECOPY-4 fix: session-armed OR target-armed, never target-only.
+if ! qx_repo_armed "$_session_root" && ! { [ -n "$_target_root" ] && qx_repo_armed "$_target_root"; }; then
+  exit 0
 fi
 
 # Mask a token for safe display: keep a 4-char prefix, hide the rest.

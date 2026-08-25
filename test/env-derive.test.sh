@@ -51,8 +51,8 @@ set -uo pipefail
 
 TOOLROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOL="$TOOLROOT/bin/quetrex-env-derive"
-HOOK="${QX_VERIFY_GATE_HOOK:-$TOOLROOT/.claude/hooks/verify-gate.sh}"
-MERGE_HOOK="${QX_MERGE_GATE_HOOK:-$TOOLROOT/.claude/hooks/merge-gate.sh}"
+HOOK="${QX_VERIFY_GATE_HOOK:-$TOOLROOT/plugins/quetrex-factory/scripts/verify-gate.sh}"
+MERGE_HOOK="${QX_MERGE_GATE_HOOK:-$TOOLROOT/plugins/quetrex-factory/scripts/merge-gate.sh}"
 INIT_MD="$TOOLROOT/.claude/commands/init.md"
 CLOUD_PREP="$TOOLROOT/bin/quetrex-cloud-prep"
 
@@ -167,6 +167,7 @@ fi
 F20i="$TMPROOT/ac20i"
 git_init_repo "$F20i"
 mkdir -p "$F20i/src" "$F20i/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F20i/.quetrex/project.json" 2>/dev/null
 cat > "$F20i/package.json" <<'EOF'
 {
   "scripts": {
@@ -238,6 +239,7 @@ else
   F20ii="$TMPROOT/ac20ii"
   git_init_repo "$F20ii"
   mkdir -p "$F20ii/src" "$F20ii/.quetrex"
+  printf '{"branchPrefix":"claude/"}' > "$F20ii/.quetrex/project.json" 2>/dev/null
   cat > "$F20ii/package.json" <<'EOF'
 {
   "scripts": {
@@ -303,6 +305,7 @@ EOF
   F20neg="$TMPROOT/ac20neg"
   git_init_repo "$F20neg"
   mkdir -p "$F20neg/src" "$F20neg/.quetrex"
+  printf '{"branchPrefix":"claude/"}' > "$F20neg/.quetrex/project.json" 2>/dev/null
   cp "$F20ii/package.json" "$F20neg/package.json"
   cp "$F20ii/.env.example" "$F20neg/.env.example"
   cp "$F20ii/src/app.js" "$F20neg/src/app.js"
@@ -338,6 +341,7 @@ fi
 F21="$TMPROOT/ac21"
 git_init_repo "$F21"
 mkdir -p "$F21/src" "$F21/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F21/.quetrex/project.json" 2>/dev/null
 cat > "$F21/.env.example" <<'EOF'
 A_URL=postgres://ac21-a-value-should-never-leak
 B_URL=ac21-b-value-should-never-leak
@@ -472,6 +476,7 @@ MUT21_DIFF="$(diff "$TOOL" "$MUT21" | grep -c '^[<>]')"
 F21neg="$TMPROOT/ac21neg"
 git_init_repo "$F21neg"
 mkdir -p "$F21neg/src" "$F21neg/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F21neg/.quetrex/project.json" 2>/dev/null
 cp "$F21/.env.example" "$F21neg/.env.example" 2>/dev/null || printf 'A_URL=x\n' > "$F21neg/.env.example"
 cat > "$F21neg/src/db.js" <<'EOF'
 const a = process.env.A_URL;
@@ -494,6 +499,7 @@ NOPE21NEG="$(jq -c '.requiredEnv["npm run nope"] // empty' "$F21neg/.quetrex/ver
 F22="$TMPROOT/ac22"
 git_init_repo "$F22"
 mkdir -p "$F22/src" "$F22/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F22/.quetrex/project.json" 2>/dev/null
 printf 'A_URL=ac22-a-value-should-never-leak\n' > "$F22/.env.example"
 cat > "$F22/src/db.js" <<'EOF'
 // db client
@@ -574,6 +580,7 @@ HOOKPARITY22="$(git -C "$F22" show HEAD:.env.example | grep -cE '^A_URL=')"
 F22neg="$TMPROOT/ac22neg"
 git_init_repo "$F22neg"
 mkdir -p "$F22neg/src" "$F22neg/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F22neg/.quetrex/project.json" 2>/dev/null
 printf 'A_URL=x\n' > "$F22neg/.env.example"
 cat > "$F22neg/src/db.js" <<'EOF'
 const a = process.env.A_URL;
@@ -610,6 +617,7 @@ fi
 F31="$TMPROOT/ac31"
 git_init_repo "$F31"
 mkdir -p "$F31/src" "$F31/.quetrex/plan"
+printf '{"branchPrefix":"claude/"}' > "$F31/.quetrex/project.json" 2>/dev/null
 cat > "$F31/src/db.js" <<'EOF'
 // db client
 // A_URL: no fallback — line 3 is the provable read
@@ -671,6 +679,7 @@ ARCH31="$(jq -r '.required_env[] | select(.name=="ARCHITECT_VAR") | .why' "$PLAN
 F31ni="$TMPROOT/ac31ni"
 git_init_repo "$F31ni"
 mkdir -p "$F31ni/src" "$F31ni/.quetrex/plan"
+printf '{"branchPrefix":"claude/"}' > "$F31ni/.quetrex/project.json" 2>/dev/null
 cp "$F31/src/db.js" "$F31ni/src/db.js"
 cp "$F31/.env.example" "$F31ni/.env.example"
 jq -cn '{verify:["npm run build"]}' > "$F31ni/.quetrex/verify.json"  # requiredEnv REMOVED
@@ -701,6 +710,7 @@ grep -qi 'plan' "$TMPROOT/ac31a.out" && pass "AC31 CONTAINMENT (a): stderr names
 
 # (b) resolved parent directory does not end in /.quetrex/plan
 mkdir -p "$F31/.quetrex/plans"
+printf '{"branchPrefix":"claude/"}' > "$F31/.quetrex/project.json" 2>/dev/null
 WRONGDIR_PLAN="$F31/.quetrex/plans/wrong.json"
 mk_plan "$WRONGDIR_PLAN" '{}'
 cp "$WRONGDIR_PLAN" "$TMPROOT/ac31-wrongdir-precopy.json"
@@ -727,6 +737,7 @@ rm -f "$SYMLINK31"
 # .quetrex/plan/<TASK_ID>.json — must be ACCEPTED.
 TMP_WT31="$(mktemp -d "${TMPDIR:-/tmp}/ac31-tmpwt.XXXXXX")"
 mkdir -p "$TMP_WT31/.quetrex/plan"
+printf '{"branchPrefix":"claude/"}' > "$TMP_WT31/.quetrex/project.json" 2>/dev/null
 DISPATCH_PLAN="$TMP_WT31/.quetrex/plan/AC31-DISPATCH.json"
 mk_plan "$DISPATCH_PLAN" '{}'
 "$TOOL" plan "$DISPATCH_PLAN" "$F31" >/dev/null 2>&1; CODE31D=$?
@@ -767,6 +778,7 @@ else
   F31E="$TMPROOT/ac31e2e"
   git_init_repo "$F31E"
   mkdir -p "$F31E/src" "$F31E/.quetrex/plan"
+  printf '{"branchPrefix":"claude/"}' > "$F31E/.quetrex/project.json" 2>/dev/null
   cat > "$F31E/src/db.js" <<'EOF'
 // db client
 // A_URL: no fallback — line 3 is the provable read
@@ -953,6 +965,7 @@ OUT23TOOL2="$("$TOOL" seed-chain "$F23tool" 2>&1)"; CODE23TOOL2=$?
 F23existing="$TMPROOT/ac23-existing"
 git_init_repo "$F23existing"
 mkdir -p "$F23existing/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F23existing/.quetrex/project.json" 2>/dev/null
 jq -cn '{verify:["npm run build"]}' > "$F23existing/.quetrex/verify.json"
 PRE23EX="$(cat "$F23existing/.quetrex/verify.json")"
 "$TOOL" seed-chain "$F23existing" "npm run other" >/dev/null 2>&1
@@ -1003,6 +1016,7 @@ unset QX_SEED_SHIM_LOG
 F24="$TMPROOT/ac24"
 git_init_repo "$F24"
 mkdir -p "$F24/src" "$F24/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F24/.quetrex/project.json" 2>/dev/null
 printf 'AC24_URL=x\n' > "$F24/.env.example"
 cat > "$F24/src/db.js" <<'EOF'
 const a = process.env.AC24_URL;
@@ -1115,6 +1129,7 @@ unset QX_DECLARE_SHIM_LOG
 F2RA="$TMPROOT/f2-readat"
 git_init_repo "$F2RA"
 mkdir -p "$F2RA/src" "$F2RA/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F2RA/.quetrex/project.json" 2>/dev/null
 printf 'FOO_URL=f2-value-should-never-leak\n' > "$F2RA/.env.example"
 cat > "$F2RA/src/db.js" <<'EOF'
 const a = process.env.FOO_URL;
@@ -1238,6 +1253,7 @@ NEIGHBOR_SWALLOW_F3="$(printf '%s\n' "$NEIGHBOR_F3" | grep -c '2>/dev/null || tr
 F3FIX="$TMPROOT/f3-fixture"
 git_init_repo "$F3FIX"
 mkdir -p "$F3FIX/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F3FIX/.quetrex/project.json" 2>/dev/null
 printf '.quetrex/verify.json\n' > "$F3FIX/.gitignore"
 jq -cn '{projectCode:"F3",branchPrefix:"claude/"}' > "$F3FIX/.quetrex/project.json"
 jq -cn '{verify:["npm test"]}' > "$F3FIX/.quetrex/verify.json"
@@ -1263,6 +1279,7 @@ printf '%s' "$OUT_F3" | grep -qi 'ignored' && pass "F3 BEHAVIORAL: git's real er
 F3FIXNEG="$TMPROOT/f3-fixture-neg"
 git_init_repo "$F3FIXNEG"
 mkdir -p "$F3FIXNEG/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F3FIXNEG/.quetrex/project.json" 2>/dev/null
 printf '.quetrex/verify.json\n' > "$F3FIXNEG/.gitignore"
 jq -cn '{projectCode:"F3",branchPrefix:"claude/"}' > "$F3FIXNEG/.quetrex/project.json"
 jq -cn '{verify:["npm test"]}' > "$F3FIXNEG/.quetrex/verify.json"

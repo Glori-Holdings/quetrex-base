@@ -44,9 +44,9 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Same override contract as test/merge-gate.test.sh: point the suite at the
-# factory copy of the gate to prove the fix in the one armed repos execute.
-HOOK="${QX_MERGE_GATE_HOOK:-$REPO_ROOT/.claude/hooks/merge-gate.sh}"
+# Same override contract as test/merge-gate.test.sh: point the suite at an
+# installed/cached copy of the gate to prove that copy is current.
+HOOK="${QX_MERGE_GATE_HOOK:-$REPO_ROOT/plugins/quetrex-factory/scripts/merge-gate.sh}"
 
 if [ ! -f "$HOOK" ]; then
   echo "FAIL: hook not found at $HOOK"
@@ -111,6 +111,7 @@ mk_repo() {
   local name="$1" chain_a="$2" chain_b="$3" track="${4:-1}"
   local d="$TMPROOT/$name"
   mkdir -p "$d/.quetrex" "$d/src"
+  printf '{"branchPrefix":"claude/"}' > "$d/.quetrex/project.json" 2>/dev/null
   git -C "$d" init -q -b main
   git -C "$d" config user.email "test@example.com"
   git -C "$d" config user.name "Fixture"
@@ -334,6 +335,7 @@ fi
 #      'last entry per command' rule would have buried the rescuable green.
 R2H="$TMPROOT/r2h"
 mkdir -p "$R2H/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$R2H/.quetrex/project.json" 2>/dev/null
 git -C "$R2H" init -q -b main
 git -C "$R2H" config user.email "test@example.com"
 git -C "$R2H" config user.name "Fixture"

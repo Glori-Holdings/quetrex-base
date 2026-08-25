@@ -41,14 +41,15 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# The gate ships in TWO places: this repo (the `quetrex` plugin) and
-# quetrex-factory/scripts/merge-gate.sh (the engine plugin every armed repo
-# runs). They have drifted. Point the suite at either copy so a fix can be
-# PROVEN in the one teams actually execute, not just the canonical one:
+# ONE COPY (ONE-COPY task): the gate now lives in exactly one path,
+# plugins/quetrex-factory/scripts/merge-gate.sh, published to the
+# quetrex-plugins marketplace by git-subdir from this exact tree. The
+# QX_MERGE_GATE_HOOK override still lets this same suite be pointed at an
+# installed/cached copy on disk to prove that copy is current:
 #   QX_MERGE_GATE_HOOK=/path/to/merge-gate.sh bash test/merge-gate.test.sh
-# QX_MERGE_GATE_PROFILE=vector-only skips assertions about a gate the drifted
-# factory copy does not carry yet (GATE 2b).
-HOOK="${QX_MERGE_GATE_HOOK:-$REPO_ROOT/.claude/hooks/merge-gate.sh}"
+# QX_MERGE_GATE_PROFILE=vector-only skips assertions about a gate an older,
+# cached copy might not carry yet (GATE 2b).
+HOOK="${QX_MERGE_GATE_HOOK:-$REPO_ROOT/plugins/quetrex-factory/scripts/merge-gate.sh}"
 GATE_PROFILE="${QX_MERGE_GATE_PROFILE:-full}"
 
 if [ ! -x "$HOOK" ] && [ ! -f "$HOOK" ]; then
@@ -111,6 +112,7 @@ git -C "$FIXTURE" commit -q -m "chore: fixture commit"
 HEAD_SHA="$(git -C "$FIXTURE" rev-parse HEAD)"
 
 mkdir -p "$FIXTURE/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$FIXTURE/.quetrex/project.json" 2>/dev/null
 printf '{"verify":["true","echo ok"]}' > "$FIXTURE/.quetrex/verify.json"
 
 write_ledger_at() {  # write_ledger_at <sha>
@@ -445,6 +447,7 @@ git -C "$FIXTURE" add README.md
 git -C "$FIXTURE" commit -q -m "chore: unrelated later commit on main, not part of the PR"
 
 mkdir -p "$FIXTURE/.quetrex/plan"
+printf '{"branchPrefix":"claude/"}' > "$FIXTURE/.quetrex/project.json" 2>/dev/null
 jq -cn '{task:"T-1",ownership:{"src/auth/login.ts":"ws-a"}}' \
   > "$FIXTURE/.quetrex/plan/T-1.json"
 jq -cn '{task:"T-1"}' > "$FIXTURE/.quetrex/state.json"
@@ -535,6 +538,7 @@ git clone -q "$G_ORIGIN" "$G_LOCAL"
 git -C "$G_LOCAL" config user.email "test@example.com"
 git -C "$G_LOCAL" config user.name "Fixture"
 mkdir -p "$G_LOCAL/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$G_LOCAL/.quetrex/project.json" 2>/dev/null
 printf '{"verify":["true","echo ok"]}' > "$G_LOCAL/.quetrex/verify.json"
 
 # Origin advances WITHOUT $G_LOCAL ever fetching: another team's work lands
@@ -556,6 +560,7 @@ git -C "$G_ORIGIN" checkout -q main
 # main (M0), other-team-file.ts shows up as "changed" and unowned; if it
 # diffs from the PR's real base (M1), only mine.ts shows up, and it IS owned.
 mkdir -p "$G_LOCAL/.quetrex/plan"
+printf '{"branchPrefix":"claude/"}' > "$G_LOCAL/.quetrex/project.json" 2>/dev/null
 jq -cn '{task:"T-1",ownership:{"mine.ts":"ws-a"}}' > "$G_LOCAL/.quetrex/plan/T-1.json"
 jq -cn '{task:"T-1"}' > "$G_LOCAL/.quetrex/state.json"
 
@@ -652,6 +657,7 @@ git clone -q "$H_ORIGIN" "$H_LOCAL"
 git -C "$H_LOCAL" config user.email "test@example.com"
 git -C "$H_LOCAL" config user.name "Fixture"
 mkdir -p "$H_LOCAL/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$H_LOCAL/.quetrex/project.json" 2>/dev/null
 printf '{"verify":["true","echo ok"]}' > "$H_LOCAL/.quetrex/verify.json"
 
 # Origin advances past what $H_LOCAL has: a base commit, then a PR head on a
@@ -677,6 +683,7 @@ H_HEAD_SHA="$(git -C "$H_ORIGIN" rev-parse HEAD)"
 git -C "$H_ORIGIN" checkout -q main
 
 mkdir -p "$H_LOCAL/.quetrex/plan"
+printf '{"branchPrefix":"claude/"}' > "$H_LOCAL/.quetrex/project.json" 2>/dev/null
 jq -cn '{task:"T-1",ownership:{"mine.txt":"ws-a"}}' > "$H_LOCAL/.quetrex/plan/T-1.json"
 jq -cn '{task:"T-1"}' > "$H_LOCAL/.quetrex/state.json"
 : > "$H_LOCAL/.quetrex/verify-ledger.jsonl"
@@ -1193,6 +1200,7 @@ fi
 # B7 — but when the PLAN demands a security review, a missing artifact still
 #      denies. Omission must never be the cheap way past this gate.
 mkdir -p "$FIXTURE/.quetrex/plan"
+printf '{"branchPrefix":"claude/"}' > "$FIXTURE/.quetrex/project.json" 2>/dev/null
 jq -cn '{task:"T-1",security_review_required:true,ownership:{"README.md":"ws-a"}}' \
   > "$FIXTURE/.quetrex/plan/T-1.json"
 jq -cn '{task:"T-1"}' > "$FIXTURE/.quetrex/state.json"
@@ -1295,6 +1303,7 @@ C0="$HEAD_SHA"
 
 git -C "$FIXTURE" checkout -q -b branch-c1 "$C0"
 mkdir -p "$FIXTURE/.quetrex" "$FIXTURE/src"
+printf '{"branchPrefix":"claude/"}' > "$FIXTURE/.quetrex/project.json" 2>/dev/null
 echo "note 1" > "$FIXTURE/.quetrex/notes.txt"
 git -C "$FIXTURE" add .quetrex/notes.txt
 git -C "$FIXTURE" commit -q -m "chore: pipeline artifact commit"
@@ -1531,6 +1540,7 @@ build_l_fixture() {  # build_l_fixture <dir> <label> <clean:0|1>
   git -C "$dir" add README.md
   git -C "$dir" commit -q -m "chore: $label fixture"
   mkdir -p "$dir/.quetrex"
+  printf '{"branchPrefix":"claude/"}' > "$dir/.quetrex/project.json" 2>/dev/null
   if [ "$clean" -eq 1 ]; then
     printf '{"verify":["true","echo ok"]}' > "$dir/.quetrex/verify.json"
     head="$(git -C "$dir" rev-parse HEAD)"
@@ -1592,6 +1602,7 @@ git clone -q "$FIXTURE_L_ORIGIN" "$FIXTURE_L_LOCAL"
 git -C "$FIXTURE_L_LOCAL" config user.email "test@example.com"
 git -C "$FIXTURE_L_LOCAL" config user.name "Fixture"
 mkdir -p "$FIXTURE_L_LOCAL/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$FIXTURE_L_LOCAL/.quetrex/project.json" 2>/dev/null
 printf '{"verify":["true"]}' > "$FIXTURE_L_LOCAL/.quetrex/verify.json"
 
 echo mine > "$FIXTURE_L_ORIGIN/mine.txt"
@@ -1670,6 +1681,7 @@ echo root > "$FIXTURE_P/README.md"
 git -C "$FIXTURE_P" add README.md
 git -C "$FIXTURE_P" commit -q -m "chore: P root"
 mkdir -p "$FIXTURE_P/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$FIXTURE_P/.quetrex/project.json" 2>/dev/null
 printf '{"verify":["true"]}' > "$FIXTURE_P/.quetrex/verify.json"
 P_HEAD="$(git -C "$FIXTURE_P" rev-parse HEAD)"
 : > "$FIXTURE_P/.quetrex/verify-ledger.jsonl"
@@ -1694,6 +1706,7 @@ echo "benign tweak" >> "$FIXTURE_Q/README.md"
 git -C "$FIXTURE_Q" add README.md
 git -C "$FIXTURE_Q" commit -q -m "chore: benign follow-up (the LAST commit)"
 mkdir -p "$FIXTURE_Q/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$FIXTURE_Q/.quetrex/project.json" 2>/dev/null
 printf '{"verify":["true"]}' > "$FIXTURE_Q/.quetrex/verify.json"
 Q_HEAD="$(git -C "$FIXTURE_Q" rev-parse HEAD)"
 : > "$FIXTURE_Q/.quetrex/verify-ledger.jsonl"

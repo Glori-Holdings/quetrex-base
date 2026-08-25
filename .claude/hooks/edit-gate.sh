@@ -46,6 +46,15 @@
 
 set -uo pipefail
 
+# --- qx_repo_armed: the ONE shared arming predicate (ONE-COPY round 2) -----
+# See session-state.sh's identical comment for why a path two levels up from
+# this file resolves the sibling helper correctly both in the repo checkout
+# and in the installed "quetrex" plugin cache.
+QX_ARMED_HELPER="$(dirname "${BASH_SOURCE[0]}")/../../plugins/quetrex-factory/scripts/qx-armed.sh"
+if ! source "$QX_ARMED_HELPER" 2>/dev/null || ! command -v qx_repo_armed >/dev/null 2>&1; then
+  qx_repo_armed() { [ -n "${1:-}" ] && [ -f "$1/.quetrex/project.json" ]; }
+fi
+
 CAP="${QUETREX_EDIT_BUDGET:-10}"
 case "$CAP" in ''|*[!0-9]*) CAP=10 ;; esac
 
@@ -88,6 +97,12 @@ fi
 [ -z "$ROOT" ] && ROOT=$(git -C "$(dirname "$FILE")" rev-parse --show-toplevel 2>/dev/null)
 [ -z "$ROOT" ] && ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 [ -n "$ROOT" ] && [ -d "$ROOT" ] || exit 0
+
+# ARMED-ONLY: an unarmed repo (no .quetrex/project.json) gets none of the
+# pipeline's per-edit checking — "unarmed repo = no gates at all".
+# SEC-ONECOPY-1 (round 2): qx_repo_armed also honors project.json tracked at
+# HEAD / the default branch tip, not just the working-tree file.
+qx_repo_armed "$ROOT" || exit 0
 
 # Only ever check a file inside the project. An edit to a file elsewhere on the
 # machine is none of this gate's business, and the pipeline's own control
