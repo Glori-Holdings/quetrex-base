@@ -176,12 +176,23 @@ if { [ "$TOOL_NAME" = "Write" ] || [ "$TOOL_NAME" = "Edit" ]; } && [ -n "$FILE_P
     *) _fp_dir="$_cwd/$_fp_dir" ;;
   esac
   _fp_dir=$(dirname -- "$_fp_dir" 2>/dev/null)
+  # D4 (round-2 reviewer): the immediate parent may not exist yet AT ALL
+  # (a brand-new file in a brand-new, not-yet-created subdirectory —
+  # `<armed>/newdir/leak.env`, `<armed>/a/b/c/leak.env`) even though the
+  # ARMED repo it will land inside very much does. The old code required
+  # the immediate parent to already exist and fell all the way back to the
+  # session otherwise — measured ALLOW for both shapes above from an
+  # unarmed session. Walk up to the first EXISTING ancestor before asking
+  # git for its toplevel, exactly what `mkdir -p` + the eventual Write
+  # would actually land inside.
+  while [ -n "$_fp_dir" ] && [ "$_fp_dir" != "/" ] && [ ! -d "$_fp_dir" ]; do
+    _fp_dir=$(dirname -- "$_fp_dir" 2>/dev/null)
+  done
   if [ -n "$_fp_dir" ] && [ -d "$_fp_dir" ]; then
     _target_root=$(git -C "$_fp_dir" rev-parse --show-toplevel 2>/dev/null)
   fi
-  # FILE_PATH's own directory does not exist yet (a brand-new file in a
-  # brand-new directory) or is not inside a git repo at all -- fall back to
-  # the session, the same fallback the pre-C5 code always used, rather than
+  # No existing ancestor resolves to a git repo at all -- fall back to the
+  # session, the same fallback the pre-C5 code always used, rather than
   # judging a Write by NOTHING.
   [ -z "$_target_root" ] && _target_root="$_session_root"
 else
