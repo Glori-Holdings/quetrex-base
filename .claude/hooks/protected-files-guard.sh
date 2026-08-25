@@ -126,8 +126,37 @@ set -uo pipefail
 # this file resolves the sibling helper correctly both in the repo checkout
 # and in the installed "quetrex" plugin cache.
 QX_ARMED_HELPER="$(dirname "${BASH_SOURCE[0]}")/../../plugins/quetrex-factory/scripts/qx-armed.sh"
-if ! source "$QX_ARMED_HELPER" 2>/dev/null || ! command -v qx_repo_armed >/dev/null 2>&1; then
+source "$QX_ARMED_HELPER" 2>/dev/null
+if ! command -v qx_repo_armed >/dev/null 2>&1; then
   qx_repo_armed() { [ -n "${1:-}" ] && [ -f "$1/.quetrex/project.json" ]; }
+fi
+# qx_normalize_path used to be DEFINED here; it now lives in qx-armed.sh
+# (ONE COPY, round 2 reviewer C2) and is sourced above. Fallback only for
+# the same "helper file missing/unreadable" case qx_repo_armed guards
+# against — never a stack trace on a degraded install.
+if ! command -v qx_normalize_path >/dev/null 2>&1; then
+  qx_normalize_path() {
+    local p="$1" part leading_slash="" last_idx joined
+    local -a parts=() out=()
+    case "$p" in /*) leading_slash="/" ;; esac
+    IFS='/' read -ra parts <<< "$p"
+    for part in "${parts[@]}"; do
+      case "$part" in
+        .|'') continue ;;
+        ..)
+          last_idx=$((${#out[@]} - 1))
+          if [ "$last_idx" -ge 0 ] && [ "${out[$last_idx]}" != ".." ]; then
+            unset "out[$last_idx]"
+            out=(${out[@]+"${out[@]}"})
+          else
+            out+=("..")
+          fi
+          ;;
+        *) out+=("$part") ;;
+      esac
+    done
+    ( IFS='/'; joined="${out[*]:-}"; printf '%s%s' "$leading_slash" "$joined" )
+  }
 fi
 
 # --- read hook input (absence is fine) -------------------------------------
@@ -230,36 +259,11 @@ if [ "$INSTALLED_TARGET_HINT" -eq 0 ] && { [ -z "$ROOT" ] || ! qx_repo_armed "$R
   exit 0
 fi
 
-# qx_normalize_path <path> -- collapses "./" and "a/../b" SYNTACTICALLY (no
-# filesystem access, no realpath dependency -- the target frequently does not
-# exist yet). SEC-4 FIX (2026-08-21, security review): ".claude/hooks/./
-# verify-gate.sh" and ".claude/hooks/sub/../verify-gate.sh" do not literally
-# contain the substring "hooks/verify-gate.sh" and previously slipped past
-# the regex untouched. bash 3.2-safe (no negative array indices — this repo
-# ships on macOS's stock /usr/bin/bash; see merge-gate.sh's own note on the
-# same constraint).
-qx_normalize_path() {
-  local p="$1" part leading_slash="" last_idx joined
-  local -a parts=() out=()
-  case "$p" in /*) leading_slash="/" ;; esac
-  IFS='/' read -ra parts <<< "$p"
-  for part in "${parts[@]}"; do
-    case "$part" in
-      .|'') continue ;;
-      ..)
-        last_idx=$((${#out[@]} - 1))
-        if [ "$last_idx" -ge 0 ] && [ "${out[$last_idx]}" != ".." ]; then
-          unset "out[$last_idx]"
-          out=(${out[@]+"${out[@]}"})
-        else
-          out+=("..")
-        fi
-        ;;
-      *) out+=("$part") ;;
-    esac
-  done
-  ( IFS='/'; joined="${out[*]:-}"; printf '%s%s' "$leading_slash" "$joined" )
-}
+# qx_normalize_path (SEC-4, 2026-08-21) used to be DEFINED here. ONE COPY
+# (round 2, reviewer C2): it now lives in plugins/quetrex-factory/scripts/
+# qx-armed.sh, sourced near the top of this file (with the same-shaped
+# fallback), so deny-guard.sh's kill-switch scanner can normalize paths the
+# identical way instead of carrying a second copy.
 
 names_protected_path() {  # <text> -> 0 if it names a protected hooks/scripts path
   local norm

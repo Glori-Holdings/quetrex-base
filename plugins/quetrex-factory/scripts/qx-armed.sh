@@ -1,9 +1,10 @@
 #!/bin/bash
 # qx-armed.sh — the ONE shared arming predicate every floor script gates on
 # (ONE-COPY round 2, design A). Sourced, never executed directly. Defines
-# exactly one function:
+# two functions:
 #
 #   qx_repo_armed <root>
+#   qx_normalize_path <path>
 #
 # <root> should already be a resolved git toplevel (or empty/unresolved).
 # Returns 0 (armed) or 1 (unarmed/unresolvable). Never prints, never exits
@@ -75,4 +76,38 @@ qx_repo_armed() {
   fi
 
   return 1
+}
+
+# qx_normalize_path <path> -- collapses "./" and "a/../b" SYNTACTICALLY (no
+# filesystem access, no realpath dependency -- the target frequently does
+# not exist yet). Moved here (round 2, reviewer C2) from
+# .claude/hooks/protected-files-guard.sh, which defined it first (SEC-4,
+# 2026-08-21) to close the same class of gap here: ".quetrex/./project.json"
+# and ".quetrex//project.json" do not literally contain the exact suffix
+# text deny-guard.sh's _kg_check_path matched, and previously slipped past
+# unnormalized. ONE COPY: this is now the only definition; protected-files-
+# guard.sh sources this file (see its own header) instead of carrying its
+# own copy. bash 3.2-safe (no negative array indices -- this repo ships on
+# macOS's stock /usr/bin/bash).
+qx_normalize_path() {
+  local p="$1" part leading_slash="" last_idx joined
+  local -a parts=() out=()
+  case "$p" in /*) leading_slash="/" ;; esac
+  IFS='/' read -ra parts <<< "$p"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      .|'') continue ;;
+      ..)
+        last_idx=$((${#out[@]} - 1))
+        if [ "$last_idx" -ge 0 ] && [ "${out[$last_idx]}" != ".." ]; then
+          unset "out[$last_idx]"
+          out=(${out[@]+"${out[@]}"})
+        else
+          out+=("..")
+        fi
+        ;;
+      *) out+=("$part") ;;
+    esac
+  done
+  ( IFS='/'; joined="${out[*]:-}"; printf '%s%s' "$leading_slash" "$joined" )
 }
