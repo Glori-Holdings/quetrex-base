@@ -144,8 +144,30 @@ PR_NUM="$(printf '%s' "$PR" | node -e 'let s="";process.stdin.on("data",d=>s+=d)
 PR_HEAD="$(printf '%s' "$PR" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).headRefName)))')"
 PR_SHA="$(printf '%s' "$PR" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).headRefOid)))')"
 
-GATES_BRANCH="${BRANCH_PREFIX}${TASK}-gates"
-SPEC_BRANCH="quetrex-spec/${TASK}"
+# The gates and spec branches are named after the sha of what they carry, so neither name
+# can be computed — both are DISCOVERED on origin. This is what makes a rebuild safe: each
+# dispatch publishes its own refs beside the previous ones instead of deleting them, and
+# the right evidence is selected by the head it describes rather than by being the only
+# thing left standing.
+#
+# GATES: pick the branch whose committed .quetrex/gates-head IS this PR's head. Selecting
+# by content rather than by name is strictly stronger than the old fixed-name lookup plus
+# a staleness compare afterwards — evidence for a superseded commit is never chosen at all,
+# instead of being chosen and then rejected.
+GATES_BRANCH=""
+for b in $(git -C "$REPO_ROOT" ls-remote --heads origin "${BRANCH_PREFIX}${TASK}-gates-*" 2>/dev/null | awk '{print $2}' | sed 's#refs/heads/##'); do
+  gh_sha="$(git -C "$REPO_ROOT" fetch --quiet origin "$b" 2>/dev/null && git -C "$REPO_ROOT" show "FETCH_HEAD:.quetrex/gates-head" 2>/dev/null | tr -d '[:space:]')"
+  if [ "$gh_sha" = "$PR_SHA" ]; then GATES_BRANCH="$b"; break; fi
+done
+# Legacy fallback: builds published before the sha suffix existed used a fixed name. Read
+# it if it is there; the staleness check downstream still guards it.
+if [ -z "$GATES_BRANCH" ] && git -C "$REPO_ROOT" ls-remote --exit-code --heads origin "${BRANCH_PREFIX}${TASK}-gates" >/dev/null 2>&1; then
+  GATES_BRANCH="${BRANCH_PREFIX}${TASK}-gates"
+fi
+
+# SPEC: newest matching ref; it carries only the plan and is not gate evidence.
+SPEC_BRANCH="$(git -C "$REPO_ROOT" ls-remote --heads origin "quetrex-spec/${TASK}-*" 2>/dev/null | awk '{print $2}' | sed 's#refs/heads/##' | tail -1)"
+[ -n "$SPEC_BRANCH" ] || SPEC_BRANCH="quetrex-spec/${TASK}"
 
 # Rule A: persist everything, because none of it survives to the next Bash call.
 mkdir -p "$REPO_ROOT/.quetrex"
@@ -375,8 +397,22 @@ fi
 ### 5d. Delete the branches — spelled out, never in a variable
 
 Three refs outlive the merge and all three are ours to remove: the unit/integration branch,
-the **gates** branch, and the **spec** branch (`quetrex-spec/<TASK>` — the throwaway branch
-§6A of `/quetrex:task-build` pushed carrying the approved plan). The spec branch was never
+the **gates** branch, and the **spec** branch (the throwaway branch §6A of
+`/quetrex:task-build` pushed carrying the approved plan).
+
+**Both the gates and spec branch names carry a sha suffix** — `<prefix><TASK>-gates-<sha7>`
+and `quetrex-spec/<TASK>-<sha7>` — because each dispatch publishes its own refs instead of
+replacing the previous ones. Use the exact values resolved at the top of this command
+(`$GATES_BRANCH`, `$SPEC_BRANCH`, echoed in the `repo=… gates=… spec=…` line) — do not
+reconstruct them from the task id.
+
+**A rebuilt task leaves refs from its earlier dispatches too.** Those are superseded
+evidence, not the current run's, and they are equally ours to clean up. List them before
+deleting so every one is named explicitly:
+
+```text
+git -C <REPO_ROOT> ls-remote --heads origin '<prefix><TASK>-gates-*' 'quetrex-spec/<TASK>-*'
+``` The spec branch was never
 deleted by anything in the engine, so every task ever built left one behind on the customer's
 origin, permanently, carrying that task's acceptance criteria, ownership map and security
 surface. Leaving them is the exact dangling-branch failure the worktree-workflow doctrine
@@ -393,15 +429,21 @@ forbids.
   delete, not a push — which both hooks allow. (The old `git push --delete` spelling meant
   the gates branch was never actually removed either.)
 
-Type each branch name in. For task `DEA-1` on `Glori-Holdings/quetrex-base` with prefix
-`claude/` and PR head `claude/DEA-1-manifest`, the four calls are exactly:
+Type each branch name in — every one that the `ls-remote` above listed, not just the
+current run's. For task `DEA-1` on `Glori-Holdings/quetrex-base` with prefix `claude/`,
+PR head `claude/DEA-1-manifest`, gates `claude/DEA-1-gates-9f3a12c` and spec
+`quetrex-spec/DEA-1-4b71e08`, the calls are exactly:
 
 ```text
 git -C <REPO_ROOT> branch -D claude/DEA-1-manifest
-git -C <REPO_ROOT> branch -D claude/DEA-1-gates
-gh api --method DELETE repos/Glori-Holdings/quetrex-base/git/refs/heads/claude/DEA-1-gates
-gh api --method DELETE repos/Glori-Holdings/quetrex-base/git/refs/heads/quetrex-spec/DEA-1
+git -C <REPO_ROOT> branch -D claude/DEA-1-gates-9f3a12c
+gh api --method DELETE repos/Glori-Holdings/quetrex-base/git/refs/heads/claude/DEA-1-gates-9f3a12c
+gh api --method DELETE repos/Glori-Holdings/quetrex-base/git/refs/heads/quetrex-spec/DEA-1-4b71e08
 ```
+
+Repeat the last two for every superseded `-gates-<sha7>` and `quetrex-spec/<TASK>-<sha7>`
+ref the listing returned. A rebuilt task that leaves five stale evidence branches on the
+customer's origin is the same dangling-ref failure as leaving one.
 
 Each may legitimately fail — the local branch may never have existed, `--delete-branch`
 may already have taken the head branch, a ref may already be gone. Run them all, ignore a

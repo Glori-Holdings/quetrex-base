@@ -61,7 +61,12 @@ fail() { printf 'NOT OK - %s\n' "$1"; FAIL=1; }
 # step 2), so two concurrent runs must not collide. Cleaned up on exit.
 TASK="QXT${$}"
 PREFIX="claude/"
-GATES_BRANCH="${PREFIX}${TASK}-gates"
+# The gates branch name carries the head sha it describes, so it is NOT computable here —
+# it is DISCOVERED on the bare remote after the block runs, exactly as /quetrex:merge finds
+# it. Asserting against a precomputed name would only prove the name we chose, and would go
+# green against a block that pushed nothing if the name ever changed again.
+GATES_GLOB="refs/heads/${PREFIX}${TASK}-gates-*"
+GATES_BRANCH="${PREFIX}${TASK}-gates-<sha7>"   # label for assertion messages only
 PLAN_TMP="/tmp/plan-${TASK}.json"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/qx-routine-transport.XXXXXX")"
@@ -176,14 +181,19 @@ run_block() {                         # run_block <script> <workdir> -> rc, sets
   return $rc
 }
 
+gates_ref() {                         # gates_ref <name> -> the sha-suffixed gates branch, if any
+  git -C "$WORK/$1.git" for-each-ref --format='%(refname:short)' "$GATES_GLOB" 2>/dev/null | head -1
+}
 on_branch() {                         # on_branch <name> <path> -> 0 if present on remote
-  git -C "$WORK/$1.git" show "$GATES_BRANCH:$2" >/dev/null 2>&1
+  local r; r="$(gates_ref "$1")"; [ -n "$r" ] || return 1
+  git -C "$WORK/$1.git" show "$r:$2" >/dev/null 2>&1
 }
 show_on_branch() {                    # show_on_branch <name> <path>
-  git -C "$WORK/$1.git" show "$GATES_BRANCH:$2" 2>/dev/null
+  local r; r="$(gates_ref "$1")"; [ -n "$r" ] || return 1
+  git -C "$WORK/$1.git" show "$r:$2" 2>/dev/null
 }
 branch_exists() {                     # branch_exists <name>
-  git -C "$WORK/$1.git" rev-parse --verify --quiet "refs/heads/$GATES_BRANCH" >/dev/null 2>&1
+  [ -n "$(gates_ref "$1")" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -335,14 +345,25 @@ git -c user.name='quetrex-bot' -c user.email='quetrex-bot@users.noreply.github.c
 git push -f origin "\$GATES_BRANCH"
 LEGACY_EOF
 
+# The control publishes under the OLD fixed name, which the sha-suffixed glob above
+# deliberately cannot match. Give the control its own lookups so it keeps measuring the
+# pre-fix block rather than silently measuring nothing.
+LEGACY_BRANCH="${PREFIX}${TASK}-gates"
+legacy_on_branch() {                  # legacy_on_branch <name> <path>
+  git -C "$WORK/$1.git" show "$LEGACY_BRANCH:$2" >/dev/null 2>&1
+}
+legacy_branch_exists() {              # legacy_branch_exists <name>
+  git -C "$WORK/$1.git" rev-parse --verify --quiet "refs/heads/$LEGACY_BRANCH" >/dev/null 2>&1
+}
+
 L1="$(new_fixture legacy-happy)"
 run_block "$LEGACY" "$L1" || true
-if ! on_branch legacy-happy ".quetrex/plan/$TASK.json" && ! on_branch legacy-happy .quetrex/state.json; then
+if ! legacy_on_branch legacy-happy ".quetrex/plan/$TASK.json" && ! legacy_on_branch legacy-happy .quetrex/state.json; then
   pass "CONTROL: the pre-fix block published NEITHER the plan NOR state.json — the two happy-path assertions above were genuinely red before this change"
 else
   fail "CONTROL is broken: the pre-fix block appears to publish the plan/state, so the happy-path assertions prove nothing"
 fi
-if on_branch legacy-happy .quetrex/review-verdict.json; then
+if legacy_on_branch legacy-happy .quetrex/review-verdict.json; then
   pass "CONTROL: the pre-fix block did publish the original five, so the control differs from the fix in exactly the intended way"
 else
   fail "CONTROL is broken: the pre-fix block did not publish review-verdict.json either — the fixture, not the change, is being measured"
@@ -355,12 +376,12 @@ if run_block "$LEGACY" "$L2"; then
 else
   LEGACY_RC=$?
 fi
-if [ "$LEGACY_RC" -eq 0 ] && branch_exists legacy-noverdict; then
+if [ "$LEGACY_RC" -eq 0 ] && legacy_branch_exists legacy-noverdict; then
   pass "CONTROL: with a required artifact missing the pre-fix block exited 0 AND pushed the branch — the silent publication the loud assertions now catch"
 else
   fail "CONTROL is broken: the pre-fix block already failed loudly here (rc=$LEGACY_RC), so section 6 proves nothing"
 fi
-if ! on_branch legacy-noverdict .quetrex/review-verdict.json; then
+if ! legacy_on_branch legacy-noverdict .quetrex/review-verdict.json; then
   pass "CONTROL: that silently-pushed legacy branch carries no review-verdict.json — evidence that never arrives, with no error anywhere"
 else
   fail "CONTROL is broken: review-verdict.json is on the legacy branch despite being deleted"

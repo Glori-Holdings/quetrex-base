@@ -362,7 +362,17 @@ fi
 # SECTION C — §5d actually deletes the spec and gates refs
 # ===========================================================================
 
-CLEANUP_BLOCK="$(fence_after '### 5d.' 1)"
+# §5d now opens with a DISCOVERY fence (ls-remote for every sha-suffixed evidence ref,
+# including superseded ones from earlier dispatches) and the literal delete commands follow
+# in the second fence. Assert the discovery step exists — without it the operator cannot
+# know which refs to name — then take the deletes from fence 2.
+DISCOVER_BLOCK="$(fence_after '### 5d.' 1)"
+if printf '%s' "$DISCOVER_BLOCK" | grep -q 'ls-remote'; then
+  pass "C0-a: §5d lists the sha-suffixed evidence refs before deleting, so superseded ones are found too"
+else
+  fail "C0-a: §5d has no ls-remote discovery step — with sha-suffixed names the operator cannot know which refs to delete"
+fi
+CLEANUP_BLOCK="$(fence_after '### 5d.' 2)"
 if [ -n "$CLEANUP_BLOCK" ]; then
   pass "C0: extracted §5d's literal delete commands"
 else
@@ -392,9 +402,11 @@ echo "fixture" > "$DEL_FIX/README.md"
 git -C "$DEL_FIX" add README.md
 git -C "$DEL_FIX" commit -q -m "chore: fixture"
 git -C "$DEL_FIX" push -q origin main
-git -C "$DEL_FIX" push -q origin "HEAD:refs/heads/quetrex-spec/DEA-1"
-git -C "$DEL_FIX" push -q origin "HEAD:refs/heads/claude/DEA-1-gates"
-git -C "$DEL_FIX" branch -q "claude/DEA-1-gates" 2>/dev/null
+# Seed the refs under the names §5d's worked example actually uses: sha-suffixed, because
+# each dispatch publishes its own refs rather than replacing the previous ones.
+git -C "$DEL_FIX" push -q origin "HEAD:refs/heads/quetrex-spec/DEA-1-4b71e08"
+git -C "$DEL_FIX" push -q origin "HEAD:refs/heads/claude/DEA-1-gates-9f3a12c"
+git -C "$DEL_FIX" branch -q "claude/DEA-1-gates-9f3a12c" 2>/dev/null
 git -C "$DEL_FIX" branch -q "claude/DEA-1-manifest" 2>/dev/null
 git -C "$DEL_FIX" switch -q main
 

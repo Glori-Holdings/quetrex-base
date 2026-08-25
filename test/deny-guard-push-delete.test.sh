@@ -211,8 +211,18 @@ done <<SHIPEOF
 $SHIPPED_DELETES
 SHIPEOF
 
+# AC5 INVERTED, deliberately. This used to assert "every ref-delete the engine ships is
+# still permitted by deny-guard.sh" — which silently required the engine to keep shipping
+# ref-deletes for the assertion to mean anything. It no longer ships any: the spec and
+# gates branches are named after the sha of what they carry, so each dispatch publishes a
+# NEW ref and nothing is ever replaced or removed. Zero is now the CORRECT answer and the
+# strongest one, so it is asserted as such rather than treated as a broken extractor.
+#
+# The deny-guard's own delete/carve-out behaviour is not weakened by this: it is proven by
+# this file's synthetic cases above, which drive the real hook directly and do not depend
+# on the engine shipping a destructive command to have something to measure.
 if [ "$SHIPPED_N" -eq 0 ]; then
-  fail "AC5: found ZERO shipped 'git push --delete' lines under .claude/commands or .claude/lib — either the extractor broke or the publication steps changed shape; this assertion would pass vacuously"
+  pass "AC5: the engine ships ZERO 'git push --delete' commands — sha-suffixed ref names removed the need for one"
 elif [ -z "$SHIPPED_DENIED" ]; then
   pass "AC5: all $SHIPPED_N shipped ref-delete command(s) under .claude/ are still permitted by the real deny-guard.sh"
 else

@@ -241,11 +241,32 @@ else
   fail "a malformed environment id ('my-environment') was accepted: $OUT"
 fi
 
-# The literal that started it all must be gone from the command file.
-if grep -q 'env_011CUpkAEM4fzsAD6dx1zW3r' "$COMMAND"; then
-  fail "task-build.md still contains the hardcoded environment id env_011CUpkAEM4fzsAD6dx1zW3r — it belongs to one account and silently misroutes every other operator's build"
+# NO hardcoded environment id in ANY shipped file — not just this one command.
+#
+# WHY THIS IS A SWEEP AND NOT A SINGLE grep. The original guard checked task-build.md
+# alone, and passed, while the very same literal sat in .claude/lib/cloud-build-routine.md
+# (shipped in every published version) and as a live `environment_id` value in another
+# repo's copy of the command. A guard scoped to one file while the string walks out the
+# door in others is a green tick that measures nothing. Any file the plugin ships is in
+# scope, and the pattern is the SHAPE of an environment id, not one memorised literal:
+# a guard that only knows today's id cannot catch tomorrow's paste.
+ENV_ID_RE='env_[0-9A-Za-z]\{20,\}'
+SHIPPED_HITS=""
+while IFS= read -r f; do
+  case "$f" in
+    "$REPO_ROOT"/test/*) continue ;;   # tests legitimately name ids in fixtures and prose
+  esac
+  if grep -q "$ENV_ID_RE" "$f" 2>/dev/null; then
+    SHIPPED_HITS="$SHIPPED_HITS
+  - $f: $(grep -o "$ENV_ID_RE" "$f" | sort -u | tr '\n' ' ')"
+  fi
+done <<EOF
+$(find "$REPO_ROOT/.claude" "$REPO_ROOT/.claude-plugin" -type f \( -name '*.md' -o -name '*.json' -o -name '*.sh' \) 2>/dev/null)
+EOF
+if [ -z "$SHIPPED_HITS" ]; then
+  pass "no hardcoded environment id literal in any shipped file (.claude/**, .claude-plugin/**)"
 else
-  pass "no hardcoded environment id literal in task-build.md"
+  fail "a hardcoded environment id ships to every operator — it belongs to one account and silently misroutes everyone else's build:$SHIPPED_HITS"
 fi
 if grep -q '"environment_id": "<QX_CLOUD_ENV_ID>"' "$COMMAND"; then
   pass "the RemoteTrigger body takes environment_id from the resolved \$QX_CLOUD_ENV_ID"
@@ -378,7 +399,15 @@ if [ "$RC" -eq 0 ]; then
 else
   fail "qx_child_dispatch_params failed on a well-formed epic payload: $OUT"
 fi
-for want in "CHILD_SPEC_BRANCH=quetrex-spec/T-9.1" "CHILD_BASE_BRANCH=claude/T-9" "CHILD_BRANCH_PREFIX=claude/"; do
+# CHILD_SPEC_BRANCH is deliberately NOT emitted: the spec branch is named after the sha of
+# the spec commit, which does not exist yet at this point. Step 6A assigns it. Asserting a
+# fixed name here would lock in the collision that forced a remote ref delete per re-dispatch.
+if printf '%s' "$OUT" | grep -q 'CHILD_SPEC_BRANCH='; then
+  fail "qx_child_dispatch_params still emits a fixed CHILD_SPEC_BRANCH — the spec branch must be derived from its own commit sha in Step 6A, not precomputed here"
+else
+  pass "no precomputed CHILD_SPEC_BRANCH — the child spec branch is derived from its commit sha"
+fi
+for want in "CHILD_BASE_BRANCH=claude/T-9" "CHILD_BRANCH_PREFIX=claude/"; do
   if printf '%s\n' "$OUT" | grep -qxF "$want"; then
     pass "child dispatch parameter: $want"
   else

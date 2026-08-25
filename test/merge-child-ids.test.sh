@@ -278,18 +278,28 @@ fi
 # The reaper needs `<prefix><CHILD>-gates` and `quetrex-spec/<CHILD>` to exist
 # as names before §2 can fetch anything. Execute the two derivation lines.
 
-DERIVE="$(grep -E '^(GATES_BRANCH|SPEC_BRANCH)=' "$MERGE_MD")"
-if [ "$(printf '%s\n' "$DERIVE" | grep -c .)" -eq 2 ]; then
-  pass "C0: extracted §1's gates/spec ref derivation"
+# The refs are no longer NAMED by string, they are DISCOVERED: each carries the sha of what
+# it holds, so a rebuild publishes new refs beside the old ones instead of replacing them.
+# What still has to be right for a child id like QDM-2.1 is the SEARCH PATTERN — a pattern
+# that mangles the dot finds nothing, and §2 then fetches no evidence at all. So extract the
+# ls-remote patterns and expand them for a child.
+PATTERNS="$(grep -oE "['\"][^'\"]*\\$\{TASK\}[^'\"]*-\*['\"]|['\"]quetrex-spec/\\$\{TASK\}-\*['\"]" "$MERGE_MD" | tr -d "'\"" | sort -u)"
+if [ "$(printf '%s\n' "$PATTERNS" | grep -c .)" -ge 2 ]; then
+  pass "C0: extracted §1's gates/spec ref DISCOVERY patterns"
 else
-  fail "C0: expected 2 ref-derivation lines in merge.md, found $(printf '%s\n' "$DERIVE" | grep -c .)"
+  fail "C0: expected at least 2 ref-discovery patterns in merge.md, found $(printf '%s\n' "$PATTERNS" | grep -c .): $PATTERNS"
 fi
-DERIVED="$( TASK="QDM-2.1" BRANCH_PREFIX="claude/" bash -c "$DERIVE"'; printf "%s %s" "$GATES_BRANCH" "$SPEC_BRANCH"' )"
-if [ "$DERIVED" = "claude/QDM-2.1-gates quetrex-spec/QDM-2.1" ]; then
-  pass "C1: a child id derives claude/QDM-2.1-gates and quetrex-spec/QDM-2.1 — the refs its cloud routine actually publishes"
-else
-  fail "C1: child ref derivation produced '$DERIVED'"
-fi
+EXPANDED="$( TASK="QDM-2.1" BRANCH_PREFIX="claude/" bash -c 'while IFS= read -r pat; do [ -n "$pat" ] || continue; eval "printf \"%s \" \"$pat\""; done' <<< "$PATTERNS" )"
+case "$EXPANDED" in
+  *"claude/QDM-2.1-gates-*"*)
+    case "$EXPANDED" in
+      *"quetrex-spec/QDM-2.1-*"*)
+        pass "C1: a child id expands to claude/QDM-2.1-gates-* and quetrex-spec/QDM-2.1-* — the ref namespaces its cloud routine actually publishes into" ;;
+      *) fail "C1: the spec-branch discovery pattern does not cover child QDM-2.1 — got '$EXPANDED'" ;;
+    esac ;;
+  *)
+    fail "C1: child ref discovery patterns produced '$EXPANDED'" ;;
+esac
 
 # ===========================================================================
 # SECTION D — §5c's worktree teardown is bounded, and runs on real worktrees

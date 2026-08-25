@@ -163,7 +163,7 @@ fi
 # =============================================================================
 # DEFECT 2 — the spec-branch publication must be hook-legal and idempotent
 # =============================================================================
-PUBLISH_ANCHOR='Publish it — idempotently, and never with a force-push'
+PUBLISH_ANCHOR='Publish it. This is a plain create-and-push'
 PUBLISH_BLOCK="$(extract_fence_after "$COMMAND" "$PUBLISH_ANCHOR")"
 
 if [ -z "$PUBLISH_BLOCK" ]; then
@@ -240,17 +240,17 @@ run_publication() {  # run_publication <n>  -> echoes exit code; leaves state on
   git clone --quiet "$WORK/remote.git" "$wt" 2>/dev/null
   git -C "$wt" -c user.name=t -c user.email=t@e \
     commit --quiet --allow-empty -m "spec payload run $n"
-  git -C "$wt" checkout -q -B "$SPEC_BRANCH_FIXTURE"
+  # Derive the spec branch the way Step 6A does: from the sha of the commit being
+  # published, so the ref is unique per dispatch and nothing is ever replaced. The
+  # fixture must mirror the shipped derivation, or it measures a naming scheme the
+  # engine no longer uses.
+  SPEC_SHA="$(git -C "$wt" rev-parse HEAD)"
+  SPEC_BRANCH_RUN="${SPEC_BRANCH_FIXTURE}-$(printf '%.7s' "$SPEC_SHA")"
+  git -C "$wt" branch -q "$SPEC_BRANCH_RUN"
+  printf '%s' "$SPEC_BRANCH_RUN" > "$WORK/last-spec-branch"
   (
     TMP_WT="$wt"
-    SPEC_BRANCH="$SPEC_BRANCH_FIXTURE"
-    # TASK_ID is the SAME VALUE as the tail of SPEC_BRANCH — Step 6A defines
-    # SPEC_BRANCH="quetrex-spec/$TASK_ID" — and both are exported because the
-    # block deliberately spells `quetrex-spec/$TASK_ID` out at the `--delete`
-    # call site: deny-guard.sh permits a remote ref delete only in the
-    # disposable quetrex-spec/* and *-gates namespaces, and a PreToolUse hook
-    # sees the command before the shell expands "$SPEC_BRANCH". Deriving it
-    # here (rather than hardcoding) keeps the two in lockstep with the fixture.
+    SPEC_BRANCH="$SPEC_BRANCH_RUN"
     TASK_ID="${SPEC_BRANCH_FIXTURE#quetrex-spec/}"
     export TMP_WT SPEC_BRANCH TASK_ID
     bash -c "$PUBLISH_BLOCK" >/dev/null 2>&1
@@ -267,21 +267,31 @@ if [ -n "$PUBLISH_BLOCK" ]; then
   git -C "$WORK/seed" push --quiet "$WORK/remote.git" HEAD:refs/heads/main 2>/dev/null
 
   RC1="$(run_publication 1)"
-  REMOTE1="$(git -C "$WORK/remote.git" rev-parse "refs/heads/$SPEC_BRANCH_FIXTURE" 2>/dev/null || true)"
+  BR1="$(cat "$WORK/last-spec-branch")"
+  REMOTE1="$(git -C "$WORK/remote.git" rev-parse "refs/heads/$BR1" 2>/dev/null || true)"
   LOCAL1="$(git -C "$WORK/wt-1" rev-parse HEAD 2>/dev/null || true)"
   if [ "$RC1" = "0" ] && [ -n "$REMOTE1" ] && [ "$REMOTE1" = "$LOCAL1" ]; then
-    pass "AC2-c: FIRST dispatch (spec branch absent on the remote) — the shipped block exits 0 and publishes $SPEC_BRANCH_FIXTURE at the right commit"
+    pass "AC2-c: FIRST dispatch (spec branch absent on the remote) — the shipped block exits 0 and publishes $BR1 at the right commit"
   else
     fail "AC2-c: FIRST dispatch failed — exit=$RC1, remote ref=[${REMOTE1:-<none>}], expected=[${LOCAL1:-<none>}]"
   fi
 
+  # AC2-d, RESHAPED. The defect was "a task built twice can never republish its spec",
+  # and it was caused by BOTH dispatches targeting one fixed ref — which forced first a
+  # force-push (denied by deny-guard.sh) and then a remote ref delete. The fix removes the
+  # collision instead of managing it: the ref is named after the commit it carries, so a
+  # re-dispatch publishes a SECOND ref and the first is left intact. So the property to
+  # assert is no longer "the ref advanced" but "the re-dispatch succeeded, published a
+  # DIFFERENT ref at the new commit, and destroyed nothing".
   RC2="$(run_publication 2)"
-  REMOTE2="$(git -C "$WORK/remote.git" rev-parse "refs/heads/$SPEC_BRANCH_FIXTURE" 2>/dev/null || true)"
+  BR2="$(cat "$WORK/last-spec-branch")"
+  REMOTE2="$(git -C "$WORK/remote.git" rev-parse "refs/heads/$BR2" 2>/dev/null || true)"
   LOCAL2="$(git -C "$WORK/wt-2" rev-parse HEAD 2>/dev/null || true)"
-  if [ "$RC2" = "0" ] && [ -n "$REMOTE2" ] && [ "$REMOTE2" = "$LOCAL2" ] && [ "$REMOTE2" != "$REMOTE1" ]; then
-    pass "AC2-d: RE-DISPATCH (spec branch already exists, with a diverged commit) — the shipped block exits 0 and the remote advances to the new commit"
+  STILL1="$(git -C "$WORK/remote.git" rev-parse "refs/heads/$BR1" 2>/dev/null || true)"
+  if [ "$RC2" = "0" ] && [ -n "$REMOTE2" ] && [ "$REMOTE2" = "$LOCAL2" ] && [ "$BR2" != "$BR1" ] && [ "$STILL1" = "$REMOTE1" ]; then
+    pass "AC2-d: RE-DISPATCH — the shipped block exits 0, publishes a NEW ref ($BR2) at the new commit, and leaves the first ($BR1) untouched: no force, no delete, no collision"
   else
-    fail "AC2-d: RE-DISPATCH failed — exit=$RC2, remote ref=[${REMOTE2:-<none>}], expected=[${LOCAL2:-<none>}], previous=[${REMOTE1:-<none>}]. This is the QDM-4 defect: a task built twice can never republish its spec."
+    fail "AC2-d: RE-DISPATCH failed — exit=$RC2, new ref=[$BR2 -> ${REMOTE2:-<none>}], expected=[${LOCAL2:-<none>}], first ref=[$BR1 -> ${STILL1:-<GONE>}] (was ${REMOTE1:-<none>}). A re-dispatch must add a ref, never replace or remove one."
   fi
 fi
 
