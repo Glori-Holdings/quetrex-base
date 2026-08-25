@@ -86,9 +86,9 @@ const ENGINE_GUARDS = ['deny-guard.sh', 'secret-scan.sh', 'enforce-branch.sh', '
 // owns: a non-blocking SessionStart nudge that a newer engine version exists.
 // quetrex-bound-version-guard.sh (HOOKFIX G1) and protected-files-guard.sh
 // (HOOKFIX G4) are new, quetrex-owned scripts that are NOT part of the
-// five-script safety floor quetrex-factory ships (see PARITY.sha256 /
-// test/hook-parity.test.sh) — they are command-layer additions, registered
-// here exactly like the other three.
+// six-script safety floor quetrex-factory ships (plugins/quetrex-factory/
+// scripts/, the one-copy location) — they are command-layer additions,
+// registered here exactly like the other three.
 const KEPT_HOOKS = ['session-state.sh', 'edit-gate.sh', 'quetrex-update-check.sh',
   'quetrex-bound-version-guard.sh', 'protected-files-guard.sh'];
 

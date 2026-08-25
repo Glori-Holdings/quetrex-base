@@ -64,8 +64,16 @@ fi
 [ -n "$ROOT" ] && [ -d "$ROOT" ] || exit 0
 
 QDIR="$ROOT/.quetrex"
-# Not a Quetrex-managed repo -> nothing to restate.
-[ -d "$QDIR" ] || exit 0
+# ARMED-ONLY: the gate is the presence of .quetrex/project.json, never merely
+# the directory (a partially-initialized .quetrex/ with no project.json is
+# still unarmed). A git repo that has never run /quetrex:init gets exactly one
+# offer line, printed on every SessionStart source (startup/resume/compact —
+# this hook fires once per source, never per turn, so that is not a spam
+# concern) and nothing else from this hook.
+if [ ! -f "$QDIR/project.json" ]; then
+  printf '%s\n' "Quetrex: this repo is not armed (no .quetrex/project.json). Offer the user /quetrex:init; if they say yes, run it."
+  exit 0
+fi
 
 # Read a single scalar out of a JSON file; empty when jq is absent or the file
 # is missing/malformed. Never fatal — a degraded briefing beats no briefing.
@@ -83,7 +91,16 @@ add "[quetrex-state] Restored from .quetrex/ on disk (source: ${SOURCE:-unknown}
 
 # --- 1. ESCALATION — always first, it overrides everything below ------------
 if [ -f "$QDIR/ESCALATION" ]; then
-  NOTE=$(head -c 600 "$QDIR/ESCALATION" 2>/dev/null | tr '\n' ' ')
+  # The marker is now a JSON object ({"sha":...,"reason":...}) written by
+  # verify-gate.sh's self-heal cap and reviewer.md's rework cap. Read .reason
+  # via jq first so raw JSON is never dumped into the agent's context; a
+  # legacy (pre-shape) marker has no .reason, so fall back to the old raw-text
+  # excerpt rather than showing nothing.
+  NOTE=""
+  if [ "$HAVE_JQ" -eq 1 ]; then
+    NOTE=$(jq -r '.reason // empty' "$QDIR/ESCALATION" 2>/dev/null)
+  fi
+  [ -n "$NOTE" ] || NOTE=$(head -c 600 "$QDIR/ESCALATION" 2>/dev/null | tr '\n' ' ')
   add "  !! ESCALATION IS ACTIVE. A bounded loop hit its cap. STOP self-healing, do NOT report the task as done, and do NOT delete this marker to force progress. Surface it to the user and wait for direction."
   [ -n "$NOTE" ] && add "     note: $NOTE"
   if [ "$SOURCE" = "startup" ]; then

@@ -49,33 +49,43 @@
 #   {"hookSpecificOutput":{"hookEventName":"PreToolUse",
 #     "permissionDecision":"deny","permissionDecisionReason":"..."}}
 # on stdout, exit 0 — the same jq-primary / printf-fallback shape
-# .claude/hooks/deny-guard.sh:100-110 and merge-gate.sh's own deny() already
-# use. When jq is unavailable the fallback is deliberately NOT hand-rolled
+# plugins/quetrex-factory/scripts/deny-guard.sh and merge-gate.sh's own
+# deny() already use. When jq is unavailable the fallback is deliberately NOT hand-rolled
 # JSON (a control byte in a captured command/reason would malform it, and a
 # malformed payload is DROPPED and reads as ALLOW) — it uses the OTHER
 # blocking channel the hook contract provides: exit 2 with the reason on
 # stderr. A missing jq must never degrade this guard to silence.
 #
-# PROTECTED SET: the five floor basenames, matched on the PATH TAIL so every
-# shape is covered — <anything>/.claude/hooks/<name>, <plugin-root>/scripts/
-# <name>, and (via `cd` tracking, mirroring merge-gate.sh's own PENDING_CD) a
-# bare <name> written from inside such a directory. session-state.sh,
-# edit-gate.sh, auto-format.sh and quetrex-update-check.sh are deliberately
-# NOT protected — they are not the floor, and a set that grows past the floor
-# trains the operator to click through the one prompt that matters.
+# PROTECTED SET: the six floor basenames now live in exactly ONE place —
+# plugins/quetrex-factory/scripts/ (the one-copy rule) — so the match is
+# narrowed to that path SEGMENT specifically, not any bare hooks/ or scripts/
+# directory. This deliberately covers BOTH the repo-local copy
+# (plugins/quetrex-factory/scripts/<name>.sh) and the INSTALLED marketplace
+# copy (.../plugins/marketplaces|cache/*/quetrex-factory/scripts/<name>.sh —
+# both contain the same "quetrex-factory/scripts/<name>.sh" tail), because
+# editing the installed copy defangs the floor for every repo on the machine
+# and that copy is outside any repo root. It deliberately DOES NOT cover an
+# unrelated repo's own hooks/<floor-basename>.sh or bare scripts/<floor-
+# basename>.sh — those are false positives now that the floor no longer ships
+# there. `cd` tracking (mirroring merge-gate.sh's own PENDING_CD) still covers
+# a bare <name> written from inside a directory ending .../quetrex-factory/
+# scripts. session-state.sh, edit-gate.sh, auto-format.sh and
+# quetrex-update-check.sh are deliberately NOT protected — they are not the
+# floor, and a set that grows past the floor trains the operator to click
+# through the one prompt that matters.
 #
 # TOKENIZER: split_segments_quote_aware() and normalize_segment(), copied
 # VERBATIM (not sourced — merge-gate.sh executes at load, so it cannot be
-# sourced without running the merge gate) from .claude/hooks/merge-gate.sh,
-# between the `# >>> QX-CMDSCAN BEGIN/END` sentinels below.
+# sourced without running the merge gate) from
+# plugins/quetrex-factory/scripts/merge-gate.sh, between the
+# `# >>> QX-CMDSCAN BEGIN/END` sentinels below.
 #
 # REVIEWER FIX (2026-08-21): this comment used to say "merge-gate.sh itself
 # is UNCHANGED" — no longer true. SEC-17 (security review, 2026-08-21)
 # found a Critical in this shared tokenizer's `>|` handling that required
 # fixing all THREE copies (this file, merge-gate.sh, and verify-gate-
-# quick-chain.sh) in the same commit, so merge-gate.sh's own PARITY digest
-# was regenerated then too. The copy is pinned MECHANICALLY, not just by
-# convention: test/protected-files-guard.test.sh's AC16 extracts BOTH
+# quick-chain.sh) in the same commit. The copy is pinned MECHANICALLY, not
+# just by convention: test/protected-files-guard.test.sh's AC16 extracts BOTH
 # tokenizer functions from ALL THREE files (merge-gate.sh, this file, and
 # verify-gate-quick-chain.sh) by their function-name boundaries and asserts
 # byte-identity PAIRWISE across all three, so a future fix to any one
@@ -112,7 +122,7 @@ fi
 [ -n "$TOOL_NAME" ] || exit 0
 case "$TOOL_NAME" in Bash|Write|Edit) : ;; *) exit 0 ;; esac
 
-# --- worktree-safe ROOT (only needed to record an unlocked write) ----------
+# --- worktree-safe ROOT ------------------------------------------------
 resolve_root() {
   local r=""
   if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "${CLAUDE_PROJECT_DIR:-}" ]; then
@@ -125,21 +135,31 @@ resolve_root() {
   printf '%s' "$r"
 }
 
+# ARMED-ONLY: "unarmed repo = no gates at all" — a repo with no
+# .quetrex/project.json gets none of the floor, including this guard. Resolve
+# ROOT once, up front, before any pattern-matching or decision emission, and
+# reuse it below (allow_unlocked no longer needs its own resolve_root call).
+ROOT=$(resolve_root)
+if [ -z "$ROOT" ] || [ ! -f "$ROOT/.quetrex/project.json" ]; then
+  exit 0
+fi
+
 # --- the protected set --------------------------------------------------
-# The five plan-named floor basenames, PLUS verify-gate-quick-chain.sh (added
+# The six floor basenames, including verify-gate-quick-chain.sh (added
 # 2026-08-21): verify-gate.sh now SOURCES it, so editing it changes the gate's
 # behavior exactly as effectively as editing verify-gate.sh itself would,
-# without ever touching the "protected" file by name. PARITY.sha256 pins its
-# digest too, but hook-parity.test.sh's FLOOR set is unowned by this
-# workstream and still only names the original five — this ask-layer entry is
-# this workstream's only mechanical coverage of that gap; see the developer's
-# report.
+# without ever touching the "protected" file by name. All six now live in
+# exactly ONE place on disk (plugins/quetrex-factory/scripts/, per the
+# one-copy rule) — see the PROTECTED SET comment above the vector sections
+# below for how the path match is scoped to that location specifically.
 PROT_ALT='deny-guard|secret-scan|enforce-branch|merge-gate|verify-gate|verify-gate-quick-chain'
-# Path-tail shapes: .../hooks/<name>.sh or .../scripts/<name>.sh, anywhere in
-# the text (a file_path value or a Bash command/segment string).
-PROT_PATH_ERE="(^|[^A-Za-z0-9_.-])(hooks|scripts)/(${PROT_ALT})\\.sh([^A-Za-z0-9_.-]|\$)"
-# Bare basename only (no leading hooks/scripts path segment) — used together
-# with `cd` tracking below for the third shape the plan names.
+# Path-tail shape: .../quetrex-factory/scripts/<name>.sh, anywhere in the
+# text (a file_path value or a Bash command/segment string) — repo-local or
+# installed-marketplace (both contain the same tail); NOT a bare hooks/ or
+# scripts/ segment, which the floor no longer ships at.
+PROT_PATH_ERE="(^|[^A-Za-z0-9_.-])quetrex-factory/scripts/(${PROT_ALT})\\.sh([^A-Za-z0-9_.-]|\$)"
+# Bare basename only (no leading path segment) — used together with `cd`
+# tracking below for the third shape the plan names.
 PROT_BARE_ERE="(^|[^A-Za-z0-9_.-])(${PROT_ALT})\\.sh([^A-Za-z0-9_.-]|\$)"
 
 # qx_normalize_path <path> -- collapses "./" and "a/../b" SYNTACTICALLY (no
@@ -221,7 +241,7 @@ deny() {
 # have appeared.
 allow_unlocked() {  # allow_unlocked <what>
   local what="$1" root logf ts
-  root=$(resolve_root)
+  root="$ROOT"
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   if [ -n "$root" ] && [ -d "$root" ]; then
     mkdir -p "$root/.quetrex" 2>/dev/null
@@ -241,7 +261,7 @@ allow_unlocked() {  # allow_unlocked <what>
 is_unlocked() { [ "${QUETREX_UNLOCK_FLOOR:-}" = "1" ]; }
 
 # =============================================================================
-# >>> QX-CMDSCAN BEGIN — copied verbatim from .claude/hooks/merge-gate.sh
+# >>> QX-CMDSCAN BEGIN — copied verbatim from plugins/quetrex-factory/scripts/merge-gate.sh
 # (split_segments_quote_aware, normalize_segment). Do NOT hand-edit this
 # region independently of merge-gate.sh OR verify-gate-quick-chain.sh (the
 # THIRD copy); test/protected-files-guard.test.sh's AC16 asserts byte-
@@ -424,12 +444,12 @@ normalize_segment() {
 # THE DEFECT THIS REPLACES. segment_is_write_shaped's old rule -- "a
 # recognized write verb, OR the segment contains a bare '>' anywhere" --
 # combined with a "does the WHOLE segment mention a protected basename
-# anywhere" targeting check, denied `grep -n QUICK .claude/hooks/verify-
-# gate.sh > /tmp/out.txt` (redirects to /tmp/out.txt; the protected path is
-# only a READ argument to grep) and the PARITY regeneration procedure this
-# repo's own CLAUDE.md mandates (`shasum -a 256 deny-guard.sh ... verify-
-# gate.sh > PARITY.sha256` -- every floor basename is a READ argument being
-# hashed; the write target is PARITY.sha256). A PreToolUse deny beats
+# anywhere" targeting check, denied `grep -n QUICK plugins/quetrex-factory/
+# scripts/verify-gate.sh > /tmp/out.txt` (redirects to /tmp/out.txt; the
+# protected path is only a READ argument to grep) and any legitimate
+# hash/backup procedure of the same shape (`shasum -a 256 deny-guard.sh ...
+# verify-gate.sh > checksums.txt` -- every floor basename is a READ argument
+# being hashed; the write target is checksums.txt). A PreToolUse deny beats
 # bypassPermissions, so a wrongful deny here has NO recourse.
 #
 # THE FIX. Only the REDIRECTION TARGET, or a recognized write-verb's OWN
@@ -599,7 +619,7 @@ protected_write_targets() {
   # regardless of verb (`cat x > path`, `echo y >> path`, …).
   #
   # SEC-13 (security review, 2026-08-21): the previous version matched ONLY
-  # bare `>`/`>>`, so `cat /tmp/evil 1> .claude/hooks/verify-gate.sh`
+  # bare `>`/`>>`, so `cat /tmp/evil 1> plugins/quetrex-factory/scripts/verify-gate.sh`
   # (stdout/stderr-numbered), `... &> path` / `... &>> path` (both streams),
   # and `... >| path` (noclobber-override) all evaded the scanner entirely.
   # One coherent parser now closes all of them plus the `exec N> path` /
@@ -699,7 +719,7 @@ while IFS= read -r seg; do
     fi
     if names_bare_protected "$t" && [ -n "$PENDING_CD" ]; then
       case "$PENDING_CD" in
-        */hooks|*/scripts) HIT_SEG="$norm" ;;
+        */quetrex-factory/scripts) HIT_SEG="$norm" ;;
       esac
       [ -n "$HIT_SEG" ] && break
     fi
