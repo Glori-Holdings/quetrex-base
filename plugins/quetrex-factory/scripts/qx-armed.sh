@@ -52,6 +52,21 @@
 # can. That is a deliberate, disclosed narrowing of what "disarm" means: it
 # becomes a real git operation with its own history, not an ephemeral
 # one-liner with no trace.
+# PERF-ONECOPY-2 (round 4 reviewer, Medium): deny-guard.sh calls
+# target_armed() — which calls qx_repo_armed() — once per command
+# segment/`cd`, so a multi-step command re-probes the SAME root repeatedly
+# within one hook invocation. THE MEMOIZATION FOR THAT LIVES IN
+# deny-guard.sh ITSELF (see its own _dg_qx_repo_armed_cached), not here:
+# this predicate is a live, uncached probe of real filesystem/git state by
+# design, and test/onecopy-armed-construction.test.sh sources this file
+# directly and calls qx_repo_armed on the SAME root multiple times as it
+# deliberately mutates that root's working tree and commits between calls
+# (AC1 unarmed -> AC2 armed via working-tree file -> AC3 still-armed after
+# deleting that file once committed) — caching here made AC2/AC3 return
+# AC1's stale answer. A hook's OWN single invocation is safe to cache
+# because nothing it inspects can change mid-invocation (a PreToolUse hook
+# runs strictly before the tool it is judging executes anything), but this
+# shared file has no such guarantee about its callers and must stay pure.
 qx_repo_armed() {
   _qxa_root="$1"
   [ -n "$_qxa_root" ] || return 1

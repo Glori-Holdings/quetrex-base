@@ -204,6 +204,49 @@ if ! source "$QX_ARMED_HELPER" 2>/dev/null || ! command -v qx_repo_armed >/dev/n
   qx_repo_armed() { [ -n "$1" ] && [ -f "$1/.quetrex/project.json" ]; }
 fi
 
+# PERF-ONECOPY-2 (round 4 reviewer, Medium): target_armed() below is called
+# once per command SEGMENT (each `cd`, each redirection check), and
+# qx_repo_armed does up to 7 real git subprocesses per call on an unarmed
+# repo with none of it memoized — so a multi-segment command (a cd-chain,
+# several rm/git checks in one Bash tool call) re-probed the SAME resolved
+# root from scratch every single time. Measured with a git-invocation-
+# counting shim: `echo hello` against an unarmed target went 13 git calls
+# (two full un-memoized probes) -> 7 (one); a 4-segment cd-chain went 37 ->
+# 7. Cache is keyed by resolved root and lives ONLY for this process's
+# lifetime — a fresh PreToolUse hook invocation is a fresh process with
+# fresh (empty) arrays, so nothing is ever written to disk, nothing can
+# leak between invocations, and nothing can go stale WITHIN one invocation
+# either: a PreToolUse hook runs strictly before the tool it is judging
+# executes anything, so the real git/filesystem state this predicate
+# inspects cannot change between two calls in the same run. THIS CACHE
+# LIVES HERE, NOT in qx-armed.sh's own qx_repo_armed — that shared file is
+# sourced directly (and its live, uncached answer relied on) by
+# test/onecopy-armed-construction.test.sh, which deliberately mutates a
+# single fixture's armed state across several qx_repo_armed calls in ONE
+# process; caching at that shared layer returned stale answers there. bash
+# 3.2-safe (no associative arrays — see qx_normalize_path's own note in
+# qx-armed.sh): parallel indexed arrays with a linear scan, cheap because
+# one invocation only ever names a handful of distinct roots.
+_DG_ARMED_CACHE_ROOTS=()
+_DG_ARMED_CACHE_RESULTS=()
+_dg_qx_repo_armed_cached() {
+  _dgc_root="$1"
+  [ -n "$_dgc_root" ] || return 1
+  _dgc_i=0
+  while [ "$_dgc_i" -lt "${#_DG_ARMED_CACHE_ROOTS[@]}" ]; do
+    if [ "${_DG_ARMED_CACHE_ROOTS[$_dgc_i]}" = "$_dgc_root" ]; then
+      [ "${_DG_ARMED_CACHE_RESULTS[$_dgc_i]}" = "0" ]
+      return $?
+    fi
+    _dgc_i=$((_dgc_i + 1))
+  done
+  qx_repo_armed "$_dgc_root"
+  _dgc_rc=$?
+  _DG_ARMED_CACHE_ROOTS+=("$_dgc_root")
+  _DG_ARMED_CACHE_RESULTS+=("$_dgc_rc")
+  return "$_dgc_rc"
+}
+
 # qx_resolve_cd <cd-target> <current-anchor-or-empty> -- resolves a `cd`
 # TOKEN into an absolute (syntactically normalized) effective directory, so
 # LAST_CD and _kill_cd below always hold a fully-resolved anchor rather than
@@ -292,9 +335,9 @@ target_armed() {  # target_armed <explicit-dir-or-empty> [<anchor-override>]
   # SESSION is itself unarmed AND the named target resolves to a different,
   # also-unarmed repo (or resolves to nothing at all) does the gate stand
   # down, which is exactly the pre-C5 baseline for an unarmed session.
-  qx_repo_armed "$_session_root" && return 0
+  _dg_qx_repo_armed_cached "$_session_root" && return 0
   _ta_root=$(resolve_root_for "$1" "$2")
-  [ -n "$_ta_root" ] && qx_repo_armed "$_ta_root"
+  [ -n "$_ta_root" ] && _dg_qx_repo_armed_cached "$_ta_root"
 }
 
 # --- SEC-ONECOPY-1: the arming file is the whole floor's kill switch -------
@@ -388,6 +431,21 @@ _kg_check_path() {
   # _kill_cd already anchored above). Every real match is re-checked once,
   # non-recursively (a resolved match is always absolute, so it can never
   # re-enter this branch).
+  #
+  # PERF-ONECOPY-1 (round 4 reviewer, High): qx_normalize_path is a
+  # command-substitution call — a fork — and this loop used to call it once
+  # per filesystem match with NO prefilter, so an ordinary `rm -rf *`/`chmod
+  # -R 755 vendor/*`/`cp build/* out/` in a large, entirely unrelated
+  # directory forked once per entry (measured: 39.3s over 20000 entries,
+  # 38.4s of which is the fork itself — 0.07s at e384c11, before this glob
+  # branch existed). _kg_is_protected_literal can ONLY return 0 for a path
+  # with a `.quetrex` path component (every one of its suffix patterns names
+  # one), so a match that never contains that substring cannot possibly be
+  # protected and normalizing it is pure waste. Prefilter with a `case`
+  # (built-in, no fork) BEFORE the expensive normalize+match — this is the
+  # exact remediation the finding names. The normalize call is still made
+  # for anything that DOES contain `.quetrex`, so `.quetrex/./project.json`-
+  # shaped matches (already covered by C2) are unaffected.
   case "$p" in
     *[\*\?\[]*)
       _kg_glob_target="$p"
@@ -397,6 +455,10 @@ _kg_check_path() {
       esac
       shopt -s nullglob 2>/dev/null
       for _kg_expanded in $_kg_glob_target; do
+        case "$_kg_expanded" in
+          *.quetrex*) : ;;
+          *) continue ;;
+        esac
         _kg_norm2=$(qx_normalize_path "$_kg_expanded")
         if _kg_is_protected_literal "$_kg_norm2"; then
           shopt -u nullglob 2>/dev/null
