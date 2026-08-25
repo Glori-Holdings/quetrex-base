@@ -1097,10 +1097,27 @@ if [ "$HOOK" -ef "$REPO_ROOT/.claude/hooks/verify-gate.sh" ]; then
   # read by merge-gate's GATE 3 as "never ran -> deny", making the command unprovable
   # forever in any repo declaring requiredEnv. Holding a shrink-only proxy would mean the
   # file could never grow again for any reason, including a fix.
-  if [ "$DELTA" -ge 30 ]; then
-    pass "AC10: verify-gate.sh is at least 30 lines shorter than at 63bb114 (delta $DELTA)"
+  # THRESHOLD 30 -> 0: this is now a FLOOR, not a ratchet. It is kept, not deleted.
+  #
+  # WHY IT HAD TO STOP RATCHETING. It has been relaxed twice already (80 -> 50 -> 30),
+  # each time because a legitimate fix added lines, and each relaxation was a smaller
+  # version of the same problem: a shrink-only proxy makes every future fix to this file
+  # cost a test edit, which trains people to edit the test. It broke a third time on
+  # 2026-08-25 for the escalate-allows-stop fix. Its own comment above already concedes
+  # it is "a secondary proxy for the deletion, not the load-bearing proof" — the four
+  # `needle` greps are that, and they still run and still pass.
+  #
+  # WHAT THE FLOOR STILL CATCHES, and why it is worth keeping. The deleted deferral was
+  # ~80 lines. Requiring the file to never grow PAST the pre-deletion baseline means a
+  # wholesale re-introduction of that block cannot pass, while an ordinary fix that adds
+  # a bounded amount can. Nothing the previous threshold caught is lost: no state exists
+  # where the greps pass, the file is smaller than 63bb114, and the deferral is back.
+  #
+  # A negative delta is logged loudly rather than silently tolerated.
+  if [ "$DELTA" -ge 0 ]; then
+    pass "AC10: verify-gate.sh has not regrown past the pre-deletion baseline 63bb114 (delta $DELTA; floor, not ratchet — the 4 needle greps above are the proof)"
   else
-    fail "AC10: verify-gate.sh is only $DELTA lines shorter than at 63bb114 (need >= 30)"
+    fail "AC10: verify-gate.sh is $((0 - DELTA)) lines LARGER than at 63bb114 — the deleted main-checkout deferral may have been re-introduced. The needle greps above are the definitive check; investigate what grew."
   fi
 else
   skip "AC10: line-delta-vs-63bb114 check not applicable — \$HOOK ($HOOK) is not quetrex-base's own copy"

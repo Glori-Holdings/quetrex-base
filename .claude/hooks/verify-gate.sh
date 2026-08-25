@@ -157,6 +157,10 @@ if [ ! -t 0 ]; then INPUT=$(cat); fi
 jqget() { printf '%s' "$INPUT" | jq -r "$1 // empty" 2>/dev/null; }
 SESSION_CWD=$(jqget '.cwd')
 EVENT=$(jqget '.hook_event_name')
+# The runtime sets this to true when the agent is stopping BECAUSE a previous
+# Stop hook blocked it. It is the contract's loop-breaker and this gate never
+# read it, which is the whole of the defect fixed below.
+STOP_HOOK_ACTIVE=$(jqget '.stop_hook_active')
 
 # --- resolve repo root (worktree-safe) -------------------------------------
 ROOT=""
@@ -679,5 +683,40 @@ fi
 # Cap reached -> escalate. Persist a marker the merge gate reads so red code
 # physically cannot merge even once the agent is finally allowed to stop.
 touch "$ESCALATION" 2>/dev/null
+
+# ANNOUNCE ONCE, THEN ALLOW THE STOP. This is the fix for a measured defect.
+#
+# WHAT WENT WRONG. $n increments on every invocation and never resets while the
+# chain is red, so once it passed $MAX_ATTEMPTS this terminus kept emitting a
+# `block` on EVERY subsequent Stop. The agent could never end its turn: measured
+# in marketing51 on 2026-08-25, the hook blocked 9 consecutive times until the
+# runtime's own block cap force-overrode it, and the operator saw a wall of
+# identical escalations instead of the one-line report this text asks for.
+#
+# WHY BLOCKING IS THE WRONG MECHANISM HERE. `block` means "do not finish, go do
+# something about it" — correct for attempts 1..MAX-1, which drive self-healing.
+# At the cap the instruction is the opposite: STOP self-healing and report to the
+# operator. An agent cannot report while it is forbidden to finish, so blocking
+# here defeats its own message.
+#
+# WHAT STILL HOLDS. This allows the STOP, not the merge. $ESCALATION is written
+# above and merge-gate.sh refuses on it, the failure log is preserved, and the
+# ledger is unchanged — red code still physically cannot merge. The only thing
+# that changes is that the agent can now deliver the sentence telling the human
+# what happened.
+#
+# TWO INDEPENDENT TRIGGERS, because either alone leaves a hole:
+#   - n > MAX_ATTEMPTS: the cap was already announced on the n == MAX pass.
+#   - stop_hook_active: the runtime says this stop is itself the result of a
+#     hook block, which is the contract's own loop-breaker. Honored only at or
+#     past the cap, never below it — honoring it earlier would waive attempts
+#     2 and 3 and kill self-healing outright, since those stops are also
+#     hook-driven.
+if [ "$n" -gt "$MAX_ATTEMPTS" ] || [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+  printf 'ESCALATED (already reported): `%s` is red in %s (branch %s). Allowing this stop so the escalation can be reported; the ESCALATION marker stands and merge-gate.sh will refuse the merge.\nFull output: %s\n' \
+    "$FAILED_CMD" "$ROOT" "${CUR_BRANCH:-<detached>}" "$FAILLOG" >&2
+  exit 0
+fi
+
 block "$(printf 'ESCALATE: `%s` is STILL red (exit %d) after %d self-heal attempts in %s (branch %s).%s%s%s BLOCKS finish — STOP self-healing.\nFull output: %s\nReport this one-line summary and the log path to the user; do NOT paste command output into your closing message. Wait for direction.' \
   "$FAILED_CMD" "$FAILED_CODE" "$MAX_ATTEMPTS" "$ROOT" "${CUR_BRANCH:-<detached>}" "$TIMEOUT_NOTE" "$QUICK_NOTE" "$SKIP_NOTE" "$FAILLOG")"
