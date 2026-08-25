@@ -239,7 +239,7 @@ check('task-build no longer claims there is no merge command', () => {
 // cargo cult and nearly removed.
 check('no shipped file still prescribes a feature/ branch prefix', () => {
   const offenders = [];
-  for (const rel of ['.claude/agents/developer.md', '.claude/lib/cloud-build-routine.md',
+  for (const rel of ['plugins/quetrex-factory/agents/developer.md', '.claude/lib/cloud-build-routine.md',
                      '.claude/skills/quetrex-pipeline/SKILL.md']) {
     const body = read(rel);
     // A prescription looks like `feature/<...>` or `feature/` as the stated prefix. Prose
@@ -334,19 +334,53 @@ check('plugin.json declares custom paths that keep content under .claude/', () =
     'do NOT declare hooks in plugin.json — hooks/hooks.json auto-loads; declaring it duplicates');
   assert.ok(exists('hooks/hooks.json'),
     'hooks/hooks.json must exist at the plugin root so it auto-loads');
+});
+
+// ONE-COPY: the 7 PIPELINE agents (architect, database-architect, developer,
+// git-workflow, qa, reviewer, security-reviewer) live in
+// plugins/quetrex-factory/agents/ — the git-subdir-published quetrex-factory
+// subtree, which must be self-contained — while the 2 CLEANUP agents
+// (quetrex-cleanup-auditor, quetrex-cleanup-proposer) are command-layer, not
+// part of the build pipeline, and stay under .claude/agents/. No agent .md
+// file may exist in either directory undeclared, and plugin.json must
+// declare exactly this split, not just "some agents somewhere".
+const CLEANUP_AGENTS = ['quetrex-cleanup-auditor.md', 'quetrex-cleanup-proposer.md'];
+const PIPELINE_AGENTS = ['architect.md', 'database-architect.md', 'developer.md',
+  'git-workflow.md', 'qa.md', 'reviewer.md', 'security-reviewer.md'];
+
+check('plugin.json declares agents split across .claude/agents/ (cleanup) and plugins/quetrex-factory/agents/ (pipeline)', () => {
+  const p = readJson('.claude-plugin/plugin.json');
   // `agents` MUST be individual .md FILE paths — the Claude Code plugin validator
   // rejects a directory for `agents` (unlike commands/skills, which take a dir).
-  // Derive from the real dir so adding/removing an agent without updating the
-  // manifest fails here — and so the "directory" regression can never come back.
-  const agentFiles = fs.readdirSync(path.join(REPO_ROOT, '.claude/agents'))
-    .filter((f) => f.endsWith('.md'))
-    .map((f) => `./.claude/agents/${f}`)
-    .sort();
   assert.ok(Array.isArray(p.agents) && p.agents.length > 0, 'agents must be a non-empty array');
   assert.ok(p.agents.every((a) => a.endsWith('.md')),
     'agents must be individual .md file paths, not a directory (the plugin validator rejects a dir)');
-  assert.deepStrictEqual([...p.agents].sort(), agentFiles,
-    'every .claude/agents/*.md file must be declared in plugin.json agents (and vice-versa)');
+  for (const a of p.agents) {
+    assert.ok(exists(a.replace(/^\.\//, '')), `plugin.json declares agent ${a}, which does not exist on disk`);
+  }
+
+  const declared = new Set(p.agents);
+  const DIRS = [
+    [path.join(REPO_ROOT, '.claude/agents'), './.claude/agents/'],
+    [path.join(REPO_ROOT, 'plugins/quetrex-factory/agents'), './plugins/quetrex-factory/agents/'],
+  ];
+  for (const [dir, prefix] of DIRS) {
+    if (!fs.existsSync(dir)) continue; // owned by another workstream; asserted post-merge
+    for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.md'))) {
+      assert.ok(declared.has(`${prefix}${f}`),
+        `${prefix}${f} exists on disk but is not declared in plugin.json agents — no unlisted .md may survive in either agents directory`);
+    }
+  }
+
+  for (const f of CLEANUP_AGENTS) {
+    assert.ok(declared.has(`./.claude/agents/${f}`), `${f} must be declared at ./.claude/agents/${f}`);
+  }
+  for (const f of PIPELINE_AGENTS) {
+    assert.ok(declared.has(`./plugins/quetrex-factory/agents/${f}`),
+      `${f} must be declared at ./plugins/quetrex-factory/agents/${f}`);
+  }
+  assert.strictEqual(p.agents.length, CLEANUP_AGENTS.length + PIPELINE_AGENTS.length,
+    'plugin.json agents must declare exactly the 2 cleanup + 7 pipeline agents, nothing more');
 });
 
 // --- 2. commands are de-prefixed to the plugin namespace -------------------
