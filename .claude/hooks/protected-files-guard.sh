@@ -121,6 +121,15 @@
 # hooks/hooks.json, command bash "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/protected-files-guard.sh".
 set -uo pipefail
 
+# --- qx_repo_armed: the ONE shared arming predicate (ONE-COPY round 2) -----
+# See session-state.sh's identical comment for why a path two levels up from
+# this file resolves the sibling helper correctly both in the repo checkout
+# and in the installed "quetrex" plugin cache.
+QX_ARMED_HELPER="$(dirname "${BASH_SOURCE[0]}")/../../plugins/quetrex-factory/scripts/qx-armed.sh"
+if ! source "$QX_ARMED_HELPER" 2>/dev/null || ! command -v qx_repo_armed >/dev/null 2>&1; then
+  qx_repo_armed() { [ -n "${1:-}" ] && [ -f "$1/.quetrex/project.json" ]; }
+fi
+
 # --- read hook input (absence is fine) -------------------------------------
 input=""
 if [ ! -t 0 ]; then input=$(cat); fi
@@ -184,7 +193,23 @@ PROT_BARE_ERE="(^|[^A-Za-z0-9_.-])(${PROT_ALT})\\.sh([^A-Za-z0-9_.-]|\$)"
 # write-target extraction). A false-positive hint here just means an
 # unarmed repo does a little more work before correctly allowing something
 # that was never actually a protected write target.
-PROT_INSTALLED_HINT_ERE='(^|[^A-Za-z0-9_.-])\.claude/plugins/(cache|marketplaces)/.*quetrex-factory'
+# SEC-ONECOPY-5 (Medium, round 2): requiring `.*quetrex-factory` in this hint
+# meant only the STANDALONE quetrex-factory plugin's cached/marketplace copy
+# was recognized as "installed, machine-global" — the five floor-script
+# copies cached under the "quetrex" plugin's OWN versions (e.g.
+# ~/.claude/plugins/cache/quetrex/quetrex/2.5.3/.claude/hooks/merge-gate.sh,
+# and every OTHER installed version on the machine: 2.4.0, 2.5.0, 2.5.1,
+# 2.5.2, ...) stayed writable from an UNARMED session, since they no longer
+# hit this hint and fell straight through to the ARMED-ONLY exit below on
+# the session's own (unarmed) repo. `.claude/plugins/(cache|marketplaces)/`
+# is already the whole "this is a machine-global installed-plugin path, not
+# something inside the session's own repo" signal — PROT_PATH_ERE (matched
+# afterward, on the real candidate token) is what actually decides whether
+# the path names a protected floor script, so broadening this HINT only
+# means an unarmed repo does a little more work before correctly allowing
+# something that was never a protected target. Covers both plugins'
+# cache/marketplace layouts, any plugin name, any version segment.
+PROT_INSTALLED_HINT_ERE='(^|[^A-Za-z0-9_.-])\.claude/plugins/(cache|marketplaces)/'
 
 # ARMED-ONLY, WITH THE C3 EXEMPTION: "unarmed repo = no gates at all" for
 # everything EXCEPT the machine-global installed-plugin shapes above, which
@@ -199,7 +224,9 @@ if [ "$TOOL_NAME" = "Write" ] || [ "$TOOL_NAME" = "Edit" ]; then
 else
   printf '%s' "$COMMAND" | grep -Eq "$PROT_INSTALLED_HINT_ERE" && INSTALLED_TARGET_HINT=1
 fi
-if [ "$INSTALLED_TARGET_HINT" -eq 0 ] && { [ -z "$ROOT" ] || [ ! -f "$ROOT/.quetrex/project.json" ]; }; then
+# SEC-ONECOPY-1 (round 2): qx_repo_armed also honors project.json tracked at
+# HEAD / the default branch tip, not just the working-tree file.
+if [ "$INSTALLED_TARGET_HINT" -eq 0 ] && { [ -z "$ROOT" ] || ! qx_repo_armed "$ROOT"; }; then
   exit 0
 fi
 
@@ -737,11 +764,24 @@ if [ "$TOOL_NAME" = "Write" ] || [ "$TOOL_NAME" = "Edit" ]; then
   # under the UN-resolved form then never byte-matches ROOT. A path-tail
   # match is the same shape PROT_PATH_ERE below already uses for the floor
   # scripts, and sidesteps the mismatch entirely.
+  # OBS-9 (round 2, closing the C6 fix's other half): deny-guard._kg_check_path
+  # already protects .quetrex/verify.json against the Bash vector (rm/mv/
+  # redirect/git rm/git checkout --), but this Write/Edit vector previously
+  # covered ONLY project.json. verify-gate.sh accepts a hand-written
+  # verify.json ({"verify":["true"]}) as the gate's own definition of green,
+  # so a single Write/Edit here replaces the real chain with a no-op and lets
+  # every future Stop pass on a red tree -- the same class of hole
+  # project.json's own protection closes for arming itself.
   _pj_norm=$(qx_normalize_path "$FILE_PATH")
   case "$_pj_norm" in
     */.quetrex/project.json|.quetrex/project.json)
       is_unlocked && allow_unlocked "$TOOL_NAME $FILE_PATH"
       deny "PROTECTED ARMING FILE: this $TOOL_NAME targets \`$FILE_PATH\` (.quetrex/project.json) -- the file that arms deny-guard, secret-scan, enforce-branch, merge-gate, verify-gate, edit-gate and this guard for the whole repo. Overwriting it in an armed repo would silently disable the entire safety floor for the rest of the session."
+      exit 0
+      ;;
+    */.quetrex/verify.json|.quetrex/verify.json)
+      is_unlocked && allow_unlocked "$TOOL_NAME $FILE_PATH"
+      deny "PROTECTED VERIFY CHAIN: this $TOOL_NAME targets \`$FILE_PATH\` (.quetrex/verify.json) -- the file that defines the verify chain verify-gate.sh actually gates the tree on. Overwriting it in an armed repo could silently replace the real chain with a no-op (e.g. {\"verify\":[\"true\"]}) and let every future Stop pass on a red tree."
       exit 0
       ;;
   esac
