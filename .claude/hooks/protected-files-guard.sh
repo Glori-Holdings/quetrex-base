@@ -679,6 +679,32 @@ qx_is_interpreter_inline_write() {
 # =============================================================================
 if [ "$TOOL_NAME" = "Write" ] || [ "$TOOL_NAME" = "Edit" ]; then
   [ -n "$FILE_PATH" ] || exit 0
+
+  # SEC-ONECOPY-1: .quetrex/project.json is what makes ROOT "armed" (see the
+  # ARMED-ONLY block above) -- by construction we only reach this line when
+  # the file ALREADY EXISTS at ROOT (an unarmed repo has no project.json and
+  # exits at the ARMED-ONLY gate before this point), so protecting it here
+  # can never block /quetrex:init's first-time creation of the file. A
+  # Write/Edit whose target normalizes to exactly that path is denied unless
+  # QUETREX_UNLOCK_FLOOR=1 -- the same unlock contract (is_unlocked /
+  # allow_unlocked / deny) the floor scripts below use.
+  #
+  # Matched by SUFFIX, never an exact "$ROOT"-prefixed string: FILE_PATH is
+  # the raw text the tool call carries, while ROOT came back through `git
+  # rev-parse --show-toplevel`, which canonicalizes symlinks (macOS's
+  # /tmp -> /private/tmp being the everyday case) -- an absolute FILE_PATH
+  # under the UN-resolved form then never byte-matches ROOT. A path-tail
+  # match is the same shape PROT_PATH_ERE below already uses for the floor
+  # scripts, and sidesteps the mismatch entirely.
+  _pj_norm=$(qx_normalize_path "$FILE_PATH")
+  case "$_pj_norm" in
+    */.quetrex/project.json|.quetrex/project.json)
+      is_unlocked && allow_unlocked "$TOOL_NAME $FILE_PATH"
+      deny "PROTECTED ARMING FILE: this $TOOL_NAME targets \`$FILE_PATH\` (.quetrex/project.json) -- the file that arms deny-guard, secret-scan, enforce-branch, merge-gate, verify-gate, edit-gate and this guard for the whole repo. Overwriting it in an armed repo would silently disable the entire safety floor for the rest of the session."
+      exit 0
+      ;;
+  esac
+
   names_protected_path_or_symlink "$FILE_PATH" || exit 0
   is_unlocked && allow_unlocked "$TOOL_NAME $FILE_PATH"
   deny "PROTECTED FLOOR SCRIPT: this $TOOL_NAME targets \`$FILE_PATH\`, one of the safety-floor scripts (deny-guard.sh, secret-scan.sh, enforce-branch.sh, merge-gate.sh, verify-gate.sh) or its quick-chain helper. Denied by default — see .claude/CLAUDE.md."

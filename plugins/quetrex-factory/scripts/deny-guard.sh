@@ -68,33 +68,17 @@ input=""
 if [ ! -t 0 ]; then input=$(cat); fi
 [ -z "$input" ] && exit 0
 
-# --- armed-only gate (ONE-COPY): an unarmed repo has no gates at all -------
-# Standard resolver (mirrors session-state.sh): CLAUDE_PROJECT_DIR -> the
-# payload's .cwd -> a plain `git rev-parse` from this process's own cwd. No
-# root, or the root has no .quetrex/project.json -> not a Quetrex-managed
-# repo; exit before any decision is made or any log/state is written. This
-# script had NO repo-root resolution before this change.
-_cwd=$(printf '%s' "$input" | tr -d '
-' | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-if command -v jq >/dev/null 2>&1 && printf '%s' "$input" | jq . >/dev/null 2>&1; then
-  _jq_cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
-  [ -n "$_jq_cwd" ] && _cwd="$_jq_cwd"
-fi
-_root=""
-if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "${CLAUDE_PROJECT_DIR:-}" ]; then
-  _root=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || _root="$CLAUDE_PROJECT_DIR"
-fi
-if [ -z "$_root" ] && [ -n "$_cwd" ] && [ -d "$_cwd" ]; then
-  _root=$(git -C "$_cwd" rev-parse --show-toplevel 2>/dev/null)
-fi
-[ -z "$_root" ] && _root=$(git rev-parse --show-toplevel 2>/dev/null)
-[ -n "$_root" ] && [ -f "$_root/.quetrex/project.json" ] || exit 0
-
 JQ_OK=0
 if command -v jq >/dev/null 2>&1 && printf '%s' "$input" | jq . >/dev/null 2>&1; then
   JQ_OK=1
 fi
 
+# NOTE (SEC-ONECOPY-1): command extraction now happens BEFORE the armed-only
+# gate below (it used to happen after). The kill-switch check that follows
+# the armed gate needs $cmd, and function definitions must precede their
+# call site in a script executed top-to-bottom — so deny() and cmd parsing
+# both move up. Behavior for every EXISTING rule in this file is unchanged:
+# the armed-only exit below still runs before any of them.
 TOOL_NAME=""
 cmd=""
 if [ "$JQ_OK" -eq 1 ]; then
@@ -131,7 +115,8 @@ deny() {
   exit 0
 }
 
-# --- quote-aware segmentation ----------------------------------------------
+# --- quote-aware segmentation (moved up: SEC-ONECOPY-1's kill-switch check,
+# below, needs this before the main rule set is defined) -------------------
 # Emits one pipeline segment per line. Quote characters are dropped but their
 # CONTENTS are preserved verbatim, and separators inside quotes do NOT split —
 # so `grep -rn "git reset --hard" docs/` is one segment whose first token is
@@ -167,8 +152,151 @@ split_segments() {
   printf '%s\n' "$out"
 }
 
-PIPE_TO_SHELL=0
+# --- armed-only gate (ONE-COPY): an unarmed repo has no gates at all -------
+# Standard resolver (mirrors session-state.sh): CLAUDE_PROJECT_DIR -> the
+# payload's .cwd -> a plain `git rev-parse` from this process's own cwd. No
+# root, or the root has no .quetrex/project.json -> not a Quetrex-managed
+# repo; exit before any decision is made or any log/state is written. This
+# script had NO repo-root resolution before this change.
+_cwd=$(printf '%s' "$input" | tr -d '
+' | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+if [ "$JQ_OK" -eq 1 ]; then
+  _jq_cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
+  [ -n "$_jq_cwd" ] && _cwd="$_jq_cwd"
+fi
+_root=""
+if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "${CLAUDE_PROJECT_DIR:-}" ]; then
+  _root=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || _root="$CLAUDE_PROJECT_DIR"
+fi
+if [ -z "$_root" ] && [ -n "$_cwd" ] && [ -d "$_cwd" ]; then
+  _root=$(git -C "$_cwd" rev-parse --show-toplevel 2>/dev/null)
+fi
+[ -z "$_root" ] && _root=$(git rev-parse --show-toplevel 2>/dev/null)
+ARMED=0
+[ -n "$_root" ] && [ -f "$_root/.quetrex/project.json" ] && ARMED=1
 
+# --- SEC-ONECOPY-1: the arming file is the whole floor's kill switch -------
+# Every rule below (and every OTHER floor script) is gated on
+# .quetrex/project.json existing. Nothing stopped the gated agent from
+# `rm -f`/`mv`/`cp`-overwriting/redirecting-into/`git rm`-ing/`git checkout
+# <ref> --`-restoring that one file (or the whole .quetrex directory) to
+# silently disarm deny-guard, secret-scan, enforce-branch, merge-gate,
+# verify-gate, edit-gate and protected-files-guard for the rest of the
+# session. This check runs ONLY while the repo IS armed (an unarmed repo has
+# no gates at all, by the same rule everything else here already follows —
+# so /quetrex:init creating project.json for the first time is unaffected),
+# and is itself bypassable only by the same operator-approved
+# QUETREX_UNLOCK_FLOOR=1 escape hatch every other floor script honors.
+#
+# RESIDUAL, DISCLOSED (not enumerated further — see the header's own
+# documented-residual style): this matches the literal path text handed to
+# the shell before expansion, the same limitation disposable_ref() below
+# already has for $VARIABLES; a `cd` into .quetrex first then a bare `rm
+# project.json` is not tracked (protected-files-guard.sh's PENDING_CD does
+# that for floor *scripts*, not for this file); `git clean` is not checked
+# because .quetrex/project.json is a TRACKED file and git clean never
+# removes tracked files (verified: `git ls-files .quetrex/` lists it).
+_kg_check_path() {
+  # Matched by SUFFIX, never by an exact "$_root"-prefixed string: a
+  # command's own path argument is the raw text handed to the shell, while
+  # $_root came back through `git rev-parse --show-toplevel`, which
+  # canonicalizes symlinks (macOS's /tmp -> /private/tmp being the everyday
+  # case). Requiring byte-identity between the two silently missed every
+  # absolute-path vector under a symlinked tmp/worktree root — caught by
+  # this file's own test fixture (mktemp -d lands under /var/folders/...,
+  # a symlink target). A path-tail match sidesteps the mismatch entirely
+  # and is the same shape protected-files-guard.sh's own PROT_PATH_ERE
+  # already uses for the floor scripts.
+  p="${1%/}"
+  case "$p" in
+    */.quetrex/project.json|.quetrex/project.json) : ;;
+    */.quetrex|.quetrex) : ;;
+    */.quetrex/\*|.quetrex/\*) : ;;   # `rm -rf .quetrex/*`
+    *) return 0 ;;
+  esac
+  deny "Refusing to let '$2' target .quetrex/project.json (or the .quetrex directory) in an armed repo — that file is what arms the entire safety floor (deny-guard, secret-scan, enforce-branch, merge-gate, verify-gate, edit-gate, protected-files-guard). Removing, moving, or overwriting it would silently disable every gate for the rest of this session. Set QUETREX_UNLOCK_FLOOR=1 for an intentional, operator-approved re-init."
+}
+
+check_quetrex_killswitch() {
+  _kcmd="$1"
+  while IFS= read -r _kseg; do
+    [ -n "$_kseg" ] || continue
+    set -f
+    _ktoks=()
+    for _ktok in $_kseg; do _ktoks+=("$_ktok"); done
+    set +f
+    _kn=${#_ktoks[@]}
+    [ "$_kn" -gt 0 ] || continue
+
+    # 1) a redirection can attach to ANY command, not just a recognized verb —
+    #    `echo x > .quetrex/project.json`, `cat a >> .quetrex/project.json`.
+    for ((_ki = 0; _ki < _kn; _ki++)); do
+      _kt="${_ktoks[$_ki]}"
+      case "$_kt" in
+        '>'|'>>'|[0-9]'>'|[0-9]'>>'|'&>'|'&>>'|'>|')
+          if [ $((_ki + 1)) -lt "$_kn" ]; then
+            _kg_check_path "${_ktoks[$((_ki + 1))]}" "a shell redirect"
+          fi ;;
+        *'>'*)
+          _krest="${_kt#*>}"; _krest="${_krest#>}"
+          [ -n "$_krest" ] && _kg_check_path "$_krest" "a shell redirect" ;;
+      esac
+    done
+
+    # 2) identify the head command, skipping env assignments / benign wrappers
+    #    (same stripping shape as check_tokens below).
+    _ki=0
+    while [ "$_ki" -lt "$_kn" ]; do
+      case "${_ktoks[$_ki]}" in
+        [A-Za-z_]*=*) _ki=$((_ki + 1)) ;;
+        sudo|doas|nohup|command|builtin|exec|time|nice|ionice|env) _ki=$((_ki + 1)) ;;
+        *) break ;;
+      esac
+    done
+    [ "$_ki" -lt "$_kn" ] || continue
+    _khead="${_ktoks[$_ki]##*/}"
+    _ki=$((_ki + 1))
+
+    case "$_khead" in
+      rm|unlink|truncate|tee|mv|cp)
+        for ((_kj = _ki; _kj < _kn; _kj++)); do
+          case "${_ktoks[$_kj]}" in -*) continue ;; esac
+          _kg_check_path "${_ktoks[$_kj]}" "$_khead"
+        done ;;
+      git)
+        while [ "$_ki" -lt "$_kn" ]; do
+          case "${_ktoks[$_ki]}" in
+            -C|-c|--git-dir|--work-tree|--namespace|--exec-path) _ki=$((_ki + 2)) ;;
+            -*) _ki=$((_ki + 1)) ;;
+            *) break ;;
+          esac
+        done
+        [ "$_ki" -lt "$_kn" ] || continue
+        _ksub="${_ktoks[$_ki]}"; _ki=$((_ki + 1))
+        case "$_ksub" in
+          rm)
+            for ((_kj = _ki; _kj < _kn; _kj++)); do
+              case "${_ktoks[$_kj]}" in -*) continue ;; esac
+              _kg_check_path "${_ktoks[$_kj]}" "git rm"
+            done ;;
+          checkout|restore)
+            _kdd=0
+            for ((_kj = _ki; _kj < _kn; _kj++)); do
+              if [ "${_ktoks[$_kj]}" = "--" ]; then _kdd=1; continue; fi
+              [ "$_kdd" -eq 1 ] && _kg_check_path "${_ktoks[$_kj]}" "git $_ksub"
+            done ;;
+        esac ;;
+    esac
+  done <<< "$(split_segments "$_kcmd")"
+}
+
+if [ "$ARMED" -eq 1 ] && [ "${QUETREX_UNLOCK_FLOOR:-}" != "1" ]; then
+  check_quetrex_killswitch "$cmd"
+fi
+
+[ "$ARMED" -eq 1 ] || exit 0
+
+# --- quote-aware segmentation ----------------------------------------------
 # --- long-option PREFIX matching -------------------------------------------
 # opt_is <arg> <full-long-option> — true when <arg> is `--` plus a non-empty
 # PREFIX of <full-long-option>, i.e. exactly the set of spellings git's
@@ -426,6 +554,8 @@ check_tokens() {
   esac
   return 0
 }
+
+PIPE_TO_SHELL=0
 
 VERDICT_TMP=$(mktemp "${TMPDIR:-/tmp}/quetrex-deny-guard.XXXXXX" 2>/dev/null) || VERDICT_TMP="${TMPDIR:-/tmp}/quetrex-deny-guard.$$"
 trap 'rm -f "$VERDICT_TMP" 2>/dev/null' EXIT
