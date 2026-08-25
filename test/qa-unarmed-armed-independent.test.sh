@@ -22,8 +22,9 @@ ENFORCE_BRANCH="$REPO_ROOT/plugins/quetrex-factory/scripts/enforce-branch.sh"
 MERGE_GATE="$REPO_ROOT/plugins/quetrex-factory/scripts/merge-gate.sh"
 VERIFY_GATE="$REPO_ROOT/plugins/quetrex-factory/scripts/verify-gate.sh"
 SESSION_STATE="$REPO_ROOT/.claude/hooks/session-state.sh"
+EDIT_GATE="$REPO_ROOT/.claude/hooks/edit-gate.sh"
 
-for h in "$DENY_GUARD" "$SECRET_SCAN" "$ENFORCE_BRANCH" "$MERGE_GATE" "$VERIFY_GATE" "$SESSION_STATE"; do
+for h in "$DENY_GUARD" "$SECRET_SCAN" "$ENFORCE_BRANCH" "$MERGE_GATE" "$VERIFY_GATE" "$SESSION_STATE" "$EDIT_GATE"; do
   if [ ! -f "$h" ]; then
     echo "FAIL: hook not found at $h"
     exit 1
@@ -41,6 +42,15 @@ notok() { FAIL=$((FAIL+1)); printf 'NOT OK - %s\n' "$1"; }
 # A repo with a package.json `test` script, per the QA brief — proves the
 # armed check is not accidentally piggy-backing on "has a test runner".
 FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/qa-unarmed-armed.XXXXXX")"
+# Canonicalize: on macOS, mktemp's TMPDIR often lives under a symlinked
+# prefix (/tmp -> /private/tmp, /var -> /private/var). `git rev-parse
+# --show-toplevel` (used by every hook's ROOT resolver) returns the
+# RESOLVED path, so a FILE built from the unresolved $FIXTURE would fail
+# edit-gate.sh's own (pre-existing, unrelated to this PR) `"$FILE" in
+# "$ROOT"/*` prefix check for reasons that have nothing to do with what
+# this suite is testing. Resolve once, up front, so every hook here is
+# compared against the SAME (real) path git itself will report.
+FIXTURE="$(cd "$FIXTURE" && pwd -P)"
 cleanup() { rm -rf "$FIXTURE"; }
 trap cleanup EXIT
 
@@ -114,6 +124,22 @@ else
   notok "unarmed: verify-gate expected silent allow + no .quetrex/, got code=$CODE out=[$OUT] err=[$ERR] quetrex_exists=$([ -d "$FIXTURE/.quetrex" ] && echo yes || echo no)"
 fi
 
+# edit-gate.sh (PostToolUse, matcher Write|Edit) — AC12: exits 0, silent, in
+# an unarmed repo, for a file with a REAL syntax error that WOULD trip its
+# built-in bash -n tier if the armed-only gate were absent.
+BAD_SH="$FIXTURE/bad-syntax.sh"
+printf '#!/usr/bin/env bash\nif [ 1 -eq 1 ]; then\n  echo "unterminated\n' > "$BAD_SH"
+for shape in Write Edit; do
+  EG_PAYLOAD=$(jq -cn --arg cwd "$FIXTURE" --arg fp "$BAD_SH" --arg tn "$shape" '{tool_name:$tn,tool_input:{file_path:$fp},cwd:$cwd}')
+  OUT=$(run_hook "$EDIT_GATE" "$EG_PAYLOAD" 2>/tmp/qa-uai.e.$$); CODE=$?
+  ERR=$(cat /tmp/qa-uai.e.$$); rm -f /tmp/qa-uai.e.$$
+  if [ "$CODE" -eq 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ]; then
+    ok "unarmed: edit-gate ($shape) silent on a file with a real syntax error, exit 0"
+  else
+    notok "unarmed: edit-gate ($shape) expected silent exit 0, got code=$CODE out=[$OUT] err=[$ERR]"
+  fi
+done
+
 SESSION_OFFER_LINE="Quetrex: this repo is not armed (no .quetrex/project.json). Offer the user /quetrex:init; if they say yes, run it."
 for src in startup resume compact; do
   OUT=$(printf '{}' | CLAUDE_PROJECT_DIR="$FIXTURE" bash "$SESSION_STATE" "$src" 2>/tmp/qa-uai.e.$$); CODE=$?
@@ -161,6 +187,17 @@ if [ "$CODE" -eq 0 ] && ! printf '%s' "$OUT" | grep -q "not armed" && [ -n "$OUT
 else
   notok "armed: session-state expected a non-empty briefing with 0 'not armed' occurrences, got code=$CODE out=[$OUT] err=[$ERR]"
 fi
+
+for shape in Write Edit; do
+  EG_PAYLOAD=$(jq -cn --arg cwd "$FIXTURE" --arg fp "$BAD_SH" --arg tn "$shape" '{tool_name:$tn,tool_input:{file_path:$fp},cwd:$cwd}')
+  OUT=$(run_hook "$EDIT_GATE" "$EG_PAYLOAD" 2>/tmp/qa-uai.e.$$); CODE=$?
+  ERR=$(cat /tmp/qa-uai.e.$$); rm -f /tmp/qa-uai.e.$$
+  if [ "$CODE" -eq 2 ] && [ -n "$ERR" ]; then
+    ok "armed: edit-gate ($shape) still catches the real syntax error (exit 2, stderr fed back)"
+  else
+    notok "armed: edit-gate ($shape) expected exit 2 with non-empty stderr, got code=$CODE out=[$OUT] err=[$ERR]"
+  fi
+done
 
 echo
 if [ "$FAIL" -eq 0 ]; then
