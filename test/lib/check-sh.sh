@@ -31,7 +31,7 @@ cd "$ROOT" || { echo "NOT OK - check:sh: cannot cd to root: $ROOT" >&2; exit 1; 
 
 N=0
 BAD=0
-for f in .claude/hooks/*.sh .claude/lib/*.sh .claude/*.sh .claude/skills/*/*.sh .claude/skills/*/scripts/*.sh bin/* test/*.sh test/lib/*.sh; do
+for f in .claude/hooks/*.sh .claude/lib/*.sh .claude/*.sh .claude/skills/*/*.sh .claude/skills/*/scripts/*.sh plugins/quetrex-factory/scripts/*.sh bin/* test/*.sh test/lib/*.sh; do
   [ -f "$f" ] || continue
   N=$((N + 1))
   if ! ERR="$(bash -n "$f" 2>&1)"; then

@@ -32,6 +32,10 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 # i.e. exactly the shape this PR puts quetrex-base into.
 REPO="$TMP/repo"; mkdir -p "$REPO/.claude" "$REPO/.quetrex"
 printf '{"enabledPlugins":{"quetrex-factory@quetrex":true},"hooks":{}}\n' > "$REPO/.claude/settings.json"
+# ARMED: session-state.sh now gates on .quetrex/project.json specifically
+# (not merely -d .quetrex) — without this the hook would print the unarmed
+# offer and exit before ever reaching the liveness banner this file tests.
+echo '{}' > "$REPO/.quetrex/project.json"
 git -C "$REPO" init --quiet 2>/dev/null
 
 hooks_json() { printf '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash \\"${CLAUDE_PLUGIN_ROOT}/scripts/merge-gate.sh\\""}]}]}}\n'; }

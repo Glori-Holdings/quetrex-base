@@ -16,7 +16,7 @@
 # Usage: bash test/lib/check-json.sh [root]
 #   root defaults to the repo root, so plain `npm run check:json` checks the
 #   real files. A test can instead point it at a fixture directory with its
-#   own copies of the same 6 relative paths to prove the collect-everything
+#   own copies of the same 8 relative paths to prove the collect-everything
 #   behavior without ever touching real repo files — see
 #   test/check-scripts.test.sh.
 set -u
@@ -34,6 +34,8 @@ const files = [
   ".quetrex/verify.json",
   ".claude-plugin/plugin.json",
   "hooks/hooks.json",
+  "plugins/quetrex-factory/.claude-plugin/plugin.json",
+  "plugins/quetrex-factory/hooks/hooks.json",
 ];
 let bad = 0;
 for (const f of files) {

@@ -89,6 +89,10 @@ fi
 [ -z "$ROOT" ] && ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 [ -n "$ROOT" ] && [ -d "$ROOT" ] || exit 0
 
+# ARMED-ONLY: an unarmed repo (no .quetrex/project.json) gets none of the
+# pipeline's per-edit checking — "unarmed repo = no gates at all".
+[ -f "$ROOT/.quetrex/project.json" ] || exit 0
+
 # Only ever check a file inside the project. An edit to a file elsewhere on the
 # machine is none of this gate's business, and the pipeline's own control
 # artifacts are not source.

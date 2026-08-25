@@ -104,18 +104,21 @@ else
 fi
 
 # =============================================================================
-# check-json.sh — a fixture tree with 2 of the 6 expected files malformed,
+# check-json.sh — a fixture tree with 2 of the 8 expected files malformed,
 # planted at opposite ends of the fixed file list.
 # =============================================================================
 JROOT="$TMPROOT/jfix"
-mkdir -p "$JROOT/.claude" "$JROOT/.claude/templates" "$JROOT/.quetrex" "$JROOT/.claude-plugin" "$JROOT/hooks"
+mkdir -p "$JROOT/.claude" "$JROOT/.claude/templates" "$JROOT/.quetrex" "$JROOT/.claude-plugin" "$JROOT/hooks" \
+  "$JROOT/plugins/quetrex-factory/.claude-plugin" "$JROOT/plugins/quetrex-factory/hooks"
 
 printf '{ this is not json' > "$JROOT/package.json"                       # first in the list, bad
 echo '{}' > "$JROOT/.claude/settings.json"
 echo '{}' > "$JROOT/.claude/templates/verify.json"
 echo '{}' > "$JROOT/.quetrex/verify.json"
 echo '{}' > "$JROOT/.claude-plugin/plugin.json"
-printf '{ "also": not json' > "$JROOT/hooks/hooks.json"                   # last in the list, bad
+echo '{}' > "$JROOT/hooks/hooks.json"
+echo '{}' > "$JROOT/plugins/quetrex-factory/.claude-plugin/plugin.json"
+printf '{ "also": not json' > "$JROOT/plugins/quetrex-factory/hooks/hooks.json"   # last in the list, bad
 
 J_OUT="$(bash "$CHECK_JSON" "$JROOT" 2>&1)"; J_CODE=$?
 
@@ -129,24 +132,24 @@ if printf '%s' "$J_OUT" | grep -qF 'NOT OK - package.json'; then
 else
   fail "check-json.sh did not report package.json (out: [$J_OUT])"
 fi
-if printf '%s' "$J_OUT" | grep -qF 'NOT OK - hooks/hooks.json'; then
-  pass "check-json.sh ALSO reports the LAST bad file (hooks/hooks.json) — proves the uncaught-throw-stops-the-loop bug is gone"
+if printf '%s' "$J_OUT" | grep -qF 'NOT OK - plugins/quetrex-factory/hooks/hooks.json'; then
+  pass "check-json.sh ALSO reports the LAST bad file (plugins/quetrex-factory/hooks/hooks.json) — proves the uncaught-throw-stops-the-loop bug is gone"
 else
-  fail "check-json.sh did not report hooks/hooks.json (the old for-loop would have thrown on package.json and never reached it) (out: [$J_OUT])"
+  fail "check-json.sh did not report plugins/quetrex-factory/hooks/hooks.json (the old for-loop would have thrown on package.json and never reached it) (out: [$J_OUT])"
 fi
 JNOTOK_N="$(printf '%s\n' "$J_OUT" | grep -c '^NOT OK - ')"
 if [ "$JNOTOK_N" -eq 2 ]; then
-  pass "check-json.sh reports exactly 2 NOT OK lines — the 4 well-formed files are not misreported"
+  pass "check-json.sh reports exactly 2 NOT OK lines — the 6 well-formed files are not misreported"
 else
   fail "check-json.sh: expected exactly 2 NOT OK lines, got $JNOTOK_N (out: [$J_OUT])"
 fi
 
 # GREEN: fix both files, confirm a clean pass.
 echo '{}' > "$JROOT/package.json"
-echo '{}' > "$JROOT/hooks/hooks.json"
+echo '{}' > "$JROOT/plugins/quetrex-factory/hooks/hooks.json"
 J_GREEN_OUT="$(bash "$CHECK_JSON" "$JROOT" 2>&1)"; J_GREEN_CODE=$?
-if [ "$J_GREEN_CODE" -eq 0 ] && printf '%s' "$J_GREEN_OUT" | grep -qE '^ok - check:json: 6 JSON files parse'; then
-  pass "check-json.sh: GREEN once both files are fixed (exit 0, 6 files parse)"
+if [ "$J_GREEN_CODE" -eq 0 ] && printf '%s' "$J_GREEN_OUT" | grep -qE '^ok - check:json: 8 JSON files parse'; then
+  pass "check-json.sh: GREEN once both files are fixed (exit 0, 8 files parse)"
 else
   fail "check-json.sh: expected a clean green pass after fixing both files, got exit $J_GREEN_CODE (out: [$J_GREEN_OUT])"
 fi
