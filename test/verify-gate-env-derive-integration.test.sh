@@ -57,8 +57,8 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GATE_HOOK="${QX_VERIFY_GATE_HOOK:-$REPO_ROOT/.claude/hooks/verify-gate.sh}"
-MERGE_HOOK="${QX_MERGE_GATE_HOOK:-$REPO_ROOT/.claude/hooks/merge-gate.sh}"
+GATE_HOOK="${QX_VERIFY_GATE_HOOK:-$REPO_ROOT/plugins/quetrex-factory/scripts/verify-gate.sh}"
+MERGE_HOOK="${QX_MERGE_GATE_HOOK:-$REPO_ROOT/plugins/quetrex-factory/scripts/merge-gate.sh}"
 DERIVE="$REPO_ROOT/bin/quetrex-env-derive"
 
 if [ ! -f "$GATE_HOOK" ]; then echo "FAIL: verify-gate hook not found at $GATE_HOOK"; exit 1; fi
@@ -133,6 +133,7 @@ cat > "$FIX/package.json" <<'EOF'
 EOF
 
 mkdir -p "$FIX/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$FIX/.quetrex/project.json" 2>/dev/null
 cat > "$FIX/.quetrex/verify.json" <<'EOF'
 { "verify": ["npm run build"] }
 EOF
@@ -380,6 +381,7 @@ cp "$FIX/.env.example" "$FIXNEG/.env.example"
 # own source spells the "next build" script string exactly once (AC25).
 cp "$FIX/package.json" "$FIXNEG/package.json"
 mkdir -p "$FIXNEG/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$FIXNEG/.quetrex/project.json" 2>/dev/null
 cat > "$FIXNEG/.quetrex/verify.json" <<'EOF'
 { "verify": ["npm run build"] }
 EOF

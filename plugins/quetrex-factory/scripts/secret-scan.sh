@@ -61,6 +61,30 @@ input=""
 if [ ! -t 0 ]; then input=$(cat); fi
 [ -z "$input" ] && exit 0
 
+# --- armed-only gate (ONE-COPY): an unarmed repo has no gates at all -------
+# SECRET-SCAN DECISION (operator-approved, most consequential line of this
+# change): per "unarmed repo = no gates at all", secret-scan IS armed-only
+# too, even though it is the one floor script whose absence can leak a
+# credential rather than merely permit sloppiness. Standard resolver (mirrors
+# session-state.sh): CLAUDE_PROJECT_DIR -> the payload's .cwd -> a plain
+# `git rev-parse` from this process's own cwd. This script had NO repo-root
+# resolution before this change.
+_cwd=$(printf '%s' "$input" | tr -d '
+' | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+if command -v jq >/dev/null 2>&1 && printf '%s' "$input" | jq . >/dev/null 2>&1; then
+  _jq_cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
+  [ -n "$_jq_cwd" ] && _cwd="$_jq_cwd"
+fi
+_root=""
+if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "${CLAUDE_PROJECT_DIR:-}" ]; then
+  _root=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || _root="$CLAUDE_PROJECT_DIR"
+fi
+if [ -z "$_root" ] && [ -n "$_cwd" ] && [ -d "$_cwd" ]; then
+  _root=$(git -C "$_cwd" rev-parse --show-toplevel 2>/dev/null)
+fi
+[ -z "$_root" ] && _root=$(git rev-parse --show-toplevel 2>/dev/null)
+[ -n "$_root" ] && [ -f "$_root/.quetrex/project.json" ] || exit 0
+
 JQ_OK=0
 if command -v jq >/dev/null 2>&1 && printf '%s' "$input" | jq . >/dev/null 2>&1; then
   JQ_OK=1

@@ -7,7 +7,7 @@ restates the steps**. `/quetrex:task-build` runs it once per standalone task and
 `/quetrex:task-rework` runs the identical engine on re-queue.
 
 **What this file is not.** Each stage's own behaviour is defined by its agent file under
-`.claude/agents/`, and those files are authoritative. Where this document and an agent file ever
+`plugins/quetrex-factory/agents/`, and those files are authoritative. Where this document and an agent file ever
 disagree, the agent file wins and this document is the bug. This file describes the sequence, the
 inputs, and the artifacts that pass between stages — nothing about how a stage does its job.
 
@@ -275,7 +275,7 @@ judgment would be relabelled without being re-made).
 ## The two env shape contracts
 
 Two artifacts carry environment-variable information between stages that cannot see each other's
-source. Each has exactly one shape, decided **here** and nowhere else — `.claude/agents/architect.md`
+source. Each has exactly one shape, decided **here** and nowhere else — `plugins/quetrex-factory/agents/architect.md`
 and `bin/quetrex-cloud-prep` both cite this section by name ("Contract A"/"Contract B" in **The two
 env shape contracts**) instead of re-specifying the shape, precisely so four files never guess at
 it independently and drift.

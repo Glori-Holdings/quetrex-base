@@ -15,7 +15,7 @@
 #   - `hydrate` is exercised by running it and then SOURCING the file it wrote,
 #     so a value that is not actually exported cannot pass.
 #   - Every placeholder value the script can emit is fed to the repo's own
-#     .claude/hooks/secret-scan.sh, with a positive control proving the hook is
+#     plugins/quetrex-factory/scripts/secret-scan.sh, with a positive control proving the hook is
 #     live in this environment (otherwise "nothing was denied" would be
 #     indistinguishable from "the gate is not running").
 #
@@ -26,7 +26,7 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PREP="$REPO_ROOT/bin/quetrex-cloud-prep"
-SCAN="$REPO_ROOT/.claude/hooks/secret-scan.sh"
+SCAN="$REPO_ROOT/plugins/quetrex-factory/scripts/secret-scan.sh"
 
 if [ ! -f "$PREP" ]; then
   echo "FAIL: bin/quetrex-cloud-prep not found at $PREP"

@@ -15,7 +15,7 @@
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOOK="${QX_MERGE_GATE_HOOK:-$ROOT/.claude/hooks/merge-gate.sh}"
+HOOK="${QX_MERGE_GATE_HOOK:-$ROOT/plugins/quetrex-factory/scripts/merge-gate.sh}"
 
 PASS=0; FAIL=0
 ok()    { PASS=$((PASS+1)); echo "ok - $1"; }
@@ -47,6 +47,7 @@ fi
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 R="$T/repo"
 mkdir -p "$R/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$R/.quetrex/project.json" 2>/dev/null
 ( cd "$R"
   git init -q . && git config user.email t@t && git config user.name t
   printf '{\n  "verify": ["echo one", "echo two"]\n}\n' > .quetrex/verify.json

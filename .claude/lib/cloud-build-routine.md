@@ -143,7 +143,7 @@ prefix {{BRANCH_PREFIX}}. The architect already ran locally and produced
 /tmp/plan-{{TASK}}.json (PLAN_ARTIFACT); resume from developer(s) — do not re-run the
 architect stage. Spawn the remaining stages (developer(s), qa, reviewer, git-workflow) via
 the Task tool — one dispatch per stage, in that exact order, each reading its own agent file
-off disk (.claude/agents/developer.md, qa.md, reviewer.md, security-reviewer.md when the
+off disk (plugins/quetrex-factory/agents/developer.md, qa.md, reviewer.md, security-reviewer.md when the
 plan sets security_review_required, git-workflow.md) as its instructions. If subagent
 dispatch is unavailable in this cloud session (the Task tool is absent or fails), run the
 stages sequentially yourself in one session instead, applying each role's discipline in that

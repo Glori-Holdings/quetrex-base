@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test/deny-guard-push-delete.test.sh — remote REF DELETION is a catastrophic
-# command, and .claude/hooks/deny-guard.sh used to be blind to it.
+# command, and plugins/quetrex-factory/scripts/deny-guard.sh used to be blind to it.
 #
 # Run: bash test/deny-guard-push-delete.test.sh
 #
@@ -52,7 +52,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DENY_GUARD="$REPO_ROOT/.claude/hooks/deny-guard.sh"
+DENY_GUARD="$REPO_ROOT/plugins/quetrex-factory/scripts/deny-guard.sh"
 
 if [ ! -f "$DENY_GUARD" ]; then
   echo "NOT OK - required file not found: $DENY_GUARD"
