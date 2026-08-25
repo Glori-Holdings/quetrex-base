@@ -191,6 +191,19 @@ fi
 # against <armed-repo>, not the session.
 LAST_CD=""
 
+# --- qx_repo_armed: the ONE shared arming predicate (ONE-COPY round 2) -----
+# Sibling file in this same scripts/ directory, so `dirname "${BASH_SOURCE[0]}"`
+# resolves it identically in the repo checkout, the standalone quetrex-factory
+# plugin's installed cache, and nested inside quetrex's bundled copy — same
+# shape verify-gate.sh already uses to source verify-gate-quick-chain.sh.
+QX_ARMED_HELPER="$(dirname "${BASH_SOURCE[0]}")/qx-armed.sh"
+if ! source "$QX_ARMED_HELPER" 2>/dev/null || ! command -v qx_repo_armed >/dev/null 2>&1; then
+  # Sourcing failed (helper missing/unreadable in some non-standard install
+  # layout) — degrade to the pre-shared-helper, working-tree-file-only
+  # check rather than let the whole hook error out. Never a stack trace.
+  qx_repo_armed() { [ -n "$1" ] && [ -f "$1/.quetrex/project.json" ]; }
+fi
+
 resolve_root_for() {  # resolve_root_for <explicit-dir-or-empty>
   _rrf_d="$1"
   if [ -n "$_rrf_d" ]; then
@@ -218,8 +231,25 @@ resolve_root_for() {  # resolve_root_for <explicit-dir-or-empty>
 }
 
 target_armed() {  # target_armed <explicit-dir-or-empty>
+  # SEC-ONECOPY-3 (Critical, round 2): this used to be the ONLY signal this
+  # function judged — the TARGET's arming, alone — so naming ANY dir that
+  # fails to resolve to an armed repo (a non-repo dir, a nonexistent dir,
+  # `/`, `$HOME`, `..`, an unarmed sibling checkout) turned the whole rule
+  # off, even from a fully armed session: `cd /tmp && rm -rf /`,
+  # `git -C /nonexistent push --force origin main`, etc. all went from DENY
+  # to ALLOW (measured against 2ffde3a / 40feac8 in .quetrex/security-findings.json).
+  #
+  # THE FIX (design A, round-2 orchestrator decision): the per-invocation
+  # target is an ADDITION, never a replacement. Gate iff the SESSION root is
+  # armed OR the resolved target is armed. The session's own arming is
+  # therefore unconditionally one of the two signals and is never displaced
+  # by a target that fails to resolve to something armed — only when the
+  # SESSION is itself unarmed AND the named target resolves to a different,
+  # also-unarmed repo (or resolves to nothing at all) does the gate stand
+  # down, which is exactly the pre-C5 baseline for an unarmed session.
+  qx_repo_armed "$_session_root" && return 0
   _ta_root=$(resolve_root_for "$1")
-  [ -n "$_ta_root" ] && [ -f "$_ta_root/.quetrex/project.json" ]
+  [ -n "$_ta_root" ] && qx_repo_armed "$_ta_root"
 }
 
 # --- SEC-ONECOPY-1: the arming file is the whole floor's kill switch -------

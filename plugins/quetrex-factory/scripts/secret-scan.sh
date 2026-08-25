@@ -128,6 +128,22 @@ fi
 # already does NOT narrow what it scans to files under the resolved root, so
 # a Bash payload writing a secret to a path outside the session repo is
 # still caught by the SESSION being armed, unaffected by this fix.
+#
+# SEC-ONECOPY-4 (Medium, round 2): resolving Write/Edit arming from
+# FILE_PATH's own repo ALONE (with the session as a fallback only when the
+# file's own repo cannot be resolved) meant a Write into a SIBLING git repo
+# that merely lacked its own .quetrex/project.json (a scratch clone, a
+# vendored checkout, a fresh `git init` the agent made itself) went
+# unscanned even from a fully ARMED session — measured DENY at 40feac8/
+# 2ffde3a, silent ALLOW at e384c11. THE FIX (design A/C, round-2
+# orchestrator decision): same additive shape as deny-guard's SEC-ONECOPY-3
+# fix — scan iff the SESSION is armed OR the resolved target is armed. The
+# target-repo resolution below is an ADDITION to session-armed coverage,
+# never a replacement for it.
+QX_ARMED_HELPER="$(dirname "${BASH_SOURCE[0]}")/qx-armed.sh"
+if ! source "$QX_ARMED_HELPER" 2>/dev/null || ! command -v qx_repo_armed >/dev/null 2>&1; then
+  qx_repo_armed() { [ -n "$1" ] && [ -f "$1/.quetrex/project.json" ]; }
+fi
 _cwd=$(printf '%s' "$input" | tr -d '
 ' | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 if [ "$JQ_OK" -eq 1 ]; then
@@ -171,7 +187,10 @@ if { [ "$TOOL_NAME" = "Write" ] || [ "$TOOL_NAME" = "Edit" ]; } && [ -n "$FILE_P
 else
   _target_root="$_session_root"
 fi
-[ -n "$_target_root" ] && [ -f "$_target_root/.quetrex/project.json" ] || exit 0
+# SEC-ONECOPY-4 fix: session-armed OR target-armed, never target-only.
+if ! qx_repo_armed "$_session_root" && ! { [ -n "$_target_root" ] && qx_repo_armed "$_target_root"; }; then
+  exit 0
+fi
 
 # Mask a token for safe display: keep a 4-char prefix, hide the rest.
 # Built from literals only — no `tr`/`cut` over a multibyte character, which

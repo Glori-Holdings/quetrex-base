@@ -22,12 +22,34 @@
 #     session (a shell command's real target can move across repos in ways
 #     this file does not parse a -C/cd out of).
 #
-# AC1-AC4: deny-guard cross-repo shapes (git -C, cd, plain, and the
-#          kill-switch check) — armed TARGET denies regardless of session,
-#          unarmed target allows regardless of session.
-# AC5-AC7: secret-scan Write/Edit resolve from FILE_PATH's own repo;
-#          Bash still resolves from the session (unaffected, by design).
-# AC8: FAIL-FIRST (mechanical) against this task's own base sha (2ffde3a).
+# ROUND 2 AMENDMENT (SEC-ONECOPY-3 Critical / SEC-ONECOPY-4 Medium): the C5
+# fix above made the TARGET's arming the ONLY signal these two hooks judged —
+# so naming ANY directory that fails to resolve to an armed repo (a
+# non-repo dir, a nonexistent dir, `/`, `$HOME`, `..`, or — the shape THIS
+# file's own AC2/AC6 exercise — an unarmed SIBLING repo) turned deny-guard's
+# and secret-scan's rules off entirely, even from a fully ARMED session.
+# `cd <unarmed> && rm -rf /` and a secret Write into an unarmed sibling repo
+# both went from DENY to silent ALLOW at e384c11. THE FIX (design A, round 2):
+# the session's own arming is now unconditionally ONE of two signals — gate
+# iff qx_repo_armed(SESSION) OR qx_repo_armed(TARGET) — so AC2/AC6 below now
+# assert DENY from an ARMED session (this round's fix), with a NEW AC2b/AC6b
+# proving the gate still correctly stands down when BOTH session and target
+# are unarmed (the legitimate case the additive rule must not break).
+#
+# AC1, AC3, AC4: deny-guard cross-repo shapes (git -C, cd, and the
+#                kill-switch check) — armed TARGET denies regardless of
+#                session (unaffected by round 2).
+# AC2/AC2b: deny-guard — an unarmed target denies when the SESSION is armed
+#           (round 2 fix), but still allows when BOTH are unarmed.
+# AC5: secret-scan Write/Edit resolves from FILE_PATH's own repo (unaffected).
+# AC6/AC6b: secret-scan — a Write into an unarmed target denies when the
+#           SESSION is armed (round 2 fix), but still allows when BOTH are
+#           unarmed.
+# AC7: secret-scan Bash vector still resolves from the session (unaffected).
+# AC8: FAIL-FIRST (mechanical) against this task's own base sha (2ffde3a) —
+#      the ARMED-TARGET/UNARMED-SESSION direction, unaffected by round 2.
+# AC9: FAIL-FIRST (mechanical) against e384c11 (round-2 base sha) — proves
+#      SEC-ONECOPY-3/4's ARMED-SESSION/UNARMED-TARGET bypass was real there.
 #
 # Run: bash test/cross-repo-arming.test.sh
 
@@ -37,6 +59,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DENY_GUARD="${QX_DENY_GUARD_HOOK:-$REPO_ROOT/plugins/quetrex-factory/scripts/deny-guard.sh}"
 SECRET_SCAN="${QX_SECRET_SCAN_HOOK:-$REPO_ROOT/plugins/quetrex-factory/scripts/secret-scan.sh}"
 BASE_SHA="2ffde3a"
+BASE_SHA_R2="e384c11"
 
 for h in "$DENY_GUARD" "$SECRET_SCAN"; do
   [ -f "$h" ] || { echo "FAIL: hook not found at $h"; echo; echo "cross-repo-arming.test.sh: 0 passed, 1 failed"; exit 1; }
@@ -88,14 +111,32 @@ else
 fi
 
 # =============================================================================
-# AC2 — deny-guard: `git -C <unarmed>` from an ARMED session -> ALLOW (silent)
+# AC2 — deny-guard: `git -C <unarmed>` from an ARMED session -> DENY
+# (SEC-ONECOPY-3, round 2: the session's own arming is now an unconditional
+# signal — naming an unarmed sibling repo no longer turns the gate off.)
 # =============================================================================
 OUT="$(fire_dg "$DENY_GUARD" "git -C $UNARMED push --force origin main" "$ARMED")"
-if is_silent "$OUT"; then
-  ok "AC2: deny-guard allows (silent) 'git -C <unarmed> push --force' from an ARMED session"
+if is_deny "$OUT"; then
+  ok "AC2: deny-guard denies 'git -C <unarmed> push --force' from an ARMED session (SEC-ONECOPY-3 fix)"
 else
-  notok "AC2: expected silent allow for git -C <unarmed> from an armed session, got [$OUT]"
+  notok "AC2: expected deny for git -C <unarmed> from an armed session, got [$OUT]"
 fi
+
+# =============================================================================
+# AC2b — deny-guard: `git -C <unarmed>` from an UNARMED session -> ALLOW
+# (silent). The additive fix must not turn EVERY cross-repo command into a
+# deny — when neither the session nor the named target is armed, there is
+# genuinely nothing to gate.
+# =============================================================================
+UNARMED2="$(mktemp -d "${TMPDIR:-/tmp}/qx-cra-unarmed2.XXXXXX")"
+git -C "$UNARMED2" init -q -b main
+OUT="$(fire_dg "$DENY_GUARD" "git -C $UNARMED2 push --force origin main" "$UNARMED")"
+if is_silent "$OUT"; then
+  ok "AC2b: deny-guard allows (silent) 'git -C <unarmed> push --force' when BOTH session and target are unarmed"
+else
+  notok "AC2b: expected silent allow when both session and target are unarmed, got [$OUT]"
+fi
+rm -rf "$UNARMED2"
 
 # =============================================================================
 # AC3 — deny-guard: `cd <armed> && ...` from an UNARMED session -> DENY
@@ -135,14 +176,32 @@ else
 fi
 
 # =============================================================================
-# AC6 — secret-scan: Write into <unarmed>'s own file, from an ARMED session -> ALLOW (silent)
+# AC6 — secret-scan: Write into <unarmed>'s own file, from an ARMED session -> DENY
+# (SEC-ONECOPY-4, round 2: the session's own arming is now an unconditional
+# signal — a Write into an unarmed sibling repo no longer sails through just
+# because that repo itself lacks project.json.)
 # =============================================================================
 OUT="$(fire_ss_write "$SECRET_SCAN" "$UNARMED/leak.env" "$ARMED")"
-if is_silent "$OUT"; then
-  ok "AC6: secret-scan allows (silent) a Write into <unarmed>/leak.env from an ARMED session"
+if is_deny "$OUT"; then
+  ok "AC6: secret-scan denies a Write into <unarmed>/leak.env from an ARMED session (SEC-ONECOPY-4 fix)"
 else
-  notok "AC6: expected silent allow for a Write into <unarmed> from an armed session, got [$OUT]"
+  notok "AC6: expected deny for a Write into <unarmed> from an armed session, got [$OUT]"
 fi
+
+# =============================================================================
+# AC6b — secret-scan: Write into <unarmed>'s own file, from an UNARMED
+# session -> ALLOW (silent). Neither side is armed, so there is genuinely
+# nothing to gate.
+# =============================================================================
+UNARMED3="$(mktemp -d "${TMPDIR:-/tmp}/qx-cra-unarmed3.XXXXXX")"
+git -C "$UNARMED3" init -q -b main
+OUT="$(fire_ss_write "$SECRET_SCAN" "$UNARMED3/leak.env" "$UNARMED")"
+if is_silent "$OUT"; then
+  ok "AC6b: secret-scan allows (silent) a Write into <unarmed>/leak.env when BOTH session and target are unarmed"
+else
+  notok "AC6b: expected silent allow when both session and target are unarmed, got [$OUT]"
+fi
+rm -rf "$UNARMED3"
 
 # =============================================================================
 # AC7 — secret-scan: Bash vector still resolves from the SESSION, unaffected
@@ -184,6 +243,28 @@ else
     notok "AC8 FAIL-FIRST: expected both to silently allow at $BASE_SHA; deny-guard=[$OLD_DG_OUT] secret-scan=[$OLD_SS_OUT]"
   fi
   rm -f "$OLD_DG" "$OLD_SS"
+fi
+
+# =============================================================================
+# AC9 — FAIL-FIRST (mechanical) against e384c11 (round-2 base sha): proves
+# SEC-ONECOPY-3/4's ARMED-SESSION/UNARMED-TARGET bypass (AC2/AC6's shapes)
+# was real at that commit before this round's additive fix.
+# =============================================================================
+if ! git -C "$REPO_ROOT" cat-file -e "${BASE_SHA_R2}^{commit}" 2>/dev/null; then
+  notok "AC9 FAIL-FIRST: baseline commit $BASE_SHA_R2 is not reachable in this checkout — cannot prove the SEC-ONECOPY-3/4 regression existed pre-fix"
+else
+  OLD_DG_R2="$ARMED/.old-deny-guard-r2.sh"; OLD_SS_R2="$ARMED/.old-secret-scan-r2.sh"
+  git -C "$REPO_ROOT" show "$BASE_SHA_R2:plugins/quetrex-factory/scripts/deny-guard.sh" > "$OLD_DG_R2" 2>/dev/null
+  git -C "$REPO_ROOT" show "$BASE_SHA_R2:plugins/quetrex-factory/scripts/secret-scan.sh" > "$OLD_SS_R2" 2>/dev/null
+
+  OLD_DG_R2_OUT="$(fire_dg "$OLD_DG_R2" "git -C $UNARMED push --force origin main" "$ARMED")"
+  OLD_SS_R2_OUT="$(fire_ss_write "$OLD_SS_R2" "$UNARMED/leak.env" "$ARMED")"
+  if is_silent "$OLD_DG_R2_OUT" && is_silent "$OLD_SS_R2_OUT"; then
+    ok "AC9 FAIL-FIRST: at $BASE_SHA_R2, both deny-guard's git -C <unarmed> and secret-scan's Write into <unarmed> silently ALLOWED from an ARMED session — SEC-ONECOPY-3/4 were real, this is a genuine fix"
+  else
+    notok "AC9 FAIL-FIRST: expected both to silently allow at $BASE_SHA_R2; deny-guard=[$OLD_DG_R2_OUT] secret-scan=[$OLD_SS_R2_OUT]"
+  fi
+  rm -f "$OLD_DG_R2" "$OLD_SS_R2"
 fi
 
 echo
