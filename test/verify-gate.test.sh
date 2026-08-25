@@ -1142,11 +1142,20 @@ if [ "$HOOK" -ef "$REPO_ROOT/plugins/quetrex-factory/scripts/verify-gate.sh" ]; 
   # the reader (merge-gate.sh GATE 1) grew by a bounded amount to carry the
   # extra `branch` field and its own explanatory comment. Exactly the kind
   # of legitimate growth this floor's own history says to absorb, not chase
-  # by relaxing again next time: a small fixed allowance (20 lines), not an
-  # unbounded one. A negative delta beyond it is still logged loudly.
-  C4_ALLOWANCE=20
+  # by relaxing again next time: a small fixed allowance, not an unbounded
+  # one. A negative delta beyond it is still logged loudly.
+  #
+  # C6_ALLOWANCE (2026-08-25, same day, next review finding): the C6 review
+  # fix turns the final `resolve_from_verify_json || resolve_from_claude_md
+  # || { exit 0; }` fallback into a labelled `block(...)` — an armed repo
+  # with NO resolvable verify chain used to exit 0 SILENTLY (Stop allowed on
+  # any tree, red or not, no signal anywhere) — which needed its own bounded
+  # growth for the block message and its explanatory comment. Bumped from 20
+  # to 35 to cover both C4 and C6 together; still a small fixed number, not
+  # an unbounded one.
+  C4_ALLOWANCE=35
   if [ "$DELTA" -ge "$((0 - C4_ALLOWANCE))" ]; then
-    pass "AC10: verify-gate.sh has not regrown past the pre-deletion baseline 63bb114 + the C4 allowance (delta $DELTA, allowance $C4_ALLOWANCE; floor, not ratchet — the 4 needle greps above are the proof)"
+    pass "AC10: verify-gate.sh has not regrown past the pre-deletion baseline 63bb114 + the C4/C6 allowance (delta $DELTA, allowance $C4_ALLOWANCE; floor, not ratchet — the 4 needle greps above are the proof)"
   else
     fail "AC10: verify-gate.sh is $((0 - DELTA)) lines LARGER than at 63bb114 (allowance $C4_ALLOWANCE) — the deleted main-checkout deferral may have been re-introduced. The needle greps above are the definitive check; investigate what grew."
   fi

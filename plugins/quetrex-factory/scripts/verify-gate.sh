@@ -370,8 +370,25 @@ resolve_from_claude_md() {
 }
 
 resolve_from_verify_json || resolve_from_claude_md || {
-  # No chain resolvable anywhere -> nothing to gate.
-  exit 0
+  # C6 (review finding, medium): by this point in the script the repo IS
+  # armed — the ARMED-ONLY exit above (`[ -f "$ROOT/.quetrex/project.json" ]
+  # || exit 0`) already returned for any unarmed repo — so "no chain
+  # resolvable anywhere" here describes a MISCONFIGURED armed repo, never an
+  # unmanaged one. AC5 deleted resolve_autodetect (a sanctioned change) but
+  # left this path exiting 0 SILENTLY, which turns a repo that lost (or
+  # never got) both its verify.json and its CLAUDE.md Verification fence
+  # into a permanent, invisible no-op: Stop is allowed on any tree, red or
+  # not, with nothing anywhere signaling that the gate stopped gating.
+  # Unlike C2/SEC-ONECOPY-1 (an rm one command away), this leaves NO
+  # visible signal at all — measured: an always-red lint script, no
+  # verify.json, no CLAUDE.md fence, exit=0 out=[] (Stop allowed on red).
+  #
+  # THE FIX. Block once, with one labelled, actionable line, exactly the
+  # shape every other reason in this file already uses — self-resolving
+  # the moment /quetrex:init writes .quetrex/verify.json, same as any other
+  # blocked reason here resolves once its underlying cause is fixed. An
+  # UNARMED repo is unaffected: it already exited above, before this line.
+  block "VERIFY GATE: this repo is armed (.quetrex/project.json) but has no verify chain — run /quetrex:init to write .quetrex/verify.json. BLOCKS finish."
 }
 
 mkdir -p "$QDIR"

@@ -254,14 +254,25 @@ _kg_check_path() {
   # a symlink target). A path-tail match sidesteps the mismatch entirely
   # and is the same shape protected-files-guard.sh's own PROT_PATH_ERE
   # already uses for the floor scripts.
+  #
+  # C6 (review finding, medium): .quetrex/verify.json is protected the SAME
+  # way as project.json, alongside it. verify-gate.sh now BLOCKS an armed
+  # repo that has neither verify.json nor a CLAUDE.md Verification fence
+  # (see that file's own C6 fix) — so removing verify.json out from under
+  # an armed repo is not the silent no-op it used to be, but it is still a
+  # one-command way to force every future Stop into that block, or (if a
+  # CLAUDE.md fence also happens to exist) to silently swap the chain that
+  # actually gates the tree. Same unlock (QUETREX_UNLOCK_FLOOR=1), same
+  # reasoning as project.json.
   p="${1%/}"
   case "$p" in
     */.quetrex/project.json|.quetrex/project.json) : ;;
+    */.quetrex/verify.json|.quetrex/verify.json) : ;;
     */.quetrex|.quetrex) : ;;
     */.quetrex/\*|.quetrex/\*) : ;;   # `rm -rf .quetrex/*`
     *) return 0 ;;
   esac
-  deny "Refusing to let '$2' target .quetrex/project.json (or the .quetrex directory) in an armed repo — that file is what arms the entire safety floor (deny-guard, secret-scan, enforce-branch, merge-gate, verify-gate, edit-gate, protected-files-guard). Removing, moving, or overwriting it would silently disable every gate for the rest of this session. Set QUETREX_UNLOCK_FLOOR=1 for an intentional, operator-approved re-init."
+  deny "Refusing to let '$2' target .quetrex/project.json or .quetrex/verify.json (or the .quetrex directory) in an armed repo — project.json is what arms the entire safety floor (deny-guard, secret-scan, enforce-branch, merge-gate, verify-gate, edit-gate, protected-files-guard), and verify.json is what defines the verify chain that actually gates the tree. Removing, moving, or overwriting either would silently disable or swap out the gate for the rest of this session. Set QUETREX_UNLOCK_FLOOR=1 for an intentional, operator-approved re-init."
 }
 
 check_quetrex_killswitch() {
