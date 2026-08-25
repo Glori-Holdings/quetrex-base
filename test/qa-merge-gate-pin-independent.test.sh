@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # test/qa-merge-gate-pin-independent.test.sh — INDEPENDENT QA adversarial
 # coverage for ONE-COPY item (c)/(d): merge-gate.sh GATE 1's
-# ancestor-checked ESCALATION marker, and GATE 2's verdict-pin reason fix.
+# branch-pinned ESCALATION marker (re-pinned from sha-ancestor to branch by
+# the C4 review fix — see the GATE 1 (c) section below), and GATE 2's
+# verdict-pin reason fix.
 #
 # Written independently of the developer's own escalation-sha-pin.test.sh
 # and merge-gate-verdict-pin-order.test.sh — own fixture, own payloads.
@@ -85,8 +87,12 @@ else
 fi
 
 # =============================================================================
-# GATE 1 (c): JSON marker with a sha that is NOT an ancestor of HEAD is
-# ignored (falls through to GATE 2, which is clean here, so overall ALLOW)
+# GATE 1 (c) — CORRECTED for the C4 review fix. GATE 1 no longer asks "is
+# the marker's sha an ancestor of HEAD" (a plain `git commit --amend`
+# satisfies that despite staying on the same branch and losing nothing —
+# the exact defect C4 found and fixed). It now asks "does the marker name a
+# DIFFERENT branch than the one being evaluated". A marker with a sha that
+# is NOT an ancestor of HEAD, but on the SAME branch, must still DENY.
 # =============================================================================
 reset_artifacts
 # Build a sha that exists in THIS repo's object db but is provably not an
@@ -101,21 +107,46 @@ UNRELATED_SHA=$(git -C "$FIXTURE" rev-parse HEAD)
 rm -f "$FIXTURE/UNRELATED.md"
 git -C "$FIXTURE" checkout -qf main
 
-jq -cn --arg sha "$UNRELATED_SHA" '{sha:$sha,reason:"stale escalation from another branch"}' > "$FIXTURE/.quetrex/ESCALATION"
+# (c1) marker names the DIFFERENT branch it actually came from -> ignored,
+# falls through to a clean GATE 2 allow.
+jq -cn --arg sha "$UNRELATED_SHA" --arg branch "unrelated-branch" '{sha:$sha,branch:$branch,reason:"stale escalation from another branch"}' > "$FIXTURE/.quetrex/ESCALATION"
 jq -cn --arg sha "$HEAD_SHA" '{verdict:"AUTO_MERGE",sha:$sha}' > "$FIXTURE/.quetrex/review-verdict.json"
 OUT=$(run_gate); CODE=$?
 if ! denies "$OUT" "$CODE"; then
-  ok "GATE1: JSON marker with a non-ancestor sha is ignored — falls through to a clean GATE2 allow"
+  ok "GATE1: JSON marker naming a DIFFERENT branch is ignored — falls through to a clean GATE2 allow"
 else
-  notok "GATE1: expected the stale/unrelated-branch marker to be ignored (allow), got code=$CODE out=[$OUT]"
+  notok "GATE1: expected the stale/different-branch marker to be ignored (allow), got code=$CODE out=[$OUT]"
 fi
 
-# Sanity: the SAME marker sha, when it actually IS an ancestor of HEAD
-# (commit one, on the main line), still denies.
-jq -cn --arg sha "$SHA_ONE" '{sha:$sha,reason:"escalation, ancestor of HEAD"}' > "$FIXTURE/.quetrex/ESCALATION"
+# (c2) C4: the SAME non-ancestor sha, but WITHOUT a branch field (the old
+# marker shape, or a same-branch amend that the old ancestor test would
+# have wrongly cleared) — must DENY. A marker that cannot prove it names a
+# different branch is never treated as stale, regardless of its sha.
+jq -cn --arg sha "$UNRELATED_SHA" '{sha:$sha,reason:"no branch recorded"}' > "$FIXTURE/.quetrex/ESCALATION"
 OUT=$(run_gate); CODE=$?
 if denies "$OUT" "$CODE"; then
-  ok "GATE1 sanity: marker sha that IS an ancestor of HEAD still denies"
+  ok "C4/GATE1: a non-ancestor sha with NO branch field still denies (fail-closed — the old ancestor test is gone)"
+else
+  notok "C4/GATE1: expected deny for a branchless marker regardless of its sha, got code=$CODE out=[$OUT]"
+fi
+
+# (c3) C4: the marker names the SAME branch ("main") as the one being
+# evaluated, with a sha that is neither HEAD nor an ancestor of it — the
+# exact shape a same-branch rebase/amend produces. Must still DENY.
+jq -cn --arg sha "$UNRELATED_SHA" --arg branch "main" '{sha:$sha,branch:$branch,reason:"same branch, unrelated sha (amend/rebase shape)"}' > "$FIXTURE/.quetrex/ESCALATION"
+OUT=$(run_gate); CODE=$?
+if denies "$OUT" "$CODE"; then
+  ok "C4/GATE1: marker names the SAME branch (main) even with an unrelated sha -> still denies (amend/rebase no longer clears it)"
+else
+  notok "C4/GATE1: expected deny for a same-branch marker regardless of its sha, got code=$CODE out=[$OUT]"
+fi
+
+# Sanity: a marker sha that actually IS an ancestor of HEAD (commit one, on
+# the main line), same branch, still denies too.
+jq -cn --arg sha "$SHA_ONE" --arg branch "main" '{sha:$sha,branch:$branch,reason:"escalation, ancestor of HEAD"}' > "$FIXTURE/.quetrex/ESCALATION"
+OUT=$(run_gate); CODE=$?
+if denies "$OUT" "$CODE"; then
+  ok "GATE1 sanity: marker sha that IS an ancestor of HEAD, same branch, still denies"
 else
   notok "GATE1 sanity: expected deny for ancestor-sha marker, got code=$CODE out=[$OUT]"
 fi

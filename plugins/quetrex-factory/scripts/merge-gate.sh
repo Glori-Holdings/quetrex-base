@@ -1454,31 +1454,45 @@ evaluate_vector() {
   }
 
   # ===========================================================================
-  # GATE 1 — ESCALATION marker, sha-pinned (ONE-COPY)
+  # GATE 1 — ESCALATION marker, branch-pinned (C4 FIX, review finding)
   # ===========================================================================
-  # A present marker denies UNLESS its recorded sha is PROVEN not an ancestor
-  # of this branch's current HEAD — i.e. it describes history this branch has
-  # since left behind (a different branch, or a commit superseded by a
-  # rebase/reset). Every other shape fails CLOSED and denies, unchanged
-  # message: legacy/empty/malformed marker (no .sha), a sha this repo cannot
-  # even resolve (cannot prove staleness), or a sha that IS an ancestor of
-  # (or equal to) HEAD. This is the ONLY new ALLOW in this gate — see AC7.
+  # C4 (review, high): the marker used to go stale whenever its recorded
+  # sha was merely NOT AN ANCESTOR of HEAD — and ANY history rewrite
+  # satisfies that, including a plain `git commit --amend`, which preserves
+  # the branch and every bit of the work and is a routine self-heal move.
+  # No tampering with .quetrex/ was needed to silently clear a genuine,
+  # live escalation. MEASURED: write a marker in the exact shape verify-
+  # gate.sh produces, `git commit --amend --no-edit` with no other change,
+  # and GATE 1 stopped denying — the SAME state a fresh clone with no
+  # amend still correctly denies.
+  #
+  # THE FIX. "Stale" no longer means "not an ancestor of HEAD" (dropped
+  # entirely — an amend/rebase is not abandonment). It means the marker
+  # names a DIFFERENT branch than the one we are evaluating right now. The
+  # marker's producers (verify-gate.sh, reviewer.md) now write {sha, branch}
+  # — branch omitted only when HEAD was detached at write time, which the
+  # legacy/no-branch shape below treats exactly like the pre-existing
+  # legacy/empty-marker case: fail CLOSED, deny. So GATE 1 ignores (treats
+  # as stale) a marker ONLY when marker.branch is present AND differs from
+  # CUR_BRANCH — the same branch (amended, rebased, or untouched), a
+  # legacy marker with no .branch, a non-JSON marker, or an unresolvable
+  # CUR_BRANCH (detached HEAD here too — cannot prove the branches differ)
+  # all deny, unchanged from before this fix.
   if [ -f "$ESCALATION" ]; then
-    esc_sha=$(jq -r '.sha // empty' "$ESCALATION" 2>/dev/null)
+    esc_branch=$(jq -r '.branch // empty' "$ESCALATION" 2>/dev/null)
+    CUR_BRANCH=$(git -C "$ROOT" branch --show-current 2>/dev/null)
     esc_stale=0
-    if [ -n "$esc_sha" ] && git -C "$ROOT" cat-file -e "${esc_sha}^{commit}" 2>/dev/null; then
-      if [ -n "$HEAD_SHA" ] && ! git -C "$ROOT" merge-base --is-ancestor "$esc_sha" "$HEAD_SHA" 2>/dev/null; then
-        esc_stale=1
-      fi
+    if [ -n "$esc_branch" ] && [ -n "$CUR_BRANCH" ] && [ "$esc_branch" != "$CUR_BRANCH" ]; then
+      esc_stale=1
     fi
     if [ "$esc_stale" -ne 1 ]; then
       reason="ESCALATE_HUMAN"
       detail=$(head -c 800 "$ESCALATION" 2>/dev/null)
       deny "MERGE GATE ($reason): .quetrex/ESCALATION is present — a bounded self-heal/review loop hit its cap and the pipeline stopped. This merge is BLOCKED until a human resolves the escalation. Surface it to the user and run /quetrex:task-rework; do not delete ESCALATION to force the merge.${detail:+ --- escalation note --- $detail}"
     fi
-    # else: the marker's sha is provably NOT an ancestor of HEAD — it
-    # describes history this branch has left behind. Ignore it and fall
-    # through to GATE 2. Print nothing here; a note would read as a block.
+    # else: the marker names a branch that is provably NOT the one we are
+    # evaluating — it describes a different branch's history. Ignore it and
+    # fall through to GATE 2. Print nothing here; a note would read as a block.
   fi
 
   # ===========================================================================

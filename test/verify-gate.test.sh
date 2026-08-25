@@ -1133,11 +1133,22 @@ if [ "$HOOK" -ef "$REPO_ROOT/plugins/quetrex-factory/scripts/verify-gate.sh" ]; 
   # a bounded amount can. Nothing the previous threshold caught is lost: no state exists
   # where the greps pass, the file is smaller than 63bb114, and the deferral is back.
   #
-  # A negative delta is logged loudly rather than silently tolerated.
-  if [ "$DELTA" -ge 0 ]; then
-    pass "AC10: verify-gate.sh has not regrown past the pre-deletion baseline 63bb114 (delta $DELTA; floor, not ratchet — the 4 needle greps above are the proof)"
+  # C4_ALLOWANCE (2026-08-25): the SAME pattern as every prior relaxation of
+  # this proxy (see the comment above — 80 -> 50 -> 30 -> 0, each time for a
+  # named, legitimate fix). The C4 review fix re-pins the ESCALATION marker
+  # to BRANCH instead of an ancestor-of-HEAD sha test (a plain `git commit
+  # --amend` satisfied "stale" under the old test and silently cleared a
+  # live escalation) — both the producer (this file, the self-heal cap) and
+  # the reader (merge-gate.sh GATE 1) grew by a bounded amount to carry the
+  # extra `branch` field and its own explanatory comment. Exactly the kind
+  # of legitimate growth this floor's own history says to absorb, not chase
+  # by relaxing again next time: a small fixed allowance (20 lines), not an
+  # unbounded one. A negative delta beyond it is still logged loudly.
+  C4_ALLOWANCE=20
+  if [ "$DELTA" -ge "$((0 - C4_ALLOWANCE))" ]; then
+    pass "AC10: verify-gate.sh has not regrown past the pre-deletion baseline 63bb114 + the C4 allowance (delta $DELTA, allowance $C4_ALLOWANCE; floor, not ratchet — the 4 needle greps above are the proof)"
   else
-    fail "AC10: verify-gate.sh is $((0 - DELTA)) lines LARGER than at 63bb114 — the deleted main-checkout deferral may have been re-introduced. The needle greps above are the definitive check; investigate what grew."
+    fail "AC10: verify-gate.sh is $((0 - DELTA)) lines LARGER than at 63bb114 (allowance $C4_ALLOWANCE) — the deleted main-checkout deferral may have been re-introduced. The needle greps above are the definitive check; investigate what grew."
   fi
 else
   skip "AC10: line-delta-vs-63bb114 check not applicable — \$HOOK ($HOOK) is not quetrex-base's own copy"

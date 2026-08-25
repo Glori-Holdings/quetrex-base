@@ -659,14 +659,21 @@ fi
 
 # Cap reached -> escalate. Persist a marker the merge gate reads so red code
 # physically cannot merge even once the agent is finally allowed to stop.
-# ESCALATION-SHA-PIN (ONE-COPY): the marker records the HEAD sha the cap was
-# hit at, so merge-gate.sh GATE 1 can tell a genuinely-current escalation
-# (sha == or an ancestor of HEAD -> deny) from a stale one recorded on a
-# since-abandoned commit (sha not an ancestor of the current branch -> the
-# marker no longer describes THIS branch's history, so GATE 1 ignores it and
-# falls through to GATE 2). When HEAD is unresolvable (e.g. a repo with 0
-# commits) the legacy empty-file shape is written instead — `jq -e .sha`
-# then fails, which is the fail-closed default GATE 1 already had.
+# ESCALATION-BRANCH-PIN (C4 FIX, review finding, high): the marker used to
+# record only the HEAD sha, and merge-gate.sh GATE 1 ignored it once that
+# sha was merely NOT AN ANCESTOR of HEAD — which a plain `git commit
+# --amend` satisfies despite preserving the branch and every bit of the
+# work, silently clearing a live escalation with no tampering required.
+# The marker now ALSO records the branch (CUR_BRANCH, already resolved
+# above), and GATE 1's staleness test is "does the marker name a DIFFERENT
+# branch than the one being evaluated", not "is the sha an ancestor" — an
+# amend or rebase that stays on the same branch no longer clears it. When
+# HEAD was detached at write time (CUR_BRANCH empty), the branch field is
+# omitted rather than written empty — GATE 1 treats a marker with no
+# resolvable branch as it always has treated a legacy/malformed one: fail
+# CLOSED, deny. When HEAD is unresolvable (e.g. a repo with 0 commits) the
+# legacy empty-file shape is written instead — `jq -e .sha` then fails,
+# which is the fail-closed default GATE 1 already had.
 # NOTE: `git rev-parse HEAD` on an unborn branch (0 commits) is NOT silent —
 # it prints the literal, unresolved string "HEAD" to STDOUT (its "fatal:
 # ambiguous argument" explanation goes to stderr instead), so a bare
@@ -675,10 +682,19 @@ fi
 if [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
   ESC_REASON=$(printf 'verify self-heal cap reached (%s attempts) on `%s`' "$MAX_ATTEMPTS" "$FAILED_CMD")
   if command -v jq >/dev/null 2>&1; then
-    jq -cn --arg sha "$HEAD_SHA" --arg reason "$ESC_REASON" '{sha:$sha, reason:$reason}' > "$ESCALATION" 2>/dev/null
+    if [ -n "$CUR_BRANCH" ]; then
+      jq -cn --arg sha "$HEAD_SHA" --arg branch "$CUR_BRANCH" --arg reason "$ESC_REASON" '{sha:$sha, branch:$branch, reason:$reason}' > "$ESCALATION" 2>/dev/null
+    else
+      jq -cn --arg sha "$HEAD_SHA" --arg reason "$ESC_REASON" '{sha:$sha, reason:$reason}' > "$ESCALATION" 2>/dev/null
+    fi
   else
     esc_esc=$(printf '%s' "$ESC_REASON" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
-    printf '{"sha":"%s","reason":"%s"}' "$HEAD_SHA" "$esc_esc" > "$ESCALATION" 2>/dev/null
+    if [ -n "$CUR_BRANCH" ]; then
+      esc_branch_esc=$(printf '%s' "$CUR_BRANCH" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
+      printf '{"sha":"%s","branch":"%s","reason":"%s"}' "$HEAD_SHA" "$esc_branch_esc" "$esc_esc" > "$ESCALATION" 2>/dev/null
+    else
+      printf '{"sha":"%s","reason":"%s"}' "$HEAD_SHA" "$esc_esc" > "$ESCALATION" 2>/dev/null
+    fi
   fi
 else
   : > "$ESCALATION" 2>/dev/null
