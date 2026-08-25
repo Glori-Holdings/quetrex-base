@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify-gate-quick-chain.sh — sourced-only helper for .claude/hooks/verify-gate.sh.
+# verify-gate-quick-chain.sh — sourced-only helper for plugins/quetrex-factory/scripts/verify-gate.sh.
 #
 # WHY A SEPARATE FILE (2026-08-21, HOOKFIX, structural AC10 fix): the bounded
 # quick-chain machinery (declarative env-skip eligibility + the heavy-command
@@ -18,6 +18,13 @@
 # NOT SELF-EXECUTING. This file defines functions only and must be SOURCED,
 # never invoked directly — `set -uo pipefail` is inherited from the caller,
 # nothing here runs until verify-gate.sh calls a function.
+#
+# ARMED-ONLY (ONE-COPY): this file has and needs NO independent armed-repo
+# check. verify-gate.sh sources it only AFTER its own
+# `[ -f "$ROOT/.quetrex/project.json" ] || exit 0` gate has already passed,
+# so every function here inherits that gate for free. Adding a second,
+# independent check here would be a second copy of the same decision that
+# could silently diverge from the first — do not add one.
 #
 # CROSS-REPO PUBLISH (same class as verify-gate.sh's own note): this file
 # must ship ALONGSIDE verify-gate.sh in the published quetrex-factory copy
@@ -129,7 +136,7 @@ EOF
 }
 
 # =============================================================================
-# >>> QX-SEGSPLIT BEGIN — copied verbatim from .claude/hooks/merge-gate.sh
+# >>> QX-SEGSPLIT BEGIN — copied verbatim from plugins/quetrex-factory/scripts/merge-gate.sh
 # (split_segments_quote_aware, normalize_segment), the SAME functions
 # protected-files-guard.sh already copies from the same source. Needed here
 # to find the ACTUAL COMMAND TOKEN of each segment of a (possibly compound)

@@ -10,7 +10,7 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TB="$ROOT/.claude/commands/task-build.md"
-MG="$ROOT/.claude/hooks/merge-gate.sh"
+MG="$ROOT/plugins/quetrex-factory/scripts/merge-gate.sh"
 
 PASS=0; FAIL=0
 ok()    { PASS=$((PASS+1)); echo "ok - $1"; }

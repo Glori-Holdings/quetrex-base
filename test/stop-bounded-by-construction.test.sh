@@ -50,7 +50,7 @@
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOOK="${QX_VERIFY_GATE_HOOK:-$ROOT/.claude/hooks/verify-gate.sh}"
+HOOK="${QX_VERIFY_GATE_HOOK:-$ROOT/plugins/quetrex-factory/scripts/verify-gate.sh}"
 
 PASS=0; FAIL=0
 ok()    { PASS=$((PASS+1)); echo "ok - $1"; }
@@ -61,6 +61,7 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 mkrepo() {  # mkrepo <dir> <verify-json>
   mkdir -p "$1/.quetrex"
+  printf '{"branchPrefix":"claude/"}' > "$1/.quetrex/project.json"
   git -C "$1" init --quiet -b main 2>/dev/null || git -C "$1" init --quiet 2>/dev/null
   git -C "$1" config user.email t@t; git -C "$1" config user.name t
   printf '%s' "$2" > "$1/.quetrex/verify.json"
@@ -485,6 +486,7 @@ LEDGER8_TOTAL="$(ledger_lines_total "$F8")"
 # =============================================================================
 F9="$TMP/reqenv-heavy"
 mkdir -p "$F9/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F9/.quetrex/project.json" 2>/dev/null
 git -C "$F9" init --quiet -b main
 git -C "$F9" config user.email t@t; git -C "$F9" config user.name t
 printf '%s' '{"verify":["sh -c \"echo cheap\"","npm run build"],"requiredEnv":{"npm run build":["QX_REQENV_HEAVY_VAR"]}}' > "$F9/.quetrex/verify.json"

@@ -101,7 +101,7 @@
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MG="${QX_MERGE_GATE_HOOK:-$ROOT/.claude/hooks/merge-gate.sh}"
+MG="${QX_MERGE_GATE_HOOK:-$ROOT/plugins/quetrex-factory/scripts/merge-gate.sh}"
 
 if [ ! -x "$MG" ] && [ ! -f "$MG" ]; then
   echo "FAIL: hook not found at $MG"
@@ -155,6 +155,7 @@ C0="$(git -C "$FIXTURE" rev-parse HEAD)"
 
 git -C "$FIXTURE" checkout -q -b branch-c1c2 "$BASE"
 mkdir -p "$FIXTURE/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$FIXTURE/.quetrex/project.json" 2>/dev/null
 echo m1 > "$FIXTURE/.quetrex/marker.txt"
 git -C "$FIXTURE" add .quetrex/marker.txt
 git -C "$FIXTURE" commit -q -m "chore: c1 — artifact-only, describes c2"

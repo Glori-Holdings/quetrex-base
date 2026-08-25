@@ -28,7 +28,7 @@
 #            name so a silent removal is caught here too.
 #
 # DEFECT 2 — the spec-branch push is denied by this repo's own force-push hook.
-#   Step 6A published the spec branch with `git push -f`. .claude/hooks/
+#   Step 6A published the spec branch with `git push -f`. plugins/quetrex-factory/scripts/
 #   deny-guard.sh DENIES unconditional force-push. QDM-4 only survived because
 #   the branch was brand new and the operator's session hand-retried without
 #   `-f`; ANY re-dispatch of an existing task hits the deny and the dispatch
@@ -68,7 +68,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEMPLATE="$REPO_ROOT/.claude/lib/cloud-build-routine.md"
 COMMAND="$REPO_ROOT/.claude/commands/task-build.md"
-DENY_GUARD="$REPO_ROOT/.claude/hooks/deny-guard.sh"
+DENY_GUARD="$REPO_ROOT/plugins/quetrex-factory/scripts/deny-guard.sh"
 
 for f in "$TEMPLATE" "$COMMAND" "$DENY_GUARD"; do
   if [ ! -f "$f" ]; then

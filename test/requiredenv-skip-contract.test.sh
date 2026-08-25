@@ -19,8 +19,8 @@
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VG="${QX_VERIFY_GATE_HOOK:-$ROOT/.claude/hooks/verify-gate.sh}"
-MG="${QX_MERGE_GATE_HOOK:-$ROOT/.claude/hooks/merge-gate.sh}"
+VG="${QX_VERIFY_GATE_HOOK:-$ROOT/plugins/quetrex-factory/scripts/verify-gate.sh}"
+MG="${QX_MERGE_GATE_HOOK:-$ROOT/plugins/quetrex-factory/scripts/merge-gate.sh}"
 
 if [ ! -x "$MG" ] && [ ! -f "$MG" ]; then
   echo "FAIL: hook not found at $MG"
@@ -178,6 +178,7 @@ C0="$(git -C "$FIXTURE" rev-parse HEAD)"
 # the gate treats as "still describing". This is what makes C0's ledger entry admissible
 # evidence about C1 at all; it is not a special case invented for this file.
 mkdir -p "$FIXTURE/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$FIXTURE/.quetrex/project.json" 2>/dev/null
 echo "marker" > "$FIXTURE/.quetrex/marker.txt"
 git -C "$FIXTURE" add .quetrex/marker.txt
 git -C "$FIXTURE" commit -q -m "chore: artifact-only commit"

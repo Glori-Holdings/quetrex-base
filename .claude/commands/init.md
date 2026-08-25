@@ -378,7 +378,7 @@ echo "Wrote ## Verification to $PROJ_RULES"
 precedence over the `## Verification` fence above, which stays the human-readable
 fallback). This step also DECLARES `requiredEnv`: the per-command declaration that lets
 `verify-gate.sh` skip a command pre-flight when a genuinely-required variable cannot
-exist in this checkout (see `.claude/hooks/verify-gate.sh` — "DECLARATIVE ENV SKIP"),
+exist in this checkout (see `plugins/quetrex-factory/scripts/verify-gate.sh` — "DECLARATIVE ENV SKIP"),
 instead of letting the chain go red on a variable no checkout could ever have. That
 mechanism has always been fully implemented in the hook; nothing writes the declaration
 it reads except an explicit human confirmation, right here.

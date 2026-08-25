@@ -9,11 +9,13 @@
 # mechanism only works while BUDGET_DEFAULT stays comfortably under the
 # external timeout that registers the hook.
 #
-# Those two numbers live in different files in different repos:
-#   - the internal budget is BUDGET_DEFAULT in THIS repo's
-#     .claude/hooks/verify-gate.sh (committed here).
-#   - the external timeout is the verify-gate entries in quetrex-plugins'
-#     plugins/quetrex-factory/hooks/hooks.json (a different repo entirely).
+# Those two numbers live in different files in the SAME plugins/quetrex-factory/
+# subtree (ONE-COPY: this repo, published verbatim to quetrex-plugins by
+# git-subdir — no longer two independently-drifting repos):
+#   - the internal budget is BUDGET_DEFAULT in
+#     plugins/quetrex-factory/scripts/verify-gate.sh (committed here).
+#   - the external timeout is the verify-gate entries in
+#     plugins/quetrex-factory/hooks/hooks.json (also committed here).
 # They drifted once already: hooks.json shipped Stop=600s / SubagentStop=300s
 # while verify-gate.sh's own budget was already 840s / 540s — ABOVE both
 # timeouts, so the harness always won the race first and the fail-closed path
@@ -46,7 +48,7 @@
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOOK="${QX_VERIFY_GATE_HOOK:-$ROOT/.claude/hooks/verify-gate.sh}"
+HOOK="${QX_VERIFY_GATE_HOOK:-$ROOT/plugins/quetrex-factory/scripts/verify-gate.sh}"
 
 PASS=0; FAIL=0
 ok()    { PASS=$((PASS+1)); echo "ok - $1"; }

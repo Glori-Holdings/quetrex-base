@@ -27,7 +27,7 @@
 #   A6  allowing the STOP never allows the MERGE: .quetrex/ESCALATION is written
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOOK="${QX_VERIFY_GATE_HOOK:-$REPO_ROOT/.claude/hooks/verify-gate.sh}"
+HOOK="${QX_VERIFY_GATE_HOOK:-$REPO_ROOT/plugins/quetrex-factory/scripts/verify-gate.sh}"
 PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); printf 'ok - %s\n' "$1"; }
 fail() { FAIL=$((FAIL+1)); printf 'NOT OK - %s\n' "$1"; }
@@ -39,6 +39,7 @@ trap 'rm -rf "$TMPROOT"' EXIT
 
 F="$TMPROOT/repo"
 mkdir -p "$F/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$F/.quetrex/project.json" 2>/dev/null
 git init -q "$F"
 git -C "$F" config user.email t@e; git -C "$F" config user.name t
 git -C "$F" commit -q --allow-empty -m init
@@ -87,6 +88,7 @@ fi
 
 # --- A4: stop_hook_active allows at the cap, independently of the counter ---
 G="$TMPROOT/repo2"; mkdir -p "$G/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$G/.quetrex/project.json"
 git init -q "$G"; git -C "$G" config user.email t@e; git -C "$G" config user.name t
 git -C "$G" commit -q --allow-empty -m init
 jq -cn '{verify:["false"]}' > "$G/.quetrex/verify.json"
@@ -101,6 +103,7 @@ fi
 
 # --- A5: stop_hook_active must NOT waive self-healing below the cap --------
 H="$TMPROOT/repo3"; mkdir -p "$H/.quetrex"
+printf '{"branchPrefix":"claude/"}' > "$H/.quetrex/project.json"
 git init -q "$H"; git -C "$H" config user.email t@e; git -C "$H" config user.name t
 git -C "$H" commit -q --allow-empty -m init
 jq -cn '{verify:["false"]}' > "$H/.quetrex/verify.json"

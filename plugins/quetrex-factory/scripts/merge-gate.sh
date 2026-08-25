@@ -704,8 +704,12 @@ evaluate_vector() {
   [ -z "$ROOT" ] && ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 
   QDIR="$ROOT/.quetrex"
-  # Only quetrex-managed repos are gated. No .quetrex/ -> not our concern, allow.
-  { [ -n "$ROOT" ] && [ -d "$QDIR" ]; } || return 0
+  # ARMED-ONLY (ONE-COPY): only ARMED repos are gated — a repo with no
+  # $ROOT/.quetrex/project.json is not Quetrex-managed at all. Keyed off the
+  # SAME ROOT this vector will act on (resolved above, including the
+  # `git -C <path>` TARGET_DIR case) so a merge in repo X is never gated by
+  # repo Y's arming. Per the operator rule "unarmed repo = no gates at all".
+  { [ -n "$ROOT" ] && [ -f "$QDIR/project.json" ]; } || return 0
 
   # A human-readable identity for THIS vector's repo, computed once here so
   # every deny() call below (via the prefix deny() adds — see next) names
@@ -1450,12 +1454,31 @@ evaluate_vector() {
   }
 
   # ===========================================================================
-  # GATE 1 — no ESCALATION marker
+  # GATE 1 — ESCALATION marker, sha-pinned (ONE-COPY)
   # ===========================================================================
+  # A present marker denies UNLESS its recorded sha is PROVEN not an ancestor
+  # of this branch's current HEAD — i.e. it describes history this branch has
+  # since left behind (a different branch, or a commit superseded by a
+  # rebase/reset). Every other shape fails CLOSED and denies, unchanged
+  # message: legacy/empty/malformed marker (no .sha), a sha this repo cannot
+  # even resolve (cannot prove staleness), or a sha that IS an ancestor of
+  # (or equal to) HEAD. This is the ONLY new ALLOW in this gate — see AC7.
   if [ -f "$ESCALATION" ]; then
-    reason="ESCALATE_HUMAN"
-    detail=$(head -c 800 "$ESCALATION" 2>/dev/null)
-    deny "MERGE GATE ($reason): .quetrex/ESCALATION is present — a bounded self-heal/review loop hit its cap and the pipeline stopped. This merge is BLOCKED until a human resolves the escalation. Surface it to the user and run /quetrex:task-rework; do not delete ESCALATION to force the merge.${detail:+ --- escalation note --- $detail}"
+    esc_sha=$(jq -r '.sha // empty' "$ESCALATION" 2>/dev/null)
+    esc_stale=0
+    if [ -n "$esc_sha" ] && git -C "$ROOT" cat-file -e "${esc_sha}^{commit}" 2>/dev/null; then
+      if [ -n "$HEAD_SHA" ] && ! git -C "$ROOT" merge-base --is-ancestor "$esc_sha" "$HEAD_SHA" 2>/dev/null; then
+        esc_stale=1
+      fi
+    fi
+    if [ "$esc_stale" -ne 1 ]; then
+      reason="ESCALATE_HUMAN"
+      detail=$(head -c 800 "$ESCALATION" 2>/dev/null)
+      deny "MERGE GATE ($reason): .quetrex/ESCALATION is present — a bounded self-heal/review loop hit its cap and the pipeline stopped. This merge is BLOCKED until a human resolves the escalation. Surface it to the user and run /quetrex:task-rework; do not delete ESCALATION to force the merge.${detail:+ --- escalation note --- $detail}"
+    fi
+    # else: the marker's sha is provably NOT an ancestor of HEAD — it
+    # describes history this branch has left behind. Ignore it and fall
+    # through to GATE 2. Print nothing here; a note would read as a block.
   fi
 
   # ===========================================================================
@@ -1467,6 +1490,27 @@ evaluate_vector() {
   VERDICT=$(jq -r '.verdict // empty' "$RV" 2>/dev/null)
   RV_SHA=$(jq -r '.sha // .head_sha // empty' "$RV" 2>/dev/null)
 
+  # GATE 2 PIN, CHECKED BEFORE THE VERDICT IS EVEN CONSULTED (ONE-COPY). A
+  # verdict artifact that does not describe the current HEAD is denied with
+  # the SAME reason regardless of what value it recorded — the true cause is
+  # "the review-gate never ran on this commit", not whatever verdict string
+  # happens to be sitting in the stale artifact. This changes NO allow path
+  # (every non-AUTO_MERGE verdict denied before and still denies) — it only
+  # corrects the REASON, so the agent is told to re-run review rather than
+  # "go fix confirmed findings" a reviewer never actually confirmed against
+  # this commit. Absent/empty RV_SHA always denies here; it is never treated
+  # as "skip the gate".
+  if [ -z "$RV_SHA" ]; then
+    deny "MERGE GATE (REWORK): review-verdict.json records no commit sha — the review-gate never ran on this commit. Re-run the review-gate (native /review + /security-review) against the current HEAD before merging."
+  fi
+  if [ -n "$HEAD_SHA" ] && [ "$RV_SHA" != "$HEAD_SHA" ] && ! artifact_only_range_ok "$RV_SHA" "$HEAD_SHA"; then
+    deny "MERGE GATE (REWORK): review-verdict.json is pinned to commit ${RV_SHA:0:12}, but HEAD is now ${HEAD_SHA:0:12} — the review-gate never ran on this commit. Re-run the review-gate against the current HEAD before merging."
+  fi
+  # else: either RV_SHA already equals HEAD, or every commit since RV_SHA
+  # only touched .quetrex/ (e.g. committing review-verdict.json itself moved
+  # HEAD without changing any reviewed code) — the verdict still describes
+  # what would actually ship, so the case below runs.
+
   # The review-gate (agents/reviewer.md) writes EXACTLY one of:
   #   AUTO_MERGE | REWORK | ESCALATE_HUMAN
   # These strings are the contract; they must match here byte-for-byte. Legacy
@@ -1474,7 +1518,7 @@ evaluate_vector() {
   # an older artifact never silently falls through the catch-all as "AUTO_MERGE".
   case "$VERDICT" in
     AUTO_MERGE)
-      : ;; # candidate — sha check below still applies
+      : ;; # verdict is pinned to HEAD (checked above) — merge permitted
     REWORK|BLOCK)
       # BLOCK is the legacy reviewer verdict; treat as REWORK under the new policy.
       conf=$(jq -rc '(.confirmed // [] | length) as $c | "\($c) confirmed finding(s)"' "$RV" 2>/dev/null)
@@ -1494,19 +1538,6 @@ evaluate_vector() {
       deny "MERGE GATE (ESCALATE_HUMAN): review verdict is '${VERDICT:-<missing>}', which is not a recognized decision (AUTO_MERGE | REWORK | ESCALATE_HUMAN). The review artifact is malformed or partial — do not merge. Surface to the user and re-run the review-gate."
       ;;
   esac
-
-  # Verdict is AUTO_MERGE. Bind it to the exact commit being merged: if new commits
-  # landed after review, the verdict no longer describes what would ship.
-  if [ -z "$RV_SHA" ]; then
-    deny "MERGE GATE (REWORK): review-verdict.json has verdict AUTO_MERGE but records no commit sha, so it cannot be pinned to what is being merged. Re-run the review-gate so it records the reviewed HEAD sha."
-  fi
-  if [ -n "$HEAD_SHA" ] && [ "$RV_SHA" != "$HEAD_SHA" ] && ! artifact_only_range_ok "$RV_SHA" "$HEAD_SHA"; then
-    deny "MERGE GATE (REWORK): the AUTO_MERGE verdict is for commit ${RV_SHA:0:12}, but HEAD is now ${HEAD_SHA:0:12} — commits landed after review, so the approval is stale. Re-run the review-gate against the current HEAD before merging."
-  fi
-  # else: either RV_SHA already equals HEAD, or every commit since RV_SHA
-  # only touched .quetrex/ (e.g. committing review-verdict.json itself moved
-  # HEAD without changing any reviewed code) — the verdict still describes
-  # what would actually ship, so it stands.
 
   # --- GATE 2b — the reviewer may not self-exempt from independent review ------
   # reviewer.md's decision rule 4 mandates ESCALATE_HUMAN when the native /review
@@ -1724,16 +1755,25 @@ evaluate_vector() {
 
   if [ -z "$CHAIN_JSON" ]; then
     # SEC-14 (security review, 2026-08-21): this used to read ONLY
-    # package.json, while the comment claimed parity with verify-gate.sh
-    # own resolve_autodetect (which also resolves Makefile/pyproject.toml/
+    # package.json, while the comment claimed parity with verify-gate.sh's
+    # OLD resolve_autodetect (which also resolved Makefile/pyproject.toml/
     # setup.cfg/go.mod/Cargo.toml) and the deny text below named all four
     # sources as read. A go.mod repo with none of verify.json/CLAUDE.md
     # fence/package.json hit a permanent ESCALATE_HUMAN deny naming sources
     # the code never actually looked at. Fixed by resolving the SAME
-    # sources, in the SAME order, as verify-gate.sh resolve_autodetect --
-    # every read from the COMMITTED blob at the pinned $HEAD_SHA via
-    # `git show`, never the working tree, matching this function own SEC-2
-    # pinning discipline elsewhere.
+    # sources, in the SAME order, that verify-gate.sh's resolve_autodetect
+    # USED TO -- every read from the COMMITTED blob at the pinned
+    # $HEAD_SHA via `git show`, never the working tree, matching this
+    # function's own SEC-2 pinning discipline elsewhere.
+    #
+    # ONE-COPY UPDATE: verify-gate.sh's resolve_autodetect was DELETED
+    # outright (AC5) — the gate's chain now resolves only from
+    # .quetrex/verify.json or CLAUDE.md's "## Verification" fence, never by
+    # guessing from package.json/Makefile/etc. This function's own
+    # autodetect fallback below is UNCHANGED and still live (it serves a
+    # different purpose — GATE 3's declared-vs-actual chain comparison, not
+    # deciding whether to gate at all) — it is simply no longer "matching a
+    # twin"; it is the only autodetect logic left in the pipeline.
     if [ -n "$HEAD_SHA" ] && [[ "$HEAD_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
       PKG_BLOB=$(git -C "$ROOT" show "$HEAD_SHA:package.json" 2>/dev/null)
       if [ -n "$PKG_BLOB" ]; then

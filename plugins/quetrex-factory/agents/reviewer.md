@@ -244,7 +244,7 @@ Before choosing a verdict, resolve these booleans from **disk and your own execu
 Apply these in order; the first match wins. When genuinely torn between AUTO_MERGE and anything else, you do **not** AUTO_MERGE — the fast path is never worth shipping a silent defect.
 
 1. **ESCALATE_HUMAN** if `escalation_present` **or** `review_iter >= 3`.
-   A bounded loop has already hit its cap — another REWORK would loop forever. When you take this branch because of the cap (`review_iter >= 3`) and no `ESCALATION` marker exists yet, you MUST create it (`touch "$ROOT/.quetrex/ESCALATION"`, with a one-line note of why) so the merge gate's Gate 1 mechanically blocks the ship until a human resolves it. Surface to a human with the captured output. (You never delete `ESCALATION`; only a human-driven rework clears it.)
+   A bounded loop has already hit its cap — another REWORK would loop forever. When you take this branch because of the cap (`review_iter >= 3`) and no `ESCALATION` marker exists yet, you MUST create it as a **sha-pinned JSON object** — `jq -cn --arg sha "$(git -C "$ROOT" rev-parse HEAD)" --arg reason "review-gate: rework cap reached (review_iter=$REVIEW_ITER) for $TASK — human decision required." '{sha:$sha, reason:$reason}' > "$ROOT/.quetrex/ESCALATION"` — never a bare `touch`, so the merge gate's Gate 1 can tell a genuinely-current escalation from a stale one recorded on a since-abandoned commit. This mechanically blocks the ship until a human resolves it. Surface to a human with the captured output. (You never delete `ESCALATION`; only a human-driven rework clears it.)
 
 2. **REWORK** if `verify_green == 0`.
    The tree is red; that is a concrete, developer-fixable failure. Return it with the failing command and last-20-lines. (Red never becomes AUTO_MERGE and never becomes ESCALATE_HUMAN unless the loop is already exhausted, per rule 1.)
@@ -380,8 +380,18 @@ Two outputs, both mandatory, in this order:
    elif [ "$VERDICT" = "ESCALATE_HUMAN" ] && { [ "${REVIEW_ITER:-0}" -ge 3 ] || [ "$escalation_present" = "1" ]; }; then
      # Cap hit (or an upstream loop already escalated): persist the marker the
      # merge gate's Gate 1 reads so red/looping work physically cannot merge.
-     [ -f "$ROOT/.quetrex/ESCALATION" ] || \
-       printf 'review-gate: rework cap reached (review_iter=%s) for %s — human decision required.\n' "${REVIEW_ITER:-0}" "$TASK" > "$ROOT/.quetrex/ESCALATION"
+     # Sha-pinned JSON, mirroring verify-gate.sh's own producer — GATE 1 reads
+     # `.sha` to tell a genuinely-current escalation from a stale one recorded
+     # on a since-abandoned commit. Never a bare `touch`.
+     if [ ! -f "$ROOT/.quetrex/ESCALATION" ]; then
+       esc_head="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)"
+       esc_reason="review-gate: rework cap reached (review_iter=${REVIEW_ITER:-0}) for $TASK — human decision required."
+       if [ -n "$esc_head" ]; then
+         jq -cn --arg sha "$esc_head" --arg reason "$esc_reason" '{sha:$sha, reason:$reason}' > "$ROOT/.quetrex/ESCALATION"
+       else
+         : > "$ROOT/.quetrex/ESCALATION"
+       fi
+     fi
    fi
    ```
 

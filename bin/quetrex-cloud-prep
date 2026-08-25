@@ -59,7 +59,7 @@
 #
 # Two hard constraints on those placeholder VALUES, both measured:
 #
-#   1. CREDENTIAL-LESS BY CONSTRUCTION. .claude/hooks/secret-scan.sh:151
+#   1. CREDENTIAL-LESS BY CONSTRUCTION. plugins/quetrex-factory/scripts/secret-scan.sh:175
 #      matches a db/amqp scheme followed by //user:password@ — with such a
 #      segment the value is DENIED on Write/Edit, denied when a Bash command
 #      writes it to a file, and otherwise silently rewritten to

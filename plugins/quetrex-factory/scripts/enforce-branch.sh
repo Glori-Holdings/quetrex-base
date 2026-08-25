@@ -242,6 +242,13 @@ check_git() {
     return 0
   fi
 
+  # --- armed-only gate (ONE-COPY): an unarmed TARGET repo has no gates at
+  # all. Keyed off the SAME dir this invocation targets (an explicit -C path
+  # or the last cd, not just the session cwd) so a commit/push in repo X is
+  # never gated by repo Y's arming.
+  _eb_root=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)
+  { [ -n "$_eb_root" ] && [ -f "$_eb_root/.quetrex/project.json" ]; } || return 0
+
   br=$(branch_of "$dir")
   [ "$br" = "main" ] || [ "$br" = "master" ] || return 0
 
