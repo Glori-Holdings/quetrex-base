@@ -91,7 +91,20 @@ pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'NOT OK - %s\n' "$1"; FAIL=1; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/qx-dispatch-transport.XXXXXX")"
-cleanup() { rm -rf "$WORK"; }
+# C5 (review finding, medium) FOLLOW-ON: deny-guard.sh now resolves a `git
+# -C <dir>` invocation's arming from THAT directory (per-invocation, not
+# just the ambient session — see test/cross-repo-arming.test.sh). The
+# AC2-b negative control below uses `-C /tmp/wt` as a stand-in for "some
+# worktree directory"; it needs to be a REAL, ARMED directory for the same
+# reason hook_verdict has always needed the process's own ambient cwd (this
+# repo) to be armed. Fixed literal path (not mktemp -d), matching
+# test/deny-guard-push-delete.test.sh's identical fixture and rationale.
+WT_FIXTURE="/tmp/wt"
+rm -rf "$WT_FIXTURE"
+mkdir -p "$WT_FIXTURE/.quetrex"
+git -C "$WT_FIXTURE" init -q -b main >/dev/null 2>&1
+printf '{"branchPrefix":"claude/"}' > "$WT_FIXTURE/.quetrex/project.json"
+cleanup() { rm -rf "$WORK" "$WT_FIXTURE"; }
 trap cleanup EXIT
 
 # --- extractors, anchored on TEXT so an inserted line above never breaks them --

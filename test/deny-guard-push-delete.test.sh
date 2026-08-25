@@ -68,6 +68,24 @@ FAIL=0
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'NOT OK - %s\n' "$1"; FAIL=1; }
 
+# C5 (review finding, medium) FOLLOW-ON: deny-guard.sh now resolves a `git
+# -C <dir>` invocation's arming from THAT directory (per-invocation, not
+# just the session's own repo — see test/cross-repo-arming.test.sh). Every
+# fixture below that uses `-C /tmp/wt` needs /tmp/wt to be a REAL, ARMED
+# directory for the SAME reason `hook_verdict` below has always needed the
+# process's own ambient cwd (this repo) to be armed: an explicit -C target
+# that does not exist has nothing for git to act on (mirrors
+# enforce-branch.sh's own rule), so pre-C5 these fixtures were only ever
+# proving the -C TOKENIZATION survives, not exercising a real target. Using
+# a fixed literal path (not mktemp -d) keeps every existing single-quoted
+# command string below byte-for-byte unchanged.
+WT_FIXTURE="/tmp/wt"
+rm -rf "$WT_FIXTURE"
+mkdir -p "$WT_FIXTURE/.quetrex"
+git -C "$WT_FIXTURE" init -q -b main >/dev/null 2>&1
+printf '{"branchPrefix":"claude/"}' > "$WT_FIXTURE/.quetrex/project.json"
+trap 'rm -rf "$WT_FIXTURE"' EXIT
+
 # The REAL hook, fed a REAL PreToolUse payload. No copy, no re-implementation.
 hook_verdict() {  # hook_verdict <command-string> -> "deny" | "allow"
   local payload out
