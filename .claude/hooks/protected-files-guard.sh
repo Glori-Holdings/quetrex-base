@@ -56,23 +56,48 @@
 # blocking channel the hook contract provides: exit 2 with the reason on
 # stderr. A missing jq must never degrade this guard to silence.
 #
-# PROTECTED SET: the six floor basenames now live in exactly ONE place —
-# plugins/quetrex-factory/scripts/ (the one-copy rule) — so the match is
-# narrowed to that path SEGMENT specifically, not any bare hooks/ or scripts/
-# directory. This deliberately covers BOTH the repo-local copy
-# (plugins/quetrex-factory/scripts/<name>.sh) and the INSTALLED marketplace
-# copy (.../plugins/marketplaces|cache/*/quetrex-factory/scripts/<name>.sh —
-# both contain the same "quetrex-factory/scripts/<name>.sh" tail), because
-# editing the installed copy defangs the floor for every repo on the machine
-# and that copy is outside any repo root. It deliberately DOES NOT cover an
-# unrelated repo's own hooks/<floor-basename>.sh or bare scripts/<floor-
-# basename>.sh — those are false positives now that the floor no longer ships
-# there. `cd` tracking (mirroring merge-gate.sh's own PENDING_CD) still covers
-# a bare <name> written from inside a directory ending .../quetrex-factory/
-# scripts. session-state.sh, edit-gate.sh, auto-format.sh and
-# quetrex-update-check.sh are deliberately NOT protected — they are not the
-# floor, and a set that grows past the floor trains the operator to click
-# through the one prompt that matters.
+# PROTECTED SET (CORRECTED, C1 review finding, critical): the six floor
+# basenames are SOURCED in exactly one place (plugins/quetrex-factory/
+# scripts/, the one-copy rule), but that is NOT the only path shape that
+# actually EXECUTES. The prior version of this comment claimed the
+# repo-local copy and "the INSTALLED marketplace copy" share one tail,
+# quetrex-factory/scripts/<name>.sh — true for a marketplace CLONE
+# (.claude/plugins/marketplaces/quetrex/plugins/quetrex-factory/scripts/),
+# but FALSE for the copy CLAUDE_PLUGIN_ROOT actually resolves and RUNS at
+# runtime: the plugin CACHE, which interposes a VERSION directory —
+# .claude/plugins/cache/quetrex/quetrex-factory/<VERSION>/scripts/<name>.sh
+# (e.g. .../quetrex-factory/1.7.3/scripts/merge-gate.sh). The narrowed
+# regex never matched that tail, so a Write to the copy that governs every
+# armed repo on the machine went from DENY (40feac8) to silent ALLOW —
+# reproduced and fixed here. PROT_PATH_ERE now matches all three shapes:
+#   1. plugins/quetrex-factory/scripts/<name>.sh        (repo-local, or a
+#      marketplace clone — no version segment interposed)
+#   2. quetrex-factory/<anything>/scripts/<name>.sh      (the installed
+#      CACHE layout — the one that actually executes)
+#   3. (hooks|scripts)/<name>.sh                         (the PRE-one-copy
+#      floor, kept as a FLOOR per "when you replace a detector, keep the
+#      old one and prove you lost nothing" — closes SEC-ONECOPY-2 too: a
+#      forked/older-layout repo or plugin-cache generation that still ships
+#      a floor script under hooks/ or a bare scripts/ stays protected)
+# `cd` tracking (mirroring merge-gate.sh's own PENDING_CD) still covers a
+# bare <name> written from inside a directory ending .../quetrex-factory/
+# scripts (or a versioned .../quetrex-factory/<ver>/scripts). session-
+# state.sh, edit-gate.sh, auto-format.sh and quetrex-update-check.sh are
+# deliberately NOT protected — they are not the floor, and a set that
+# grows past the floor trains the operator to click through the one prompt
+# that matters.
+#
+# ARMED-ONLY EXEMPTION (C3 review finding): the INSTALLED shapes (1 and 2
+# above, under .claude/plugins/cache/ or .claude/plugins/marketplaces/) are
+# machine-global — outside any repo root, and governing EVERY armed repo on
+# the machine, not just the session's own. Gating their protection on the
+# SESSION's own arming state left them writable from any scratch/unarmed
+# repo. See PROT_INSTALLED_HINT_ERE and the bypass below the ARMED-ONLY
+# gate: those two shapes are checked BEFORE that gate, unconditionally.
+# Shape 3 (the pre-one-copy floor) and a bare repo-local
+# plugins/quetrex-factory/scripts/<name>.sh remain armed-gated as before —
+# they describe a REPO's own committed floor, which is only meaningful for
+# a repo actually under Quetrex management.
 #
 # TOKENIZER: split_segments_quote_aware() and normalize_segment(), copied
 # VERBATIM (not sourced — merge-gate.sh executes at load, so it cannot be
@@ -135,32 +160,48 @@ resolve_root() {
   printf '%s' "$r"
 }
 
-# ARMED-ONLY: "unarmed repo = no gates at all" — a repo with no
-# .quetrex/project.json gets none of the floor, including this guard. Resolve
-# ROOT once, up front, before any pattern-matching or decision emission, and
-# reuse it below (allow_unlocked no longer needs its own resolve_root call).
-ROOT=$(resolve_root)
-if [ -z "$ROOT" ] || [ ! -f "$ROOT/.quetrex/project.json" ]; then
-  exit 0
-fi
-
-# --- the protected set --------------------------------------------------
+# --- the protected set (moved above the ARMED-ONLY gate: C3 needs PROT_ALT
+# to build the installed-plugin hint BEFORE that gate can run) -------------
 # The six floor basenames, including verify-gate-quick-chain.sh (added
 # 2026-08-21): verify-gate.sh now SOURCES it, so editing it changes the gate's
 # behavior exactly as effectively as editing verify-gate.sh itself would,
-# without ever touching the "protected" file by name. All six now live in
-# exactly ONE place on disk (plugins/quetrex-factory/scripts/, per the
-# one-copy rule) — see the PROTECTED SET comment above the vector sections
-# below for how the path match is scoped to that location specifically.
+# without ever touching the "protected" file by name.
 PROT_ALT='deny-guard|secret-scan|enforce-branch|merge-gate|verify-gate|verify-gate-quick-chain'
-# Path-tail shape: .../quetrex-factory/scripts/<name>.sh, anywhere in the
-# text (a file_path value or a Bash command/segment string) — repo-local or
-# installed-marketplace (both contain the same tail); NOT a bare hooks/ or
-# scripts/ segment, which the floor no longer ships at.
-PROT_PATH_ERE="(^|[^A-Za-z0-9_.-])quetrex-factory/scripts/(${PROT_ALT})\\.sh([^A-Za-z0-9_.-]|\$)"
+# Path-tail shape, matched anywhere in the text (a file_path value or a Bash
+# command/segment string) — see the PROTECTED SET comment above the vector
+# sections below for the three alternatives and why each exists.
+PROT_PATH_ERE="(^|[^A-Za-z0-9_.-])(quetrex-factory/(scripts|[^/]+/scripts)/(${PROT_ALT})\\.sh|(hooks|scripts)/(${PROT_ALT})\\.sh)([^A-Za-z0-9_.-]|\$)"
 # Bare basename only (no leading path segment) — used together with `cd`
-# tracking below for the third shape the plan names.
+# tracking below for the fourth shape the plan names.
 PROT_BARE_ERE="(^|[^A-Za-z0-9_.-])(${PROT_ALT})\\.sh([^A-Za-z0-9_.-]|\$)"
+# C3: the shapes that are machine-global (outside ANY repo root, governing
+# every armed repo on the machine) — the installed marketplace clone and,
+# critically, the installed CACHE copy with its interposed version segment.
+# A raw substring hint, not the full protected-path grammar: used ONLY to
+# decide whether to bypass the ARMED-ONLY exit below, never to make the
+# actual deny/allow decision (that is still names_protected_path_or_symlink
+# against the real target token, later, via the existing SEC-7-fixed
+# write-target extraction). A false-positive hint here just means an
+# unarmed repo does a little more work before correctly allowing something
+# that was never actually a protected write target.
+PROT_INSTALLED_HINT_ERE='(^|[^A-Za-z0-9_.-])\.claude/plugins/(cache|marketplaces)/.*quetrex-factory'
+
+# ARMED-ONLY, WITH THE C3 EXEMPTION: "unarmed repo = no gates at all" for
+# everything EXCEPT the machine-global installed-plugin shapes above, which
+# are not a property of the session's own repo and must stay protected no
+# matter what that repo's arming state is. Resolve ROOT once, up front,
+# before any pattern-matching or decision emission, and reuse it below
+# (allow_unlocked no longer needs its own resolve_root call).
+ROOT=$(resolve_root)
+INSTALLED_TARGET_HINT=0
+if [ "$TOOL_NAME" = "Write" ] || [ "$TOOL_NAME" = "Edit" ]; then
+  printf '%s' "$FILE_PATH" | grep -Eq "$PROT_INSTALLED_HINT_ERE" && INSTALLED_TARGET_HINT=1
+else
+  printf '%s' "$COMMAND" | grep -Eq "$PROT_INSTALLED_HINT_ERE" && INSTALLED_TARGET_HINT=1
+fi
+if [ "$INSTALLED_TARGET_HINT" -eq 0 ] && { [ -z "$ROOT" ] || [ ! -f "$ROOT/.quetrex/project.json" ]; }; then
+  exit 0
+fi
 
 # qx_normalize_path <path> -- collapses "./" and "a/../b" SYNTACTICALLY (no
 # filesystem access, no realpath dependency -- the target frequently does not

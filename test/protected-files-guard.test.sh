@@ -82,23 +82,34 @@ done
   || notok "AC13: expected 0 ask decisions, got $ASK13"
 
 # =============================================================================
-# ONE-COPY AC14 — the protected-path NARROWING: the floor now lives in
-# exactly ONE place (plugins/quetrex-factory/scripts/), so a bare hooks/ or
-# scripts/ path that does NOT carry that segment is a FALSE POSITIVE and must
-# ALLOW; a path carrying that segment — repo-local OR at an installed
-# marketplace location — is a TRUE POSITIVE and must DENY; and the
-# QUETREX_UNLOCK_FLOOR=1 unlock must still permit every true positive.
+# ONE-COPY AC14 (CORRECTED — C1 review finding, critical). The original
+# one-copy narrowing covered only quetrex-factory/scripts/<name>.sh
+# (repo-local, and a marketplace CLONE — no version segment interposed) and
+# claimed that was the same tail as "the installed marketplace copy". It is
+# not: the copy CLAUDE_PLUGIN_ROOT actually resolves and RUNS is the plugin
+# CACHE, which interposes a VERSION directory
+# (quetrex-factory/<version>/scripts/<name>.sh, e.g. .../1.7.3/scripts/
+# merge-gate.sh) — never matched by the narrowed regex, so a Write to the
+# copy that governs EVERY armed repo on the machine went from DENY (40feac8)
+# to silent ALLOW. The fix restores the pre-one-copy (hooks|scripts)/
+# <name>.sh floor ALONGSIDE the new shapes (closing SEC-ONECOPY-2 too — a
+# forked/older-layout repo that still ships the floor under hooks/ or a
+# bare scripts/ stays protected) and adds the versioned-cache shape. This AC
+# now reflects the CORRECTED protected set — four shapes, all DENY:
+#   1. plugins/quetrex-factory/scripts/<name>.sh                 (repo-local)
+#   2. .../marketplaces/.../quetrex-factory/scripts/<name>.sh    (marketplace clone)
+#   3. .../cache/.../quetrex-factory/<version>/scripts/<name>.sh (installed CACHE — the one that RUNS)
+#   4. (hooks|scripts)/<name>.sh anywhere                        (pre-one-copy floor, restored)
+# and the QUETREX_UNLOCK_FLOOR=1 unlock must still permit every true positive.
 # =============================================================================
 FLOOR_NAMES="deny-guard secret-scan enforce-branch merge-gate verify-gate verify-gate-quick-chain"
 
-# --- false positives: 0/6 must deny -----------------------------------------
+# --- false positives: paths that carry NONE of the four protected shapes ---
 FALSE_POSITIVE_PATHS=(
-  "hooks/deny-guard.sh"
-  "scripts/verify-gate.sh"
   "src/merge-gate.sh"
   "./secret-scan.sh"
-  "a/b/hooks/enforce-branch.sh"
-  "tools/scripts/merge-gate.sh"
+  "notscripts/merge-gate.sh"
+  "myhooks/deny-guard.sh"
 )
 FP_DENY=0
 for p in "${FALSE_POSITIVE_PATHS[@]}"; do
@@ -106,25 +117,31 @@ for p in "${FALSE_POSITIVE_PATHS[@]}"; do
   is_deny "$OUT" && { FP_DENY=$((FP_DENY+1)); echo "# ONE-COPY AC14 false-positive miss: [$p] -> [$OUT]"; }
 done
 [ "$FP_DENY" -eq 0 ] \
-  && ok "ONE-COPY AC14: 0 of 6 false-positive paths (bare hooks/ or scripts/, no quetrex-factory segment) produce a deny" \
+  && ok "ONE-COPY AC14: 0 of ${#FALSE_POSITIVE_PATHS[@]} false-positive paths (no protected shape at all) produce a deny" \
   || notok "ONE-COPY AC14: expected 0 deny decisions among the false-positive set, got $FP_DENY"
 
-# --- true positives: 12/12 (6 basenames x repo-local + installed-marketplace
-# shape) must deny, and 12/12 must allow once unlocked. -----------------
+# --- true positives: repo-local + marketplace-clone + versioned CACHE
+# (the shape that actually executes, C1) + the restored old floor (C1 /
+# SEC-ONECOPY-2) must ALL deny, and ALL allow once unlocked. -----------------
 TP_PATHS=()
 for name in $FLOOR_NAMES; do
   TP_PATHS+=("$TMP/repo/plugins/quetrex-factory/scripts/${name}.sh")
   TP_PATHS+=("$TMP/fakehome/.claude/plugins/marketplaces/quetrex/plugins/quetrex-factory/scripts/${name}.sh")
+  TP_PATHS+=("$TMP/fakehome/.claude/plugins/cache/quetrex/quetrex-factory/1.7.3/scripts/${name}.sh")
+  TP_PATHS+=("hooks/${name}.sh")
+  TP_PATHS+=("a/b/hooks/${name}.sh")
+  TP_PATHS+=("tools/scripts/${name}.sh")
 done
+TP_TOTAL="${#TP_PATHS[@]}"
 TP_DENY=0
 for p in "${TP_PATHS[@]}"; do
   OUT="$(fire "$(jq -cn --arg p "$p" '{tool_name:"Write",tool_input:{file_path:$p}}')")"
   is_deny "$OUT" || echo "# ONE-COPY AC14 true-positive miss (expected deny): [$p] -> [$OUT]"
   is_deny "$OUT" && TP_DENY=$((TP_DENY+1))
 done
-[ "$TP_DENY" -eq 12 ] \
-  && ok "ONE-COPY AC14: 12 of 12 true-positive paths (6 basenames x repo-local + installed-marketplace) deny" \
-  || notok "ONE-COPY AC14: expected 12 deny decisions among the true-positive set, got $TP_DENY"
+[ "$TP_DENY" -eq "$TP_TOTAL" ] \
+  && ok "ONE-COPY AC14: $TP_TOTAL of $TP_TOTAL true-positive paths (repo-local + marketplace-clone + versioned cache + old floor) deny" \
+  || notok "ONE-COPY AC14: expected $TP_TOTAL deny decisions among the true-positive set, got $TP_DENY"
 
 TP_ALLOW=0
 for p in "${TP_PATHS[@]}"; do
@@ -133,9 +150,60 @@ for p in "${TP_PATHS[@]}"; do
   is_deny "$OUT" && echo "# ONE-COPY AC14 unlock miss (expected allow): [$p] -> [$OUT]"
   is_deny "$OUT" || TP_ALLOW=$((TP_ALLOW+1))
 done
-[ "$TP_ALLOW" -eq 12 ] \
-  && ok "ONE-COPY AC14: with QUETREX_UNLOCK_FLOOR=1, 12 of 12 true-positive paths are NOT denied (unlocked)" \
-  || notok "ONE-COPY AC14: expected 0 deny decisions with the unlock set, got $((12-TP_ALLOW)) still denied"
+[ "$TP_ALLOW" -eq "$TP_TOTAL" ] \
+  && ok "ONE-COPY AC14: with QUETREX_UNLOCK_FLOOR=1, $TP_TOTAL of $TP_TOTAL true-positive paths are NOT denied (unlocked)" \
+  || notok "ONE-COPY AC14: expected 0 deny decisions with the unlock set, got $((TP_TOTAL-TP_ALLOW)) still denied"
+
+# --- C3 (review finding): the installed shapes (2 and 3 above) stay
+# protected even from an UNARMED session — they are machine-global, not a
+# property of the session's own repo. Fired with an explicit UNARMED cwd
+# (a fresh git repo with no .quetrex/project.json), never the ambient cwd
+# fire() uses elsewhere in this file (which is this armed checkout).
+UNARMED_C3="$(mktemp -d)"
+git -C "$UNARMED_C3" init -q -b main >/dev/null 2>&1
+C3_DENY=0; C3_TOTAL=0
+for name in $FLOOR_NAMES; do
+  for p in \
+    "$TMP/fakehome/.claude/plugins/marketplaces/quetrex/plugins/quetrex-factory/scripts/${name}.sh" \
+    "$TMP/fakehome/.claude/plugins/cache/quetrex/quetrex-factory/1.7.3/scripts/${name}.sh"
+  do
+    C3_TOTAL=$((C3_TOTAL+1))
+    OUT="$(printf '%s' "$(jq -cn --arg p "$p" --arg d "$UNARMED_C3" '{tool_name:"Write",tool_input:{file_path:$p},cwd:$d}')" | bash "$GUARD" 2>&1)"
+    is_deny "$OUT" && C3_DENY=$((C3_DENY+1)) || echo "# C3 miss (expected deny from an UNARMED session): [$p] -> [$OUT]"
+  done
+done
+rm -rf "$UNARMED_C3"
+[ "$C3_DENY" -eq "$C3_TOTAL" ] \
+  && ok "C3: $C3_TOTAL of $C3_TOTAL installed-plugin-shape writes deny from an UNARMED session (machine-global, not repo-scoped)" \
+  || notok "C3: expected $C3_TOTAL deny decisions from an unarmed session, got $C3_DENY"
+
+# C1 FAIL-FIRST (mechanical): at this task's own base sha (2ffde3a), the
+# versioned-cache shape (the one that actually EXECUTES) was a silent
+# ALLOW, and the pre-one-copy (hooks|scripts)/ floor was also a silent
+# ALLOW — both regressions this AC now proves fixed above.
+C1_BASE_SHA="2ffde3a"
+if ! git -C "$ROOT" cat-file -e "${C1_BASE_SHA}^{commit}" 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$C1_BASE_SHA" 2>/dev/null || true
+fi
+if ! git -C "$ROOT" cat-file -e "${C1_BASE_SHA}^{commit}" 2>/dev/null; then
+  notok "C1 FAIL-FIRST: baseline commit $C1_BASE_SHA is not reachable in this checkout — cannot prove the regression existed pre-fix"
+else
+  OLD_GUARD_C1="$TMP/.old-pfg-c1.sh"
+  git -C "$ROOT" show "$C1_BASE_SHA:.claude/hooks/protected-files-guard.sh" > "$OLD_GUARD_C1" 2>/dev/null
+  OLD_HITS=0
+  for p in \
+    "$TMP/fakehome/.claude/plugins/cache/quetrex/quetrex-factory/1.7.3/scripts/merge-gate.sh" \
+    "hooks/deny-guard.sh" \
+    "a/b/hooks/enforce-branch.sh" \
+    "tools/scripts/merge-gate.sh"
+  do
+    OUT_OLD="$(printf '%s' "$(jq -cn --arg p "$p" '{tool_name:"Write",tool_input:{file_path:$p}}')" | bash "$OLD_GUARD_C1" 2>&1)"
+    is_deny "$OUT_OLD" && OLD_HITS=$((OLD_HITS+1))
+  done
+  [ "$OLD_HITS" -eq 0 ] \
+    && ok "C1 FAIL-FIRST: at $C1_BASE_SHA, 0 of 4 regressed shapes (versioned cache + 3 old-floor variants) were denied — the regression is real, this is a genuine fix" \
+    || notok "C1 FAIL-FIRST: $OLD_HITS/4 regressed shapes were already denied at $C1_BASE_SHA — cannot demonstrate this is new coverage"
+fi
 
 # =============================================================================
 # AC14 — write-shaped Bash commands -> DENY; read-only controls -> silent.
