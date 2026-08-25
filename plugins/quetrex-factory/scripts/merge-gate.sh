@@ -88,6 +88,12 @@
 
 set -uo pipefail
 
+# --- qx_repo_armed: the ONE shared arming predicate (ONE-COPY round 2) -----
+QX_ARMED_HELPER="$(dirname "${BASH_SOURCE[0]}")/qx-armed.sh"
+if ! source "$QX_ARMED_HELPER" 2>/dev/null || ! command -v qx_repo_armed >/dev/null 2>&1; then
+  qx_repo_armed() { [ -n "${1:-}" ] && [ -f "$1/.quetrex/project.json" ]; }
+fi
+
 # --- read hook input (absence is fine) -------------------------------------
 input=""
 if [ ! -t 0 ]; then input=$(cat); fi
@@ -709,7 +715,9 @@ evaluate_vector() {
   # SAME ROOT this vector will act on (resolved above, including the
   # `git -C <path>` TARGET_DIR case) so a merge in repo X is never gated by
   # repo Y's arming. Per the operator rule "unarmed repo = no gates at all".
-  { [ -n "$ROOT" ] && [ -f "$QDIR/project.json" ]; } || return 0
+  # SEC-ONECOPY-1 (round 2): qx_repo_armed also honors project.json tracked
+  # at HEAD / the default branch tip, not just the working-tree file.
+  { [ -n "$ROOT" ] && qx_repo_armed "$ROOT"; } || return 0
 
   # A human-readable identity for THIS vector's repo, computed once here so
   # every deny() call below (via the prefix deny() adds — see next) names

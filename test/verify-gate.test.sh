@@ -1153,7 +1153,18 @@ if [ "$HOOK" -ef "$REPO_ROOT/plugins/quetrex-factory/scripts/verify-gate.sh" ]; 
   # growth for the block message and its explanatory comment. Bumped from 20
   # to 35 to cover both C4 and C6 together; still a small fixed number, not
   # an unbounded one.
-  C4_ALLOWANCE=35
+  #
+  # ONE_COPY_R2_ALLOWANCE (2026-08-25, ONE-COPY security rework round 2):
+  # verify-gate.sh now sources the shared plugins/quetrex-factory/scripts/
+  # qx-armed.sh (qx_repo_armed) instead of testing
+  # `[ -f "$ROOT/.quetrex/project.json" ]` inline, closing SEC-ONECOPY-1 (the
+  # armed-only gate now also honors project.json tracked at HEAD / the
+  # default branch tip, so deleting the working-tree copy of an
+  # already-committed file no longer disarms this hook). The sourcing
+  # block + its explanatory comment + the fallback definition is the SAME
+  # small, bounded, ONE-TIME growth shape as C4/C6 above — bumped from 35 to
+  # 45 to cover it.
+  C4_ALLOWANCE=45
   if [ "$DELTA" -ge "$((0 - C4_ALLOWANCE))" ]; then
     pass "AC10: verify-gate.sh has not regrown past the pre-deletion baseline 63bb114 + the C4/C6 allowance (delta $DELTA, allowance $C4_ALLOWANCE; floor, not ratchet — the 4 needle greps above are the proof)"
   else

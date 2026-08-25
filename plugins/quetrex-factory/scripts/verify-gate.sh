@@ -153,6 +153,12 @@
 
 set -uo pipefail
 
+# --- qx_repo_armed: the ONE shared arming predicate (ONE-COPY round 2) -----
+QX_ARMED_HELPER="$(dirname "${BASH_SOURCE[0]}")/qx-armed.sh"
+if ! source "$QX_ARMED_HELPER" 2>/dev/null || ! command -v qx_repo_armed >/dev/null 2>&1; then
+  qx_repo_armed() { [ -n "${1:-}" ] && [ -f "$1/.quetrex/project.json" ]; }
+fi
+
 MAX_ATTEMPTS="${QUETREX_VERIFY_MAX:-3}"
 
 # --- read hook input (best-effort; absence is fine) ------------------------
@@ -185,7 +191,11 @@ fi
 # Per the operator rule "unarmed repo = no gates at all", a repo with no
 # $ROOT/.quetrex/project.json is not Quetrex-managed. Exit before QDIR/mkdir
 # so an unarmed repo never gains a .quetrex/ directory as a side effect.
-[ -f "$ROOT/.quetrex/project.json" ] || exit 0
+# SEC-ONECOPY-1 (round 2): qx_repo_armed also honors project.json tracked at
+# HEAD / the default branch tip, not just the working-tree file, so deleting
+# the working-tree copy of an already-committed project.json no longer
+# disarms this gate.
+qx_repo_armed "$ROOT" || exit 0
 
 QDIR="$ROOT/.quetrex"
 LEDGER="$QDIR/verify-ledger.jsonl"

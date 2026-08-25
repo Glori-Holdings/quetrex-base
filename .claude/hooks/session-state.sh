@@ -31,6 +31,20 @@
 
 set -uo pipefail
 
+# --- qx_repo_armed: the ONE shared arming predicate (ONE-COPY round 2) -----
+# This hook ships as part of the "quetrex" plugin (registered via
+# ${CLAUDE_PLUGIN_ROOT}/.claude/hooks/session-state.sh), which bundles the
+# WHOLE repo tree — including plugins/quetrex-factory/ — for its own agent
+# manifest (see .claude-plugin/plugin.json's `agents` list), so a path two
+# levels up from this file resolves the same helper identically in the repo
+# checkout AND in that plugin's installed cache. It does NOT work from the
+# STANDALONE quetrex-factory plugin's own install (which never registers
+# this file), so that is not a concern here.
+QX_ARMED_HELPER="$(dirname "${BASH_SOURCE[0]}")/../../plugins/quetrex-factory/scripts/qx-armed.sh"
+if ! source "$QX_ARMED_HELPER" 2>/dev/null || ! command -v qx_repo_armed >/dev/null 2>&1; then
+  qx_repo_armed() { [ -n "${1:-}" ] && [ -f "$1/.quetrex/project.json" ]; }
+fi
+
 INPUT=""
 if [ ! -t 0 ]; then INPUT=$(cat); fi
 
@@ -70,7 +84,7 @@ QDIR="$ROOT/.quetrex"
 # offer line, printed on every SessionStart source (startup/resume/compact —
 # this hook fires once per source, never per turn, so that is not a spam
 # concern) and nothing else from this hook.
-if [ ! -f "$QDIR/project.json" ]; then
+if ! qx_repo_armed "$ROOT"; then
   printf '%s\n' "Quetrex: this repo is not armed (no .quetrex/project.json). Offer the user /quetrex:init; if they say yes, run it."
   exit 0
 fi

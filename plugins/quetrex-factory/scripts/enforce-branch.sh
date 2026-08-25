@@ -30,6 +30,12 @@
 
 set -o pipefail
 
+# --- qx_repo_armed: the ONE shared arming predicate (ONE-COPY round 2) -----
+QX_ARMED_HELPER="$(dirname "${BASH_SOURCE[0]}")/qx-armed.sh"
+if ! source "$QX_ARMED_HELPER" 2>/dev/null || ! command -v qx_repo_armed >/dev/null 2>&1; then
+  qx_repo_armed() { [ -n "$1" ] && [ -f "$1/.quetrex/project.json" ]; }
+fi
+
 # --- read hook input -------------------------------------------------------
 input=""
 if [ ! -t 0 ]; then input=$(cat); fi
@@ -247,7 +253,11 @@ check_git() {
   # or the last cd, not just the session cwd) so a commit/push in repo X is
   # never gated by repo Y's arming.
   _eb_root=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)
-  { [ -n "$_eb_root" ] && [ -f "$_eb_root/.quetrex/project.json" ]; } || return 0
+  # SEC-ONECOPY-1 (round 2): qx_repo_armed also honors project.json tracked
+  # at HEAD / the default branch tip, not just the working-tree file, so
+  # deleting the working-tree copy of an already-committed project.json no
+  # longer disarms this gate either.
+  { [ -n "$_eb_root" ] && qx_repo_armed "$_eb_root"; } || return 0
 
   br=$(branch_of "$dir")
   [ "$br" = "main" ] || [ "$br" = "master" ] || return 0
