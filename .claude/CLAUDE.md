@@ -9,7 +9,7 @@ never be reverted.
 
 This repo IS the Quetrex engine — the hooks, agents, commands and installer that other repos run. Work here edits enforcement machinery, not application code.
 
-- Hook scripts live in `.claude/hooks/`, agent contracts in `.claude/agents/`, slash commands in `.claude/commands/`, shared shell in `.claude/lib/`.
+- Hook scripts live in `.claude/hooks/`, agent contracts in `plugins/quetrex-factory/agents/` (the one-copy location — none remain under `.claude/agents/`), slash commands in `.claude/commands/`, shared shell in `.claude/lib/`.
 - This repo ships as the `quetrex` Claude Code plugin. A plugin hook command must resolve via `${CLAUDE_PLUGIN_ROOT}`: write `bash "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/<name>.sh"`, NEVER `~/.claude/...` — a plugin only ever sees what it ships. (`${CLAUDE_PROJECT_DIR}` still appears *inside* hook scripts to target the user's repo; that is not the registration layer.)
 - **A change to a hook's blocking behavior ships in the same commit as a test under `test/` that proves both the new block and the new allow.**
 - Generic pipeline doctrine (agent roles, branch rules, permission model) lives in the on-demand `.claude/skills/quetrex-pipeline/` skill — nothing loads it globally. Keep THIS file to what is true of THIS repo only.

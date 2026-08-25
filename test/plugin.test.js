@@ -336,19 +336,19 @@ check('plugin.json declares custom paths that keep content under .claude/', () =
     'hooks/hooks.json must exist at the plugin root so it auto-loads');
 });
 
-// ONE-COPY: the 7 PIPELINE agents (architect, database-architect, developer,
-// git-workflow, qa, reviewer, security-reviewer) live in
-// plugins/quetrex-factory/agents/ — the git-subdir-published quetrex-factory
-// subtree, which must be self-contained — while the 2 CLEANUP agents
-// (quetrex-cleanup-auditor, quetrex-cleanup-proposer) are command-layer, not
-// part of the build pipeline, and stay under .claude/agents/. No agent .md
-// file may exist in either directory undeclared, and plugin.json must
-// declare exactly this split, not just "some agents somewhere".
-const CLEANUP_AGENTS = ['quetrex-cleanup-auditor.md', 'quetrex-cleanup-proposer.md'];
-const PIPELINE_AGENTS = ['architect.md', 'database-architect.md', 'developer.md',
-  'git-workflow.md', 'qa.md', 'reviewer.md', 'security-reviewer.md'];
+// ONE-COPY (final reconciliation with dev-floor): ALL 9 agents — the 7
+// pipeline agents (architect, database-architect, developer, git-workflow,
+// qa, reviewer, security-reviewer) AND the 2 cleanup agents
+// (quetrex-cleanup-auditor, quetrex-cleanup-proposer) — live in exactly ONE
+// place: plugins/quetrex-factory/agents/ (git-mv'd there by the floor
+// workstream; floor's OWN plugin.json still lists only its 7 pipeline
+// agents — that manifest is a different concern from quetrex's). .claude/
+// agents/ no longer holds any agent file at all (it may not even exist).
+const ALL_AGENTS = ['architect.md', 'database-architect.md', 'developer.md',
+  'git-workflow.md', 'qa.md', 'quetrex-cleanup-auditor.md',
+  'quetrex-cleanup-proposer.md', 'reviewer.md', 'security-reviewer.md'];
 
-check('plugin.json declares agents split across .claude/agents/ (cleanup) and plugins/quetrex-factory/agents/ (pipeline)', () => {
+check('plugin.json declares all 9 agents at plugins/quetrex-factory/agents/, none left in .claude/agents/', () => {
   const p = readJson('.claude-plugin/plugin.json');
   // `agents` MUST be individual .md FILE paths — the Claude Code plugin validator
   // rejects a directory for `agents` (unlike commands/skills, which take a dir).
@@ -360,27 +360,31 @@ check('plugin.json declares agents split across .claude/agents/ (cleanup) and pl
   }
 
   const declared = new Set(p.agents);
-  const DIRS = [
-    [path.join(REPO_ROOT, '.claude/agents'), './.claude/agents/'],
-    [path.join(REPO_ROOT, 'plugins/quetrex-factory/agents'), './plugins/quetrex-factory/agents/'],
-  ];
-  for (const [dir, prefix] of DIRS) {
-    if (!fs.existsSync(dir)) continue; // owned by another workstream; asserted post-merge
-    for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.md'))) {
-      assert.ok(declared.has(`${prefix}${f}`),
-        `${prefix}${f} exists on disk but is not declared in plugin.json agents — no unlisted .md may survive in either agents directory`);
-    }
-  }
-
-  for (const f of CLEANUP_AGENTS) {
-    assert.ok(declared.has(`./.claude/agents/${f}`), `${f} must be declared at ./.claude/agents/${f}`);
-  }
-  for (const f of PIPELINE_AGENTS) {
+  for (const f of ALL_AGENTS) {
     assert.ok(declared.has(`./plugins/quetrex-factory/agents/${f}`),
       `${f} must be declared at ./plugins/quetrex-factory/agents/${f}`);
   }
-  assert.strictEqual(p.agents.length, CLEANUP_AGENTS.length + PIPELINE_AGENTS.length,
-    'plugin.json agents must declare exactly the 2 cleanup + 7 pipeline agents, nothing more');
+  assert.strictEqual(p.agents.length, ALL_AGENTS.length,
+    `plugin.json agents must declare exactly these ${ALL_AGENTS.length} agents, nothing more`);
+
+  // No unlisted .md may survive in the factory agents dir (checked when it
+  // exists — it is owned by the floor workstream, asserted for real post-merge).
+  const factoryDir = path.join(REPO_ROOT, 'plugins/quetrex-factory/agents');
+  if (fs.existsSync(factoryDir)) {
+    for (const f of fs.readdirSync(factoryDir).filter((x) => x.endsWith('.md'))) {
+      assert.ok(declared.has(`./plugins/quetrex-factory/agents/${f}`),
+        `plugins/quetrex-factory/agents/${f} exists on disk but is not declared in plugin.json agents`);
+    }
+  }
+
+  // .claude/agents/ must hold NO agent .md file — the directory may not even
+  // exist any more, and that is correct, not a regression.
+  const claudeAgentsDir = path.join(REPO_ROOT, '.claude/agents');
+  if (fs.existsSync(claudeAgentsDir)) {
+    const stray = fs.readdirSync(claudeAgentsDir).filter((f) => f.endsWith('.md'));
+    assert.deepStrictEqual(stray, [],
+      `.claude/agents/ must be empty of .md files (all 9 moved to plugins/quetrex-factory/agents/): found ${stray.join(', ')}`);
+  }
 });
 
 // --- 2. commands are de-prefixed to the plugin namespace -------------------

@@ -7,13 +7,13 @@
     "./.claude/commands/"
   ],
   "agents": [
-    "./.claude/agents/quetrex-cleanup-auditor.md",
-    "./.claude/agents/quetrex-cleanup-proposer.md",
     "./plugins/quetrex-factory/agents/architect.md",
     "./plugins/quetrex-factory/agents/database-architect.md",
     "./plugins/quetrex-factory/agents/developer.md",
     "./plugins/quetrex-factory/agents/git-workflow.md",
     "./plugins/quetrex-factory/agents/qa.md",
+    "./plugins/quetrex-factory/agents/quetrex-cleanup-auditor.md",
+    "./plugins/quetrex-factory/agents/quetrex-cleanup-proposer.md",
     "./plugins/quetrex-factory/agents/reviewer.md",
     "./plugins/quetrex-factory/agents/security-reviewer.md"
   ],
