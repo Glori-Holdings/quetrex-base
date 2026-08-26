@@ -448,6 +448,48 @@ else
   pass "arming offline reports no marketplace/pin caveat — there is nothing to defer"
 fi
 
+# ---------------------------------------------------------------------------
+# 7. SEC-GLOBAL-4 FAIL-FIRST — an unparseable settings.json must be REFUSED,
+#    never silently replaced (which drops permissions.deny and every other
+#    key it holds). Both assertions drive the exact pre-fix baseline
+#    (git show 562e025:...) to prove the bug was real, then drive the shipped
+#    tool to prove it is fixed — never inferred from reading the diff.
+# ---------------------------------------------------------------------------
+SEC4_FULL="562e0256b6a90ddff60142a3b677577c401b40e2"
+if ! git -C "$REPO_ROOT" cat-file -e 562e025^{commit} 2>/dev/null; then
+  git -C "$REPO_ROOT" fetch --quiet --depth=1 origin "$SEC4_FULL" 2>/dev/null || true
+fi
+if ! git -C "$REPO_ROOT" cat-file -e 562e025^{commit} 2>/dev/null; then
+  fail "SEC-GLOBAL-4 FAIL-FIRST: baseline commit 562e025 is not reachable in this checkout even after a depth-1 fetch of $SEC4_FULL — cannot prove the fix, refusing to report a pass having compared against nothing"
+else
+  BASELINE_ARM="$WORK/baseline-quetrex-arm"
+  git -C "$REPO_ROOT" show 562e025:plugins/quetrex-setup/bin/quetrex-arm > "$BASELINE_ARM"
+
+  REPO9_BASE="$WORK/repo9-base"
+  mkdir -p "$REPO9_BASE/.claude"
+  printf '{ // a comment, then broken\n "permissions": {"deny": ["Bash(curl:*)"]}' > "$REPO9_BASE/.claude/settings.json"
+  BEFORE9_BASE="$(cat "$REPO9_BASE/.claude/settings.json")"
+  OUT9_BASE="$(QX_ARM_MARKET_URL="file://$MARKET" bash "$BASELINE_ARM" "$REPO9_BASE" "$KANBAN_URL" 2>&1)"; RC9_BASE=$?
+  AFTER9_BASE="$(cat "$REPO9_BASE/.claude/settings.json")"
+  if [ "$RC9_BASE" -eq 0 ] && [ "$AFTER9_BASE" != "$BEFORE9_BASE" ] && ! printf '%s' "$AFTER9_BASE" | grep -q 'permissions'; then
+    pass "SEC-GLOBAL-4 FAIL-FIRST: the pre-fix baseline (562e025) DOES silently replace an unparseable settings.json, dropping permissions.deny — the bug is real, not hypothetical"
+  else
+    fail "SEC-GLOBAL-4 FAIL-FIRST: expected the pre-fix baseline to replace the file and drop permissions.deny (it demonstrably did when this test was authored); got rc=$RC9_BASE, before=[$BEFORE9_BASE], after=[$AFTER9_BASE] — the fail-first proof is broken, not the fix"
+  fi
+
+  REPO9="$WORK/repo9"
+  mkdir -p "$REPO9/.claude"
+  printf '{ // a comment, then broken\n "permissions": {"deny": ["Bash(curl:*)"]}' > "$REPO9/.claude/settings.json"
+  BEFORE9="$(cat "$REPO9/.claude/settings.json")"
+  OUT9="$(run_arm "$REPO9" 2>&1)"; RC9=$?
+  AFTER9="$(cat "$REPO9/.claude/settings.json")"
+  if [ "$RC9" -ne 0 ] && [ "$AFTER9" = "$BEFORE9" ]; then
+    pass "SEC-GLOBAL-4: an unparseable settings.json is refused (non-zero exit) and left byte-identical — permissions.deny survives"
+  else
+    fail "SEC-GLOBAL-4: an unparseable settings.json must be refused and left byte-identical (got rc=$RC9, before=[$BEFORE9], after=[$AFTER9], output: $OUT9)"
+  fi
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "quetrex-arm.test.sh: all checks passed"

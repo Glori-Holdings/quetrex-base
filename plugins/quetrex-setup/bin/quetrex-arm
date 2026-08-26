@@ -207,8 +207,33 @@ _qxarm_write_settings() {
     const fs = require("fs"), path = require("path");
     const [file, slCmd, ...extraNames] = process.argv.slice(1);
 
+    // SEC-GLOBAL-4: a file that EXISTS but fails to parse must be refused,
+    // not silently replaced. The header above promises "existing keys the
+    // caller did not ask about are preserved byte-for-byte" — starting over
+    // from {} on a parse error breaks that promise for exactly the settings
+    // a hand-edited (JSONC-with-comments, or just briefly broken) file is
+    // most likely to be carrying, such as permissions.deny. Only a MISSING
+    // file (ENOENT) gets the fresh-{} default; readFileSync throwing for any
+    // other reason (permissions, etc.) is treated the same as unparseable —
+    // refuse rather than guess.
     let o = {};
-    try { o = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+    let raw = null;
+    try {
+      raw = fs.readFileSync(file, "utf8");
+    } catch (e) {
+      if (e && e.code !== "ENOENT") {
+        console.error("settings.json: cannot read " + file + " (" + (e.code || e.message) + ") — refusing to write, left untouched.");
+        process.exit(1);
+      }
+    }
+    if (raw !== null) {
+      try {
+        o = JSON.parse(raw);
+      } catch (e) {
+        console.error("settings.json: " + file + " exists but is not valid JSON — refusing to overwrite it (that would silently drop every key it holds, including permissions.deny). Fix the JSON by hand, or delete the file to let arming create a fresh one.");
+        process.exit(1);
+      }
+    }
 
     o.enabledPlugins = o.enabledPlugins || {};
     const beforePins = JSON.stringify(o.enabledPlugins);
