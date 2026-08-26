@@ -119,7 +119,39 @@ notok() { FAIL=$((FAIL+1)); printf 'NOT OK - %s\n' "$1"; }
 
 FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-sweep-fixture.XXXXXX")"
 MOCKBIN="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-sweep-mockbin.XXXXXX")"
-trap 'rm -rf "$FIXTURE" "$MOCKBIN"' EXIT
+# PARALLEL ROWS (perf). Rows are independent, but every row writes the SAME
+# $FIXTURE/.quetrex/verify-ledger.jsonl, so running rows concurrently against
+# one shared fixture would race on that file. Instead: make K full copies of
+# the built fixture (git history included — commit shas are content-
+# addressed, so C0/C1/C2 stay valid identifiers in every copy), split the
+# 819-row GOLDEN table below into K contiguous chunks, and run each chunk in
+# its own subshell against its own copy. MOCKBIN is read-only (the mock `gh`
+# never writes into it) so it is shared, not copied. Each chunk writes its
+# own ok/NOT OK lines and its own TOTAL/ORACLE_RED/VIOLATIONS/MISMATCHES/
+# PASS/FAIL to disk; the parent sums them sequentially, in row order, after
+# every chunk finishes — so the trailing sentinel lines report the exact
+# same aggregated numbers a sequential run would, and the output still
+# contains exactly one ok/NOT OK line per row (819 total).
+CHUNKDIR="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-sweep-chunks.XXXXXX")"
+CHUNKROOT="$(mktemp -d "${TMPDIR:-/tmp}/merge-gate-sweep-copies.XXXXXX")"
+trap 'rm -rf "$FIXTURE" "$MOCKBIN" "$CHUNKDIR" "$CHUNKROOT"' EXIT
+
+# Job count: same rule as test/run-all.sh — $RUN_ALL_JOBS if set, else the
+# CPU count via sysctl/nproc, capped at 16. RUN_ALL_JOBS=1 forces a single
+# chunk (all 819 rows, sequential), still through the same chunked path.
+JOBS="${RUN_ALL_JOBS:-}"
+if [ -z "$JOBS" ]; then
+  if command -v sysctl >/dev/null 2>&1; then
+    JOBS="$(sysctl -n hw.ncpu 2>/dev/null || echo 1)"
+  elif command -v nproc >/dev/null 2>&1; then
+    JOBS="$(nproc 2>/dev/null || echo 1)"
+  else
+    JOBS=1
+  fi
+fi
+case "$JOBS" in *[!0-9]*|'') JOBS=1 ;; esac
+[ "$JOBS" -lt 1 ] && JOBS=1
+[ "$JOBS" -gt 16 ] && JOBS=16
 
 cat > "$MOCKBIN/gh" <<'MOCKGH'
 #!/bin/sh
@@ -181,7 +213,11 @@ sha_for() { case "$1" in 0) printf '%s' "$C0";; 1) printf '%s' "$C1";; 2) printf
 # for why (this repo's own PreToolUse gate reads the command string of every
 # Bash call, including the one that runs this test).
 GH_MERGE="$(printf 'gh pr mer%s' 'ge') 123 --squash"
-PAYLOAD="$(jq -cn --arg cmd "$GH_MERGE" --arg cwd "$FIXTURE" '{tool_input:{command:$cmd},cwd:$cwd}')"
+# PARALLEL ROWS: each chunk points this at its OWN fixture copy's cwd, so
+# build it as a function instead of a single top-level value.
+build_payload() {  # <fixture_dir> -> prints the PreToolUse payload JSON
+  jq -cn --arg cmd "$GH_MERGE" --arg cwd "$1" '{tool_input:{command:$cmd},cwd:$cwd}'
+}
 
 # resolve_sha <last_overall r|g|s|""> <any_nonskip_red_at_this_sha 0|1> -> red|green|clean|none
 resolve_sha() {
@@ -201,10 +237,10 @@ decide() {
   esac
 }
 
-TOTAL=0
-ORACLE_RED=0
-VIOLATIONS=0
-MISMATCHES=0
+# TOTAL/ORACLE_RED/VIOLATIONS/MISMATCHES/PASS/FAIL are declared `local` per
+# chunk (see run_chunk, below the golden table) and summed into these same
+# names — as plain globals — during sequential aggregation after every
+# chunk finishes; no top-level initialization is needed here.
 
 # run_row <rowstring like "g1r2s2"> <expected A|D>
 run_row() {
@@ -273,10 +309,7 @@ run_row() {
 # and a separate full decision diff against main's hook, restricted to the
 # 258 red/green-only rows where this branch's semantics are unchanged from
 # main (skip never appears), showed 0 divergences. -------------------------
-while read -r rowstring expected; do
-  [ -z "$rowstring" ] && continue
-  run_row "$rowstring" "$expected"
-done <<'GOLDEN'
+GOLDEN_TABLE="$(cat <<'GOLDEN'
 r0 D
 r1 D
 r2 D
@@ -1097,6 +1130,83 @@ s2s2s0 A
 s2s2s1 A
 s2s2s2 A
 GOLDEN
+)"
+
+ROWCOUNT="$(printf '%s\n' "$GOLDEN_TABLE" | grep -c .)"
+if [ "$JOBS" -gt "$ROWCOUNT" ]; then JOBS="$ROWCOUNT"; fi
+[ "$JOBS" -lt 1 ] && JOBS=1
+
+# Split into $JOBS contiguous chunks, in the table's own order, so a chunk's
+# ok/NOT OK output stays in familiar top-to-bottom row order once
+# reassembled below.
+printf '%s\n' "$GOLDEN_TABLE" | awk -v k="$JOBS" -v dir="$CHUNKDIR" '
+  { lines[NR] = $0 }
+  END {
+    n = NR
+    base = int(n / k)
+    rem = n % k
+    idx = 1
+    for (c = 1; c <= k; c++) {
+      cnt = base + (c <= rem ? 1 : 0)
+      fname = dir "/rows_" c
+      for (i = 0; i < cnt; i++) { print lines[idx] > fname; idx++ }
+      if (cnt > 0) close(fname)
+    }
+  }
+'
+
+# run_chunk <chunk-index> <fixture-copy-dir> <rows-file> — runs run_row
+# (UNTOUCHED, below) for every row in its slice against its OWN fixture
+# copy. FIXTURE and PAYLOAD are `local` here so run_row — which references
+# the globals of the same name — sees THIS chunk's copy via bash's normal
+# dynamic scoping; run_row's own source is never edited. TOTAL/ORACLE_RED/
+# VIOLATIONS/MISMATCHES/PASS/FAIL are likewise `local`, so each chunk (its
+# own forked subshell) counts only its own rows; the parent sums the
+# per-chunk totals sequentially after every chunk finishes.
+run_chunk() {
+  local chunk_idx="$1" fixture_dir="$2" rows_file="$3"
+  local FIXTURE="$fixture_dir"
+  local PAYLOAD; PAYLOAD="$(build_payload "$FIXTURE")"
+  local TOTAL=0 ORACLE_RED=0 VIOLATIONS=0 MISMATCHES=0 PASS=0 FAIL=0
+  while read -r rowstring expected; do
+    [ -z "$rowstring" ] && continue
+    run_row "$rowstring" "$expected"
+  done < "$rows_file" > "$CHUNKDIR/$chunk_idx.out" 2>&1
+  printf '%s %s %s %s %s %s\n' "$TOTAL" "$ORACLE_RED" "$VIOLATIONS" "$MISMATCHES" "$PASS" "$FAIL" > "$CHUNKDIR/$chunk_idx.counts"
+}
+
+PIDS=()
+CHUNK_IDS=""
+k=1
+while [ "$k" -le "$JOBS" ]; do
+  ROWS_FILE="$CHUNKDIR/rows_$k"
+  if [ -f "$ROWS_FILE" ]; then
+    COPY_DIR="$CHUNKROOT/copy_$k"
+    cp -R "$FIXTURE" "$COPY_DIR"
+    run_chunk "$k" "$COPY_DIR" "$ROWS_FILE" &
+    PIDS[$k]="$!"
+    CHUNK_IDS="$CHUNK_IDS $k"
+  fi
+  k=$((k + 1))
+done
+
+for k in $CHUNK_IDS; do
+  wait "${PIDS[$k]}" 2>/dev/null
+done
+
+# Aggregate sequentially, in chunk (row) order, so the combined ok/NOT OK
+# stream reads top-to-bottom exactly like a sequential run's would.
+TOTAL=0; ORACLE_RED=0; VIOLATIONS=0; MISMATCHES=0; PASS=0; FAIL=0
+for k in $CHUNK_IDS; do
+  read -r t o v m p f < "$CHUNKDIR/$k.counts"
+  TOTAL=$((TOTAL + t))
+  ORACLE_RED=$((ORACLE_RED + o))
+  VIOLATIONS=$((VIOLATIONS + v))
+  MISMATCHES=$((MISMATCHES + m))
+  PASS=$((PASS + p))
+  FAIL=$((FAIL + f))
+  cat "$CHUNKDIR/$k.out"
+done
 
 echo
 echo "merge-gate-sweep.test.sh: $TOTAL row(s) swept, $ORACLE_RED with a genuine describing red, $VIOLATIONS safety violation(s), $MISMATCHES golden mismatch(es)"

@@ -428,6 +428,107 @@ else
   fail "ASSERTION INFLATION: expected exit 1, got $FAKE_CODE"
 fi
 
+# =============================================================================
+# PARALLEL PARITY. run-all.sh now executes units N-wide by default (execute)
+# and classifies them sequentially afterward (classify) — this must produce
+# EXACTLY the same per-unit verdicts, counts, and exit code as
+# RUN_ALL_JOBS=1 (today's original one-at-a-time behavior) on the SAME mixed
+# pass/fail/vacuous/crash fixture ($DIR, built above). Per-unit elapsed
+# seconds legitimately differ between the two runs (a real wall-clock
+# measurement, not a deterministic value), so it is stripped before
+# comparing — everything else must match byte-for-byte.
+# =============================================================================
+strip_elapsed() { printf '%s\n' "$1" | sed -E 's/ \([0-9]+s\)$//'; }
+
+SEQ_OUT="$(RUN_ALL_JOBS=1 bash "$RUNNER" "$DIR" 2>&1)"; SEQ_CODE=$?
+PAR_OUT="$(bash "$RUNNER" "$DIR" 2>&1)"; PAR_CODE=$?
+
+SEQ_CLASS="$(strip_elapsed "$SEQ_OUT" | grep -E '^(ok    |FAIL  |SKIP  )' | sort)"
+PAR_CLASS="$(strip_elapsed "$PAR_OUT" | grep -E '^(ok    |FAIL  |SKIP  )' | sort)"
+if [ -n "$SEQ_CLASS" ] && [ "$SEQ_CLASS" = "$PAR_CLASS" ]; then
+  pass "PARALLEL PARITY: RUN_ALL_JOBS=1 and default-parallel produce IDENTICAL per-unit classifications for the mixed pass/fail/vacuous/crash fixture"
+else
+  fail "PARALLEL PARITY: classification mismatch between sequential and parallel runs (sequential=[$SEQ_CLASS] parallel=[$PAR_CLASS])"
+fi
+
+if [ "$SEQ_CODE" = "$PAR_CODE" ]; then
+  pass "PARALLEL PARITY: exit codes match between sequential and parallel runs ($SEQ_CODE)"
+else
+  fail "PARALLEL PARITY: exit codes differ (sequential=$SEQ_CODE parallel=$PAR_CODE)"
+fi
+
+SEQ_TALLY="$(printf '%s' "$SEQ_OUT" | grep -E '^[0-9]+ passed, [0-9]+ failed, [0-9]+ skipped')"
+PAR_TALLY="$(printf '%s' "$PAR_OUT" | grep -E '^[0-9]+ passed, [0-9]+ failed, [0-9]+ skipped')"
+if [ -n "$SEQ_TALLY" ] && [ "$SEQ_TALLY" = "$PAR_TALLY" ]; then
+  pass "PARALLEL PARITY: aggregate tally matches between sequential and parallel runs ($SEQ_TALLY)"
+else
+  fail "PARALLEL PARITY: aggregate tally differs (sequential=[$SEQ_TALLY] parallel=[$PAR_TALLY])"
+fi
+
+if printf '%s' "$PAR_OUT" | grep -qF 'slowest unit(s):'; then
+  pass "PARALLEL PARITY: the parallel run reports the slowest unit(s) after the summary"
+else
+  fail "PARALLEL PARITY: no slowest-unit(s) report found in the parallel run's output (out: [$PAR_OUT])"
+fi
+
+# =============================================================================
+# PARALLEL CRASH CAPTURE. A unit that writes PARTIAL output and then crashes
+# mid-run, running CONCURRENTLY alongside other units under the default
+# (parallel) job count, must still be captured in full (never truncated by
+# a sibling unit's own output landing in the same file) and classified
+# exactly as it would be run alone.
+# =============================================================================
+DIR_CRASH="$TMPROOT/fixture-partial-crash"
+mkdir -p "$DIR_CRASH"
+cat > "$DIR_CRASH/unitX_sleep1.sh" <<'EOF'
+#!/usr/bin/env bash
+sleep 1
+echo "ok - X1 marker-unitX-concurrent"
+echo "unitX_sleep1.sh: all checks passed"
+exit 0
+EOF
+cat > "$DIR_CRASH/unitY_sleep2.sh" <<'EOF'
+#!/usr/bin/env bash
+sleep 1
+echo "ok - Y1 marker-unitY-concurrent"
+echo "unitY_sleep2.sh: all checks passed"
+exit 0
+EOF
+# Writes SOME output (one real assertion, one plain marker line), THEN
+# crashes with a non-zero exit and no closing "NOT OK" line — proves the
+# partial pre-crash output survives concurrent capture (each unit writes to
+# its own dedicated file, never a shared stream) and is classified via the
+# "exited N after M passing assertion(s)" branch, not silently swallowed.
+cat > "$DIR_CRASH/unitZ_partial_crash.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "ok - Z1 marker-unitZ-partial-before-crash"
+echo "marker-unitZ-mid-output-before-crash-should-not-be-truncated"
+exit 42
+EOF
+chmod +x "$DIR_CRASH"/*.sh
+CRASH_OUT="$(bash "$RUNNER" "$DIR_CRASH" 2>&1)"; CRASH_CODE=$?
+
+if printf '%s' "$CRASH_OUT" | grep -qF 'marker-unitZ-mid-output-before-crash-should-not-be-truncated'; then
+  pass "PARALLEL CRASH CAPTURE: partial output written before a mid-run crash is captured in full (not truncated) while other units run concurrently"
+else
+  fail "PARALLEL CRASH CAPTURE: partial pre-crash output is missing — parallel capture truncated or corrupted it (out: [$CRASH_OUT])"
+fi
+if printf '%s' "$CRASH_OUT" | grep -qF 'FAIL  test/unitZ_partial_crash.sh — exited 42 after 1 passing assertion'; then
+  pass "PARALLEL CRASH CAPTURE: the mid-run crash is classified correctly (exited 42 after 1 passing assertion) despite concurrent siblings"
+else
+  fail "PARALLEL CRASH CAPTURE: unitZ_partial_crash.sh was not classified as expected (out: [$CRASH_OUT])"
+fi
+if printf '%s' "$CRASH_OUT" | grep -qF 'ok    test/unitX_sleep1.sh'; then
+  pass "PARALLEL CRASH CAPTURE: a concurrently-running sibling unit is still classified correctly (no cross-contamination)"
+else
+  fail "PARALLEL CRASH CAPTURE: unitX_sleep1.sh missing/misclassified (out: [$CRASH_OUT])"
+fi
+if [ "$CRASH_CODE" -eq 1 ]; then
+  pass "PARALLEL CRASH CAPTURE: overall exit is 1 (one unit crashed)"
+else
+  fail "PARALLEL CRASH CAPTURE: expected exit 1, got $CRASH_CODE"
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "run-all.test.sh: all checks passed"
