@@ -296,6 +296,28 @@ if [ -s "$WORK/act.sh" ]; then
   else
     ok "PART 2: qx_actionability(gate_refused) never says RECOVERABLE"
   fi
+
+  # =============================================================================
+  # PART 7 (R3, reviewer): when the needs_clarity transition itself FAILED,
+  # qx_actionability must report a DIFFERENT liveness (`gate_refused_manual`) that
+  # never claims the board was updated, and must tell the operator to do it by hand.
+  # =============================================================================
+  OUT="$(TASK_ID="QDM-6"; . "$WORK/act.sh"; qx_actionability in_progress single full "$P_GATEREFUSED" gate_refused_manual 2>&1)"; RC=$?
+  if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -qi 'REFUSE'; then
+    ok "PART 7 (R3): qx_actionability(gate_refused_manual) reports REFUSE"
+  else
+    notok "PART 7 (R3): qx_actionability(gate_refused_manual) did not REFUSE as expected (rc=$RC): $OUT"
+  fi
+  if printf '%s' "$OUT" | grep -qi 'has been moved to needs_clarity'; then
+    notok "PART 7 (R3): qx_actionability(gate_refused_manual) falsely claims the board WAS updated — the whole point of this liveness value is that the transition FAILED. Output: $OUT"
+  else
+    ok "PART 7 (R3): qx_actionability(gate_refused_manual) does not falsely claim the transition succeeded"
+  fi
+  if printf '%s' "$OUT" | grep -qi 'FAILED' && printf '%s' "$OUT" | grep -q 'needs_clarity'; then
+    ok "PART 7 (R3): qx_actionability(gate_refused_manual) says the transition FAILED and names needs_clarity as what must be set manually"
+  else
+    notok "PART 7 (R3): qx_actionability(gate_refused_manual) does not clearly say the transition failed / what to do about it. Output: $OUT"
+  fi
 fi
 
 # =============================================================================
@@ -305,7 +327,7 @@ fi
 #
 # MEASURED (pre-fix): a multi-MiB git_workflow_reason made `quetrex-api task-status`
 # succeed and `quetrex-api task-comment` die with E2BIG (argv too long), and the block
-# ignored the exit code entirely — the card landed in needs_human with NO reason
+# ignored the exit code entirely — the card landed in needs_clarity with NO reason
 # attached anywhere and no error surfaced to the operator.
 # =============================================================================
 extract_block qx_gate_refusal_handoff "$TASKBUILD" > "$WORK/handoff.sh"
@@ -361,9 +383,19 @@ MOCKAPI
     cat "$log"
   }
 
+  # --- R1/R4: the exact status transition is `needs_clarity` — the ONLY status this
+  #     codebase models for "the pipeline sent this back" (task-rework.md, dev-
+  #     pipeline.md's rework terminus). `needs_human` is not a status anything here
+  #     writes, checks, or expects. ------------------------------------------------
+  OUT="$(run_handoff "$TASK6" 0 0)"
+  if printf '%s' "$OUT" | grep -q "task-status $TASK6 needs_clarity"; then
+    ok "PART 6 (R1/R4): qx_gate_refusal_handoff calls quetrex-api task-status with exactly 'needs_clarity' — the modelled rework-terminus status, never 'needs_human'"
+  else
+    notok "PART 6 (R1/R4): expected 'task-status $TASK6 needs_clarity' in the mock's call log, got: $OUT"
+  fi
+
   # --- both calls succeed: the comment body must be <= 800 bytes even though the
   #     underlying reason was 2000 --------------------------------------------------
-  OUT="$(run_handoff "$TASK6" 0 0)"
   BODYLEN="$(printf '%s' "$OUT" | sed -n 's/.*bodylen=\([0-9]*\).*/\1/p' | head -n1)"
   # The comment body is the 800-char-capped reason PLUS a small fixed wrapper (the
   # "Cloud build's..."/"Gate evidence preserved on..." prose) — so the bound to check
@@ -393,6 +425,62 @@ MOCKAPI
   fi
 else
   notok "SETUP: task-build.md has no executable qx_gate_refusal_handoff block — PART 6 cannot run"
+fi
+
+# =============================================================================
+# PART 8 (R2, reviewer, high): an open (or ever-opened) PR for the unit branch must
+# short-circuit qx_probe_gate_refusal entirely — a rework can leave an OLDER refused
+# gates branch sitting next to a NEWER run that actually succeeded, and picking among
+# gates branches (even sha-anchored) is the wrong tool once a PR exists at all.
+# =============================================================================
+if command -v gh >/dev/null 2>&1 && [ -s "$WORK/probe.sh" ]; then
+  MOCKBIN_GH="$WORK/mockbin-gh"
+  mkdir -p "$MOCKBIN_GH"
+  cat > "$MOCKBIN_GH/gh" <<'MOCKGH'
+#!/usr/bin/env bash
+# Understands exactly the one invocation shape qx_probe_gate_refusal makes:
+#   gh pr list --head <branch> --state all --json number --jq length
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '%s\n' "${QX_MOCK_GH_PR_COUNT:-0}"
+  exit 0
+fi
+echo "mock gh: unhandled: $*" >&2
+exit 1
+MOCKGH
+  chmod +x "$MOCKBIN_GH/gh"
+
+  TASK8="QDM-12"
+  # A stale REFUSED gates branch from an EARLIER, since-superseded attempt — if the
+  # PR-existence check is skipped or broken, the probe would still find and report
+  # this as the current state.
+  push_gates_branch "${PREFIX}${TASK8}-gates-stale" \
+    '{"task":"QDM-12","git_workflow":"refused","git_workflow_reason":"stale refusal from an earlier attempt, superseded by a later successful rework"}'
+
+  call_probe_with_gh() {  # call_probe_with_gh <task> <prefix> <pr-count>
+    cp "$WORK/probe.sh" "$WORK/probe-call-gh.sh"
+    printf '\nqx_probe_gate_refusal %q %q\n' "$1" "$2" >> "$WORK/probe-call-gh.sh"
+    ( cd "$CLONE" && PATH="$MOCKBIN_GH:$PATH" QX_MOCK_GH_PR_COUNT="$3" bash "$WORK/probe-call-gh.sh" )
+  }
+
+  OUT="$(call_probe_with_gh "$TASK8" "$PREFIX" 1)"
+  RC=$?
+  if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q '^NONE' && printf '%s' "$OUT" | grep -qi 'PR exists'; then
+    ok "PART 8 (R2): a PR already exists for the unit branch -> the probe short-circuits to NONE and never even looks at the stale refused gates branch"
+  else
+    notok "PART 8 (R2): with an existing PR, the probe should short-circuit to NONE naming the PR — got (rc=$RC): $OUT"
+  fi
+
+  # Control: no PR (mock reports 0) -> falls through to the normal gates-branch probe,
+  # which DOES find the (only, real-for-this-test) stale refusal.
+  OUT="$(call_probe_with_gh "$TASK8" "$PREFIX" 0)"
+  RC=$?
+  if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q '^GATE_REFUSED '; then
+    ok "PART 8 (R2): with NO PR, the probe still falls through to the normal gates-branch logic (regression guard — the short-circuit must not swallow genuine refusals)"
+  else
+    notok "PART 8 (R2): with no PR, the probe should still find the gates-branch refusal normally — got (rc=$RC): $OUT"
+  fi
+else
+  echo "SKIP: PART 8 (R2) needs gh and a working probe.sh extraction"
 fi
 
 # --- FAIL-FIRST: the pre-fix task-build.md has no qx_probe_gate_refusal or gate_refused

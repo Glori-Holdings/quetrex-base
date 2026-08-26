@@ -207,6 +207,9 @@ The verdict is computed, not remembered:
 #     - probe says `refused` → REFUSE, to a HUMAN, and never auto-refired.
 #     - probe says `gate_refused` → REFUSE, to a HUMAN, and never auto-refired
 #       (same non-recoverable shape as `refused` — see below for how it differs).
+#     - probe says `gate_refused_manual` → same as `gate_refused`, but the automatic
+#       needs_clarity transition itself failed — REFUSE names that the board write
+#       must be done by hand (see qx_gate_refusal_handoff's own comment).
 #   `liveness` is the 5th argument precisely because `RemoteTrigger` is a TOOL,
 #   not a shell command: the probe cannot happen inside this function, so its
 #   result is passed in and the decision stays executable and testable.
@@ -233,6 +236,16 @@ The verdict is computed, not remembered:
 #                                           `qx_probe_gate_refusal` finds no
 #                                           refusal recorded is this genuinely
 #                                           `dead`/`gone` — treat it as such.
+#                                           R2 (reviewer, high): the function itself
+#                                           checks for an open (or ever-opened) PR on
+#                                           the UNIT branch FIRST and skips the gates-
+#                                           branch probe entirely when one exists — a
+#                                           rework can leave an OLDER refused gates
+#                                           branch sitting next to a NEWER run that
+#                                           actually succeeded, and an existing PR is
+#                                           the one piece of evidence that is never
+#                                           produced by a refusal (git-workflow's own
+#                                           hard rule: never opens a PR after refusing).
 #   Ended + a unit branch is present (no gates branch) -> the build got
 #                                           somewhere; treat as dead/gone and
 #                                           recover normally.
@@ -309,9 +322,16 @@ qx_actionability() {           # qx_actionability <status> <single|epic> <full|b
             # not crash, the pipeline reasoned its way to a documented refusal,
             # and re-firing the identical prompt refuses identically. Unlike
             # `refused`, the caller (qx_probe_gate_refusal, below) has already
-            # transitioned the task to needs_human with the reason attached and
+            # transitioned the task to needs_clarity with the reason attached and
             # left the gates branch in place — this verdict only has to say so.
-            echo "REFUSE — the cloud routine for $TASK_ID (${routine:-unknown}) ran the full pipeline and git-workflow correctly REFUSED to open a PR. Evidence is published on its gates branch; the task has been moved to needs_human with the reason attached. This is not a crash — re-firing it unchanged will refuse again. Read the reason, then /quetrex:task-rework $TASK_ID"; return 1 ;;
+            echo "REFUSE — the cloud routine for $TASK_ID (${routine:-unknown}) ran the full pipeline and git-workflow correctly REFUSED to open a PR. Evidence is published on its gates branch; the task has been moved to needs_clarity with the reason attached. This is not a crash — re-firing it unchanged will refuse again. Read the reason, then /quetrex:task-rework $TASK_ID"; return 1 ;;
+          gate_refused_manual)
+            # R3 (reviewer, medium): identical shape to `gate_refused` EXCEPT the
+            # `quetrex-api task-status ... needs_clarity` call itself failed (see the
+            # WARNING qx_gate_refusal_handoff already printed above with the exact rc
+            # and the reason). Never claim a transition that did not happen — say so,
+            # and tell the operator to do it by hand.
+            echo "REFUSE — the cloud routine for $TASK_ID (${routine:-unknown}) ran the full pipeline and git-workflow correctly REFUSED to open a PR. Evidence is published on its gates branch, but the automatic move to needs_clarity FAILED (see the WARNING above for the exact error) — the board still shows this task's prior status. Set it manually: quetrex-api task-status $TASK_ID needs_clarity. This is not a crash — re-firing it unchanged will refuse again. Read the reason, then /quetrex:task-rework $TASK_ID"; return 1 ;;
           dead|gone)
             if [ "$attempts" -ge "$maxatt" ] 2>/dev/null; then
               echo "REFUSE — the cloud routine for $TASK_ID (${routine:-unknown}) is not running and this task has already been dispatched $attempts time(s), which is its maxDispatchAttempts. Refusing a third fire at the same branch namespace: this needs a human. Read the run at ${monitor:-the routine list}, then either /quetrex:task-rework $TASK_ID or raise maxDispatchAttempts in $payload deliberately"; return 1
@@ -366,10 +386,17 @@ status from the PR/branch it observes on GitHub.
 
 ```bash
 # ── quetrex:exec-block qx_probe_gate_refusal ──────────────────────────────────
-# Executable, and executed: test/git-workflow-gate-refusal.test.sh pushes a real gates
-# branch to a bare remote and drives this end to end, asserting the needs_human
-# transition, the preserved comment, and that an ordinary dead/gone gates branch (no
-# recorded refusal) is correctly left alone.
+# Executable, and executed: test/git-workflow-gate-refusal.test.sh pushes real gates
+# branches to a bare remote and drives THIS function end to end, asserting (R4): it
+# finds a recorded refusal and returns its reason (PART 2); an ordinary gates branch
+# with no recorded refusal, or no gates branch at all, is correctly left as NONE
+# (PART 2); two candidate branches with no anchor refuse to guess rather than picking
+# the lexicographically-last one, and an anchored EXPECTED_HEAD_SHA selects the right
+# one even when a decoy sorts after it (PART 4, SEC-2); and a non-string
+# git_workflow_reason is coerced rather than crashing into a silent NONE (PART 5,
+# SEC-3). The needs_clarity STATUS TRANSITION and the posted COMMENT are a SEPARATE
+# concern this function never performs — those are asserted against
+# qx_gate_refusal_handoff (below) in PART 6.
 #
 # QDM-6, measured 2026-08-26: HEAD c26bc72 published a complete gates branch — qa PASS,
 # review verdict AUTO_MERGE pinned to HEAD, security findings PASS — because git-workflow
@@ -384,7 +411,7 @@ qx_probe_gate_refusal() {   # qx_probe_gate_refusal <TASK_ID> <BRANCH_PREFIX> [E
   # matching branch name — a criterion anyone with push access controls
   # outright by naming a branch that sorts last. MEASURED: a second gates
   # branch with a crafted name was selected over the real run's branch,
-  # letting its state.json content drive both the needs_human transition and
+  # letting its state.json content drive both the needs_clarity transition and
   # the text posted to the kanban card. The fix mirrors /quetrex:merge's own
   # selection rule (merge.md: "pick the branch whose committed
   # .quetrex/gates-head IS this PR's head") — match on the AUTHORITATIVE run
@@ -399,7 +426,22 @@ qx_probe_gate_refusal() {   # qx_probe_gate_refusal <TASK_ID> <BRANCH_PREFIX> [E
   #     the exact defect above. Two or more candidates and no expected sha
   #     REFUSES to guess (NONE), naming how to disambiguate, rather than
   #     silently choosing one.
+  # R2 (reviewer, high): after a rework, an OLDER refused run's gates branch can
+  # coexist with a NEWER run that actually succeeded and opened a PR — sorting or even
+  # sha-anchoring among gates branches alone can still land on the stale refused one.
+  # An open (or ever-opened) PR for the unit branch is definitive proof this task did
+  # NOT end in a refusal: git-workflow's own hard rule is that it never pushes or opens
+  # a PR after refusing (§4 "Never open a PR after a refusal"). So check that FIRST and
+  # skip the gates-branch probe entirely when a PR exists — there is nothing to
+  # reconcile as a refusal, whatever a leftover gates branch from an earlier, since-
+  # superseded attempt might say.
   local task="$1" prefix="$2" expected="${3:-}" refs ref reason ghead chosen="" n=0
+  if command -v gh >/dev/null 2>&1; then
+    if gh pr list --head "${prefix}${task}" --state all --json number --jq 'length' 2>/dev/null | grep -qv '^0$'; then
+      echo "NONE — a PR exists for ${prefix}${task}; this was not a refusal (git-workflow never opens a PR after refusing)"
+      return 1
+    fi
+  fi
   refs="$(git ls-remote --heads origin "${prefix}${task}-gates-*" 2>/dev/null \
           | awk '{print $2}' | sed 's#^refs/heads/##')"
   [ -n "$refs" ] || { echo "NONE — no gates branch published for $task"; return 1; }
@@ -457,9 +499,12 @@ qx_probe_gate_refusal() {   # qx_probe_gate_refusal <TASK_ID> <BRANCH_PREFIX> [E
 # ── end quetrex:exec-block qx_probe_gate_refusal ──────────────────────────────
 
 # ── quetrex:exec-block qx_gate_refusal_handoff ────────────────────────────────
-# Executable, and executed: test/git-workflow-gate-refusal.test.sh drives this with a
-# mock `quetrex-api` on PATH that can fail either call on demand, asserting the exit
-# codes are checked and the reason is never lost.
+# Executable, and executed (PART 6): test/git-workflow-gate-refusal.test.sh drives this
+# with a mock `quetrex-api` on PATH that logs every call and can fail either one on
+# demand, asserting: the exact call `task-status <id> needs_clarity` is made (R1/R4)
+# with a comment body length that proves the 800-char cap actually applied (SEC-1); and
+# on a task-status or task-comment FAILURE, the WARNING is printed with the reason
+# inline rather than the failure being silently swallowed (R3).
 #
 # EXPECTED_HEAD_SHA: pass it when you have it (from RemoteTrigger action:"get_run_log"
 # on this task's dispatch.routineId — see qx_probe_gate_refusal's own comment for why an
@@ -473,7 +518,7 @@ qx_gate_refusal_handoff() {   # qx_gate_refusal_handoff <TASK_ID> <BRANCH_PREFIX
     # SEC-1 (review finding, fixed here): git_workflow_reason travels unbounded from a
     # remote branch into ONE argv passed to `quetrex-api task-comment`. MEASURED: a
     # multi-MiB reason made task-status succeed and task-comment die with E2BIG, and the
-    # block ignored the exit code — the card landed in needs_human with NO reason
+    # block ignored the exit code — the card landed in needs_clarity with NO reason
     # attached and no error surfaced. Bound it here too (defense in depth alongside the
     # node-layer slice in qx_probe_gate_refusal — merge-gate.sh's own ESCALATION
     # handling uses the same `head -c 800` cap), and check BOTH calls' exit status: on
@@ -483,11 +528,11 @@ qx_gate_refusal_handoff() {   # qx_gate_refusal_handoff <TASK_ID> <BRANCH_PREFIX
     # The transition a routine can never make itself. Do it once, here, and leave the
     # evidence in place — /quetrex:task-rework reads the gates branch, so tearing it
     # down here would destroy the one thing the human decision needs.
-    if quetrex-api task-status "$task" needs_human; then
+    if quetrex-api task-status "$task" needs_clarity; then
       status_rc=0
     else
       status_rc=$?
-      echo "WARNING: quetrex-api task-status $task needs_human FAILED (rc=$status_rc) — the board still shows the prior status. Refusal reason (not yet posted anywhere): $reason"
+      echo "WARNING: quetrex-api task-status $task needs_clarity FAILED (rc=$status_rc) — the board still shows the prior status. Refusal reason (not yet posted anywhere): $reason"
     fi
     if quetrex-api task-comment "$task" "Cloud build's git-workflow gate refused to open a PR: $reason
 
@@ -497,7 +542,15 @@ Gate evidence preserved on $ref — do not delete it; /quetrex:task-rework $task
       comment_rc=$?
       echo "WARNING: quetrex-api task-comment $task FAILED (rc=$comment_rc) — the reason did NOT land on the card. Reason: $reason (gates branch: $ref)"
     fi
-    QX_LIVENESS=gate_refused
+    # R3 (reviewer, medium): only claim the transition happened when task-status
+    # actually succeeded. `gate_refused` and `gate_refused_manual` are DELIBERATELY
+    # distinct liveness values — qx_actionability's report must never say "moved to
+    # needs_clarity" when the API call that would have moved it just failed above.
+    if [ "$status_rc" -eq 0 ]; then
+      QX_LIVENESS=gate_refused
+    else
+      QX_LIVENESS=gate_refused_manual
+    fi
   else
     QX_LIVENESS=dead   # or running / gone, from the RemoteTrigger get response as above
   fi
