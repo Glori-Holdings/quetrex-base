@@ -229,6 +229,14 @@ for root in "${CAND_ROOTS[@]}"; do
   [ -n "$RP_NAME" ] && [ -n "$RP_VERSION" ] || continue
   inst="$(installed_version_for "$RP_NAME")"
   [ -n "$inst" ] || continue
+  # SEC-GLOBAL-2 (round 2, still open): `inst` is the THIRD value interpolated
+  # into the STALE BIND printf below, read out of installed_plugins.json —
+  # itself reachable via the real CLAUDE_CONFIG_DIR env var pointed at a
+  # repo-controlled file, not only the QX_BOUND_* test seam. RP_NAME/
+  # RP_VERSION are already clamped inside resolve_plugin_json; `inst` must be
+  # clamped the same way before it can reach STALE/the printf, or it skips
+  # every guard the other two fields got.
+  valid_plugin_version "$inst" || continue
   if version_lt "$RP_VERSION" "$inst"; then
     STALE+=("${RP_NAME} ${RP_VERSION} (installed: ${inst})")
   fi
