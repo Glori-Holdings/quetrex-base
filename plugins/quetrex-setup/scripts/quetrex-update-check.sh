@@ -38,6 +38,12 @@
 #   * A COMPONENT THAT CANNOT BE RESOLVED IS OMITTED, never vouched for and
 #     never claimed "behind" — the up-to-date line names only the components
 #     it actually resolved from both an installed AND a latest version.
+#   * THE MANIFEST IS HOSTILE INPUT (SEC-GLOBAL-1). This hook now fires
+#     machine-wide, so every version string it might print is validated
+#     against valid_version() first (an unsafe shape is folded into the same
+#     "unresolved -> omitted" rule above) and the manifest body itself is
+#     bounded to MAX_MANIFEST_BYTES on every read, whether fetched, cached,
+#     or supplied via a local override file.
 #
 # TESTABILITY. The pure decision — "given installed X and latest Y, print or
 # stay silent" — is driven entirely by env so a test can exercise it offline:
@@ -59,6 +65,47 @@ MARKET_FILE="${QX_UPDATE_MARKETPLACE_FILE:-}"
 TTL_SECONDS="${QX_UPDATE_TTL_SECONDS:-86400}"       # once/day
 OFFLINE="${QX_UPDATE_OFFLINE:-0}"                   # test hook: force the offline path
 INSTALLED_PLUGINS_FILE="${QX_UPDATE_INSTALLED_PLUGINS_FILE:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json}"
+
+# --- SEC-GLOBAL-1 hardening --------------------------------------------------
+# This hook now fires machine-wide (every repo, armed or not — see the WHY
+# THIS HOOK EXISTS note above), so the manifest it reads must be treated as
+# hostile: a hostile repo's committed .claude/settings.json `env` block can
+# repoint QX_UPDATE_MARKETPLACE_FILE/_URL at repo-controlled content, and
+# Glori-Holdings/quetrex-plugins main is itself a shared write surface. A
+# version string is compared and printed verbatim below, so it is the
+# injection sink. Two independent bounds close it:
+#   1. SIZE. The manifest body (fetched OR read from cache OR read from a
+#      local file) is capped at MAX_MANIFEST_BYTES before anything parses it,
+#      so an oversized payload cannot even reach node/jq.
+#   2. SHAPE. Every version string this script ever prints — fetched from the
+#      manifest, read back from the cache, or read from installed_plugins.json
+#      — is passed through valid_version() first. Anything not shaped like a
+#      plain semver-ish token is treated exactly like "cannot be resolved":
+#      omitted, never vouched for, never echoed. This is the SAME contract
+#      the file already documents for an unresolved component (line 38-40);
+#      an unsafe-shaped version is now folded into that same "unresolved" case
+#      rather than being a new exception.
+MAX_MANIFEST_BYTES=65536
+
+valid_version() {  # <string> -> prints it back if safely shaped, else empty
+  local v="$1"
+  if [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]{1,40})?$ ]]; then
+    printf '%s' "$v"
+  fi
+}
+
+# Reads a manifest candidate bounded to MAX_MANIFEST_BYTES and only if it
+# parses as JSON; empty otherwise. Used for every manifest source (fetch
+# response, on-disk cache, local override file) so a poisoned or oversized
+# body is never trusted regardless of where it came from.
+bounded_valid_manifest() {  # <raw-bytes-on-stdin> -> the manifest, or empty
+  local body
+  body="$(head -c "$MAX_MANIFEST_BYTES")"
+  [ -n "$body" ] || { printf ''; return; }
+  if printf '%s' "$body" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{JSON.parse(s)}catch{process.exit(1)}})' 2>/dev/null; then
+    printf '%s' "$body"
+  fi
+}
 
 # Cache location: plugin-local state ONLY. Fall back to an XDG state dir (never
 # ~/.claude, never the repo) when ${CLAUDE_PLUGIN_DATA} is not exported.
@@ -82,6 +129,10 @@ INSTALLED_SETUP="${QX_UPDATE_INSTALLED_SETUP:-}"
 if [ -z "$INSTALLED_SETUP" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
   INSTALLED_SETUP="$(read_json_field "$CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json" 'o.version')"
 fi
+# SEC-GLOBAL-1: an unsafely-shaped version is treated as unresolved (omitted),
+# never printed. plugin.json ships with the repo and is normally trusted, but
+# validating it too costs nothing and keeps every printed field on one rule.
+INSTALLED_SETUP="$(valid_version "$INSTALLED_SETUP")"
 
 # `quetrex` / `quetrex-factory`: resolved from installed_plugins.json, the
 # machine-global record of what is actually on disk — NOT the repo's
@@ -98,9 +149,11 @@ installed_version_for() {  # <name> -> highest version among "<name>@..." keys, 
 
 INSTALLED_QUETREX="${QX_UPDATE_INSTALLED_QUETREX:-}"
 [ -z "$INSTALLED_QUETREX" ] && INSTALLED_QUETREX="$(installed_version_for quetrex)"
+INSTALLED_QUETREX="$(valid_version "$INSTALLED_QUETREX")"
 
 INSTALLED_FACTORY="${QX_UPDATE_INSTALLED_FACTORY:-}"
 [ -z "$INSTALLED_FACTORY" ] && INSTALLED_FACTORY="$(installed_version_for quetrex-factory)"
+INSTALLED_FACTORY="$(valid_version "$INSTALLED_FACTORY")"
 
 # Nothing we can compare -> nothing to say.
 if [ -z "$INSTALLED_SETUP" ] && [ -z "$INSTALLED_QUETREX" ] && [ -z "$INSTALLED_FACTORY" ]; then
@@ -125,19 +178,32 @@ cache_fresh() {
 
 MANIFEST=""
 if cache_fresh; then
-  MANIFEST="$(cat "$CACHE_FILE" 2>/dev/null)"
-else
+  # SEC-GLOBAL-1: validate on READ, not only on write — the write-time check
+  # (below) does not guarantee the file was never altered or truncated
+  # in between. Bound the size first so a huge cache file is never even
+  # handed to node to parse.
+  MANIFEST="$(bounded_valid_manifest < "$CACHE_FILE" 2>/dev/null)"
+fi
+if [ -z "$MANIFEST" ]; then
+  FETCHED=""
   if [ -n "$MARKET_FILE" ] && [ -f "$MARKET_FILE" ]; then
-    MANIFEST="$(cat "$MARKET_FILE" 2>/dev/null)"
+    FETCHED="$(bounded_valid_manifest < "$MARKET_FILE" 2>/dev/null)"
   elif [ "$OFFLINE" != "1" ] && command -v curl >/dev/null 2>&1; then
-    MANIFEST="$(curl -fsS --max-time 4 "$MARKET_URL" 2>/dev/null)" || MANIFEST=""
+    # --max-filesize caps the fetch itself (belt) on top of the byte-bounded
+    # read below (suspenders) — a malicious/misconfigured server cannot make
+    # curl buffer more than MAX_MANIFEST_BYTES in the first place.
+    FETCHED="$(curl -fsS --max-time 4 --max-filesize "$MAX_MANIFEST_BYTES" "$MARKET_URL" 2>/dev/null | bounded_valid_manifest)"
   fi
-  if [ -n "$MANIFEST" ] && printf '%s' "$MANIFEST" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{JSON.parse(s)}catch{process.exit(1)}})' 2>/dev/null; then
+  if [ -n "$FETCHED" ]; then
+    MANIFEST="$FETCHED"
     printf '%s' "$MANIFEST" > "$CACHE_FILE" 2>/dev/null || true
   else
-    # Fetch failed or returned junk — fall back to whatever cache exists (even
-    # if stale). No cache => silent success (offline, first run).
-    MANIFEST="$(cat "$CACHE_FILE" 2>/dev/null || true)"
+    # Fetch failed, returned junk, or exceeded the size bound — fall back to
+    # whatever validated cache exists (even if stale). No cache => silent
+    # success (offline, first run).
+    if [ -f "$CACHE_FILE" ]; then
+      MANIFEST="$(bounded_valid_manifest < "$CACHE_FILE" 2>/dev/null)"
+    fi
   fi
 fi
 
@@ -165,9 +231,9 @@ behind() {  # <installed> <latest>
   [ "$first" = "$a" ]
 }
 
-LATEST_SETUP="$(latest_of quetrex-setup)"
-LATEST_QUETREX="$(latest_of quetrex)"
-LATEST_FACTORY="$(latest_of quetrex-factory)"
+LATEST_SETUP="$(valid_version "$(latest_of quetrex-setup)")"
+LATEST_QUETREX="$(valid_version "$(latest_of quetrex)")"
+LATEST_FACTORY="$(valid_version "$(latest_of quetrex-factory)")"
 
 MSG=""
 append_msg() { [ -n "$MSG" ] && MSG="$MSG; $1" || MSG="$1"; }
