@@ -1,5 +1,5 @@
 ---
-description: Update the Quetrex engine on this machine and report the running version. No version pins — the engine auto-updates and the version is surfaced in the status bar. Usage: /quetrex:update
+description: Update the Quetrex engine on this machine and report the running version. No version pins — the engine auto-updates and the version is surfaced in the status bar. Usage: /quetrex-setup:update
 argument-hint: ""
 ---
 
@@ -31,11 +31,13 @@ than pinned in config. This command needs no PR and changes no committed file.
 
 ## 1. Update this machine's plugin cache
 
-Both plugins, engine first:
+All three plugins, engine first, this one (quetrex-setup) last so the command finishes
+running the version it started with, never a half-swapped one mid-execution:
 
 ```bash
 claude plugin update quetrex-factory@quetrex || echo "quetrex-factory: no update applied (already latest, or not installed from this marketplace)"
 claude plugin update quetrex@quetrex          || echo "quetrex: no update applied (already latest, or not installed from this marketplace)"
+claude plugin update quetrex-setup@quetrex    || echo "quetrex-setup: no update applied (already latest, or not installed from this marketplace)"
 ```
 
 A non-zero exit is not fatal — it usually means the plugin is already latest.
@@ -50,7 +52,7 @@ marketplace only means the comparison is skipped.
 
 **Never `read ... < <(...)`.** `read` returns NON-ZERO when the final line has no
 trailing newline, so a `|| { fatal }` guard fires on SUCCESS. That defect made
-this command and `/quetrex:login` fail 100% of the time. Capture, check, split.
+this command and `/quetrex-setup:login` fail 100% of the time. Capture, check, split.
 
 ```bash
 RUNNING="$(quetrex-version --plain 2>/dev/null || echo "unknown")"
@@ -62,14 +64,14 @@ if MANIFEST="$(curl -fsS --max-time 10 "$MARKET_URL" 2>/dev/null)"; then
     let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
       let o; try{o=JSON.parse(s)}catch{process.exit(1)}
       const v=n=>{const p=(o.plugins||[]).find(x=>x&&x.name===n);return p&&p.version?String(p.version):""};
-      const q=v("quetrex"), f=v("quetrex-factory");
+      const q=v("quetrex"), f=v("quetrex-factory"), s2=v("quetrex-setup");
       if(!q||!f){process.exit(1)}
-      process.stdout.write(q+" "+f);
+      process.stdout.write(q+" "+f+" "+(s2||"?"));
     })')" || VERSIONS=""
   if [ -n "$VERSIONS" ]; then
     # shellcheck disable=SC2086
     set -- $VERSIONS
-    echo "Published: quetrex $1, quetrex-factory $2"
+    echo "Published: quetrex $1, quetrex-factory $2, quetrex-setup $3"
     if [ "$RUNNING" = "$1" ]; then
       echo "This machine is on the latest engine."
     else
@@ -95,13 +97,13 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
 PINNED="$(node -e '
   let o={}; try{o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))}catch{}
   const e=o.enabledPlugins||{};
-  const bad=Object.keys(e).filter(function(k){return /^quetrex(-factory)?@quetrex$/.test(k) && e[k]!==true && e[k]!==false});
+  const bad=Object.keys(e).filter(function(k){return /^quetrex(-[a-z0-9]+)?@quetrex$/.test(k) && e[k]!==true && e[k]!==false});
   process.stdout.write(bad.join(","));
 ' "$REPO_ROOT/.claude/settings.json" 2>/dev/null)"
 
 if [ -n "$PINNED" ]; then
   echo "This repo pins: $PINNED — while a pin is present the quetrex command layer does not load here."
-  echo "Fix: run /quetrex:init (arming rewrites any pin to true), or set those entries to true in .claude/settings.json."
+  echo "Fix: run /quetrex-setup:init (arming rewrites any pin to true), or set those entries to true in .claude/settings.json."
 else
   echo "No version pins in this repo — the engine auto-updates."
 fi

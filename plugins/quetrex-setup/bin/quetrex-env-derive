@@ -36,7 +36,7 @@
 # `bash -n` (check:sh) and loops over test/*.sh (test) — this file and its
 # test enroll in the chain automatically. DO NOT EDIT package.json.
 #
-# NO EMPIRICAL PROBING, EVER. /quetrex:init runs on a developer machine whose
+# NO EMPIRICAL PROBING, EVER. /quetrex-setup:init runs on a developer machine whose
 # git-ignored .env/.env.local is loaded off disk by the app's own dotenv
 # loader — running each verify command with and without a value would go
 # green and derive NOTHING for exactly the repos that need this most, and it

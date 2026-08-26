@@ -1,6 +1,6 @@
 {
   "name": "quetrex-base",
-  "version": "2.5.4",
+  "version": "2.6.0",
   "private": true,
   "description": "Quetrex — the Claude Code plugin engine (agents, skills, commands, hooks). Distributed as a plugin, not an npm package; this package.json exists only to run the repo's dev/verify scripts.",
   "scripts": {

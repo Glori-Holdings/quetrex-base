@@ -1,0 +1,20 @@
+{
+  "name": "quetrex-setup",
+  "displayName": "Quetrex Setup",
+  "version": "1.0.0",
+  "description": "Log in, arm a repo for Quetrex, and keep the engine current. /quetrex-setup:login, /quetrex-setup:init, /quetrex-setup:update — enabled machine-wide so an unarmed repo gets only these three commands and a one-line offer, never the full pipeline. The pipeline itself (quetrex, quetrex-factory) is enabled per repo by /quetrex-setup:init.",
+  "commands": [
+    "./commands/"
+  ],
+  "author": {
+    "name": "Glen Barnhardt",
+    "url": "https://github.com/Glori-Holdings/quetrex-base"
+  },
+  "homepage": "https://github.com/Glori-Holdings/quetrex-base",
+  "license": "MIT",
+  "keywords": [
+    "quetrex",
+    "setup",
+    "onboarding"
+  ]
+}

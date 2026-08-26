@@ -22,22 +22,25 @@
 # (any OTHER plugin, including quetrex-factory, discovered from inside a
 # quetrex process without ever executing anything found there).
 #
-# REGISTERED IN BOTH quetrex AND quetrex-factory (HOOKFIX correction 1,
+# REGISTERED IN BOTH quetrex-setup AND quetrex-factory (HOOKFIX correction 1,
 # 2026-08-21, verified against https://code.claude.com/docs/en/hooks.md):
 # under managed-settings `allowManagedHooksOnly: true`, ONLY plugins FORCE-
 # ENABLED in managed settings' own enabledPlugins are exempt from the hook
 # lockdown — every OTHER hook, including every hook a merely-enabled (not
 # force-enabled) plugin registers, is silently blocked. An operator's managed
 # settings can force-enable quetrex-factory@quetrex without force-enabling
-# quetrex@quetrex, and in that exact configuration EVERY hook quetrex
-# registers — including a copy of this guard living only here — would be dark.
-# Shipping the guard in a SINGLE plugin therefore fails in precisely the
-# strictest, most locked-down configuration it exists to protect. So it ships
-# and registers as a SessionStart hook in BOTH plugin roots. Do NOT "clean up"
-# the apparent duplicate registration — that reintroduces the hole. (The
-# quetrex-factory-side registration lives in a different repository,
-# Glori-Holdings/quetrex-plugins, and is a cross-repo follow-up outside this
-# workstream's file ownership — see the HOOKFIX developer report.)
+# quetrex-setup@quetrex, and in that exact configuration EVERY hook
+# quetrex-setup registers — including a copy of this guard living only here —
+# would be dark. Shipping the guard in a SINGLE plugin therefore fails in
+# precisely the strictest, most locked-down configuration it exists to
+# protect. So it ships and registers as a SessionStart hook in BOTH plugin
+# roots. Do NOT "clean up" the apparent duplicate registration — that
+# reintroduces the hole. (The quetrex-factory-side registration lives in a
+# different repository, Glori-Holdings/quetrex-plugins, and is a cross-repo
+# follow-up outside this workstream's file ownership — see the HOOKFIX
+# developer report. This file previously shipped inside `quetrex`; it moved to
+# quetrex-setup with the setup-plugin split so it keeps firing in every repo,
+# armed or not — see GLOBAL's plan notes.)
 #
 # SESSION DEDUP. Because it can now run TWICE in one session (both plugins
 # enabled), it must not print twice for the same staleness. Keyed on the
@@ -58,7 +61,7 @@
 # AT MOST one stdout line total for the whole invocation (never one per stale
 # plugin) and prints nothing to stderr.
 #
-# Register as: bash "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/quetrex-bound-version-guard.sh"
+# Register as: bash "${CLAUDE_PLUGIN_ROOT}/scripts/quetrex-bound-version-guard.sh"
 # (repo rule: a plugin hook command resolves via ${CLAUDE_PLUGIN_ROOT}, never
 # ~/.claude — reading the machine-global installed_plugins.json from INSIDE
 # the script is a different layer, exactly like ${CLAUDE_PROJECT_DIR} inside

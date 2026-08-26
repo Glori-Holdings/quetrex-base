@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 #
-# quetrex-version — print the Quetrex engine version that is actually RUNNING.
+# quetrex-version — print the `quetrex` ENGINE version that is actually
+# RUNNING — never this tool's own package version.
 #
 # WHY THIS EXISTS. Quetrex no longer pins versions anywhere. A pinned
 # `enabledPlugins` entry makes the plugin count as DISABLED for dependency
@@ -14,32 +15,93 @@
 # this tool prints it, and the status bar shows it. One place, always true,
 # nothing to bump.
 #
+# WHY THIS TOOL MUST NAME `quetrex` SPECIFICALLY, NOT "WHATEVER SHIPPED IT".
+# This tool now ships inside `quetrex-setup` (the setup-plugin split), a
+# SEPARATE plugin from `quetrex` with its OWN, independently-bumped manifest
+# version. The two earlier resolution sources — "the manifest next to this
+# script" and ${CLAUDE_PLUGIN_ROOT} — both used to be safe because the whole
+# repo tree, including this tool, shipped inside `quetrex` itself: "next to
+# this script" and "quetrex's own version" were the same file. They no longer
+# are. Reporting quetrex-setup's version to a status bar or an
+# /quetrex-setup:update run that both say "Quetrex vX.Y.Z" would be the WRONG
+# number, silently.
+#
 # usage:
 #   quetrex-version            # -> "Quetrex v2.1.0"   (status-bar form)
 #   quetrex-version --plain    # -> "2.1.0"            (scripts)
 #
-# Resolution order:
-#   1. ${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json — authoritative when the
-#      caller is running inside the plugin.
-#   2. the manifest next to THIS SCRIPT (../.claude-plugin/plugin.json). bin/
-#      sits at the plugin root, so this is the package the tool actually shipped
-#      in — and it is the only source that works in a bare checkout with no
-#      plugin cache at all, which is exactly the CI case. Resolving purely from
-#      the cache made this tool fail on a clean runner.
-#   3. the newest version directory in the local plugin cache — for callers with
-#      neither, such as a status-line script running outside any plugin.
+# Resolution order (every candidate is verified to actually be `quetrex`'s OWN
+# manifest — by its `name` field — before its version is trusted; a candidate
+# that fails that check is skipped, never guessed harder):
+#   1. Scan PATH for a `/bin` entry whose parent ships a plugin.json named
+#      literally "quetrex". `quetrex`'s own bin/ (quetrex-plan-stamp,
+#      quetrex-cloud-prep) stays non-empty and on PATH for exactly this
+#      reason — the same PATH-walking discovery
+#      quetrex-bound-version-guard.sh already relies on. Authoritative in a
+#      real installed session.
+#   2. The sibling manifest at <repo-root>/.claude-plugin/plugin.json,
+#      resolved relative to THIS SCRIPT's own checkout location
+#      (bin/ -> quetrex-setup -> plugins -> repo root). This is the only
+#      source that works in a bare checkout with no plugin cache at all —
+#      exactly the CI case — because quetrex-setup and quetrex are siblings
+#      there. Resolving purely from the cache made this tool fail on a clean
+#      runner.
+#   3. ${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json, but ONLY when that
+#      manifest's own `name` is literally "quetrex" — a caller running this
+#      tool from inside quetrex-setup's own hook/command context must never
+#      be mistaken for quetrex just because a plugin-root variable happens to
+#      be set.
+#   4. the newest version directory in the local plugin cache — for callers
+#      with none of the above, such as a status-line script running outside
+#      any plugin.
 # Prints nothing and exits 1 when no engine can be found, so a status line can
 # simply omit the segment.
 
 set -uo pipefail
 
-_qxv_read_version() {
+_qxv_read_field() {  # <file> <field-name> -> value or fail
   [ -f "$1" ] || return 1
   node -e '
     let o; try { o = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); } catch { process.exit(1); }
-    if (!o || !o.version) { process.exit(1); }
-    process.stdout.write(String(o.version));
-  ' "$1" 2>/dev/null
+    const v = o && o[process.argv[2]];
+    if (!v) { process.exit(1); }
+    process.stdout.write(String(v));
+  ' "$1" "$2" 2>/dev/null
+}
+
+_qxv_read_version() { _qxv_read_field "$1" version; }
+
+# _qxv_from_named_manifest <plugin.json-path> <want-name> -> version or fail
+#   Reads <path>'s version ONLY if its own `name` field equals <want-name>.
+_qxv_from_named_manifest() {
+  local pj="$1" want="$2" name
+  [ -f "$pj" ] || return 1
+  name="$(_qxv_read_field "$pj" name)" || return 1
+  [ "$name" = "$want" ] || return 1
+  _qxv_read_version "$pj"
+}
+
+# _qxv_from_path_bin <want-name> -> version or fail
+#   Walk PATH for a `/bin` entry whose parent directory ships <want-name>'s own
+#   plugin.json (never executes anything found there — only ever parses the
+#   manifest, exactly like quetrex-bound-version-guard.sh's own PATH walk).
+_qxv_from_path_bin() {
+  local want="$1" p root
+  [ -n "${PATH:-}" ] || return 1
+  local oldifs="$IFS"
+  IFS=':'
+  for p in $PATH; do
+    case "$p" in
+      */bin) root="${p%/bin}" ;;
+      *) continue ;;
+    esac
+    if _qxv_from_named_manifest "$root/.claude-plugin/plugin.json" "$want" 2>/dev/null; then
+      IFS="$oldifs"
+      return 0
+    fi
+  done
+  IFS="$oldifs"
+  return 1
 }
 
 _qxv_from_cache() {
@@ -70,13 +132,18 @@ _qxv_self_root() {
   printf '%s' "$d"
 }
 
+QXV_WANT="quetrex"
+
 VERSION=""
-if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
-  VERSION="$(_qxv_read_version "$CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json" || true)"
-fi
+VERSION="$(_qxv_from_path_bin "$QXV_WANT" || true)"
 if [ -z "$VERSION" ]; then
+  # Bare-checkout / CI fallback: quetrex-setup and quetrex are siblings under
+  # the same repo root (bin/ -> quetrex-setup -> plugins -> repo root).
   SELF_ROOT="$(_qxv_self_root || true)"
-  [ -n "$SELF_ROOT" ] && VERSION="$(_qxv_read_version "$SELF_ROOT/.claude-plugin/plugin.json" || true)"
+  [ -n "$SELF_ROOT" ] && VERSION="$(_qxv_from_named_manifest "$SELF_ROOT/../../.claude-plugin/plugin.json" "$QXV_WANT" || true)"
+fi
+if [ -z "$VERSION" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+  VERSION="$(_qxv_from_named_manifest "$CLAUDE_PLUGIN_ROOT/.claude-plugin/plugin.json" "$QXV_WANT" || true)"
 fi
 [ -n "$VERSION" ] || VERSION="$(_qxv_from_cache || true)"
 [ -n "$VERSION" ] || exit 1

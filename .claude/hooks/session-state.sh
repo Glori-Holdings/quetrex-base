@@ -80,12 +80,16 @@ fi
 QDIR="$ROOT/.quetrex"
 # ARMED-ONLY: the gate is the presence of .quetrex/project.json, never merely
 # the directory (a partially-initialized .quetrex/ with no project.json is
-# still unarmed). A git repo that has never run /quetrex:init gets exactly one
-# offer line, printed on every SessionStart source (startup/resume/compact —
-# this hook fires once per source, never per turn, so that is not a spam
-# concern) and nothing else from this hook.
+# still unarmed). This hook ships inside `quetrex`, which an unarmed repo
+# never loads at all (quetrex is enabled per repo by /quetrex-setup:init, not
+# machine-wide) — so an unarmed repo reaching this file at all is the rare
+# "was enabled, then un-armed" case, and it stays silent here. The one-line
+# offer to run /quetrex-setup:init is owned by quetrex-setup's own
+# unarmed-offer.sh (enabled machine-wide, so it is the thing that actually
+# runs in the common unarmed case). Do not resurrect the offer here — the two
+# would print it twice in the one case where both plugins happen to be
+# enabled (RISK 2).
 if ! qx_repo_armed "$ROOT"; then
-  printf '%s\n' "Quetrex: this repo is not armed (no .quetrex/project.json). Offer the user /quetrex:init; if they say yes, run it."
   exit 0
 fi
 
@@ -227,7 +231,7 @@ if [ "$SOURCE" = "startup" ]; then
   }
   if [ -f "$SETTINGS" ] && ! grep -q 'merge-gate\.sh' "$SETTINGS" 2>/dev/null \
      && ! factory_owns_merge_gate; then
-    add "  ! this repo has .quetrex/ but merge-gate.sh is wired NEITHER in .claude/settings.json NOR by an enabled quetrex-factory — the merge boundary is unenforced. Run /quetrex:init."
+    add "  ! this repo has .quetrex/ but merge-gate.sh is wired NEITHER in .claude/settings.json NOR by an enabled quetrex-factory — the merge boundary is unenforced. Run /quetrex-setup:init."
   fi
   if [ -f "$SETTINGS" ] && grep -q '~/\.claude/hooks' "$SETTINGS" 2>/dev/null; then
     add "  ! a committed hook command points at ~/.claude — it exits 127 in a fresh clone or cloud runner, which is NON-blocking, so enforcement fails open silently."
