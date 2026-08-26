@@ -97,7 +97,14 @@ valid_plugin_name() {  # <string> -> true (0) if safely shaped
   [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]
 }
 valid_plugin_version() {  # <string> -> true (0) if safely shaped
-  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]{1,40})?$ ]]
+  # SEC-GLOBAL-9: bound each numeric run to 6 digits and the whole token to
+  # 64 characters — an earlier [0-9]+ accepted an arbitrarily long all-digit
+  # string (e.g. a 50,000-digit "version"), which this script has NO size
+  # bound to catch afterward (unlike quetrex-update-check.sh's
+  # MAX_MANIFEST_BYTES), so the ceiling was the plugin.json file size, not a
+  # deliberate limit.
+  [ "${#1}" -le 64 ] || return 1
+  [[ "$1" =~ ^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}([-+][A-Za-z0-9.-]{1,40})?$ ]]
 }
 
 # --- read hook input (best-effort; absence is fine) -------------------------

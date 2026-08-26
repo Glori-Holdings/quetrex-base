@@ -89,7 +89,15 @@ MAX_MANIFEST_BYTES=65536
 
 valid_version() {  # <string> -> prints it back if safely shaped, else empty
   local v="$1"
-  if [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]{1,40})?$ ]]; then
+  # SEC-GLOBAL-9: an earlier version of this regex bounded the SHAPE but not
+  # the SIZE of each numeric run — [0-9]+ matches an arbitrarily long digit
+  # string, so an all-digit "version" (e.g. 60,000 nines) still passed and
+  # flooded stdout, bounded only incidentally by MAX_MANIFEST_BYTES. Each
+  # numeric run is now capped at 6 digits (no real semver component is
+  # anywhere close to that), and the whole token is capped at 64 characters
+  # as a second, independent belt.
+  [ "${#v}" -le 64 ] || { printf ''; return; }
+  if [[ "$v" =~ ^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}([-+][A-Za-z0-9.-]{1,40})?$ ]]; then
     printf '%s' "$v"
   fi
 }

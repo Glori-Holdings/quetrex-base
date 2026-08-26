@@ -385,6 +385,44 @@ else
   else
 notok "SEC-GLOBAL-2 ROUND 2: the shipped guard must never echo an injected \`inst\` value (got: '$OUT_FIXED_INST', rc=$RC_FIXED_INST)"
   fi
+
+  # =============================================================================
+  # SEC-GLOBAL-9 FAIL-FIRST — the clamp's [0-9]+ runs were unbounded in size,
+  # so an all-digit "version" (no attacker-chosen words, but pure context
+  # bloat) still passed the shape check and flooded stdout with no size
+  # ceiling at all in this script (unlike update-check.sh's MAX_MANIFEST_BYTES).
+  # Uses an asymmetric pair of huge all-digit versions (50,000 vs 50,001
+  # nines) so `version_lt` genuinely reports the bound version as stale —
+  # sort -V correctly orders these by numeric magnitude even at this length.
+  # =============================================================================
+  DIGITS_A="$(printf '9%.0s' $(seq 1 50000)).0.0"
+  DIGITS_B="$(printf '9%.0s' $(seq 1 50001)).0.0"
+  DROOT="$TMP/cache/digit-flood-plugin"
+  mkdir -p "$DROOT/bin"
+  mkplugin "$DROOT" quetrex-factory "$DIGITS_A"
+  mkinstalled "$TMP/installed-digits.json" "quetrex-factory@quetrex=$DIGITS_B"
+
+  BASE9_BYTES=$(jq -cn --arg s digits-base '{hook_event_name:"SessionStart",session_id:$s}' \
+    | env CLAUDE_PLUGIN_ROOT="$DROOT" PATH="$DROOT/bin:/usr/bin:/bin" \
+        QX_BOUND_INSTALLED_PLUGINS_FILE="$TMP/installed-digits.json" \
+        QX_BOUND_GUARD_STATE_DIR="$TMP/state-digits-base" \
+        bash "$BASELINE_GUARD_R2" 2>/dev/null | wc -c | tr -d ' ')
+  if [ "$BASE9_BYTES" -gt 65536 ]; then
+    ok "SEC-GLOBAL-9 FAIL-FIRST: the round-1 'fixed' baseline (df0c23d) DOES emit an unbounded ($BASE9_BYTES-byte) line for an all-digit version pair — the shape check passed an arbitrarily long numeric run; the bug is real, not hypothetical"
+  else
+    notok "SEC-GLOBAL-9 FAIL-FIRST: expected the df0c23d baseline to emit >65536 bytes for the all-digit fixture (it demonstrably did when this test was authored); got $BASE9_BYTES bytes — the fail-first proof is broken, not the fix"
+  fi
+
+  FIXED9_BYTES=$(jq -cn --arg s digits-fixed '{hook_event_name:"SessionStart",session_id:$s}' \
+    | env CLAUDE_PLUGIN_ROOT="$DROOT" PATH="$DROOT/bin:/usr/bin:/bin" \
+        QX_BOUND_INSTALLED_PLUGINS_FILE="$TMP/installed-digits.json" \
+        QX_BOUND_GUARD_STATE_DIR="$TMP/state-digits-fixed" \
+        bash "$GUARD" 2>/dev/null | wc -c | tr -d ' ')
+  if [ "$FIXED9_BYTES" -eq 0 ]; then
+    ok "SEC-GLOBAL-9: the shipped guard is silent for an all-digit version pair too long to be a real semver component (got $FIXED9_BYTES bytes)"
+  else
+    notok "SEC-GLOBAL-9: the shipped guard must bound an all-digit version, not echo it whole (got $FIXED9_BYTES bytes)"
+  fi
 fi
 
 echo

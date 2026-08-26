@@ -238,10 +238,48 @@ JSON
     QX_UPDATE_INSTALLED_PLUGINS_FILE="$NO_INSTALLED_PLUGINS_FILE" \
     QX_UPDATE_INSTALLED_SETUP=1.0.0 \
     hook_env bash "$HOOK" </dev/null | wc -c | tr -d ' ')
-  if [ "$FIXED_HUGE_BYTES" -lt 65536 ]; then
+if [ "$FIXED_HUGE_BYTES" -lt 65536 ]; then
     pass "SEC-GLOBAL-1: the shipped hook stays well under the manifest size bound for an oversized version field (got $FIXED_HUGE_BYTES bytes)"
   else
     fail "SEC-GLOBAL-1: the shipped hook must bound an oversized manifest version, not echo it whole (got $FIXED_HUGE_BYTES bytes)"
+  fi
+
+  # ===========================================================================
+  # SEC-GLOBAL-9 FAIL-FIRST — round 1's valid_version() bounded the SHAPE of
+  # a manifest version (letters/prose could not pass) but not the SIZE of
+  # each numeric run: [0-9]+ matches an arbitrarily long digit string. A
+  # manifest whose version is 60,000 '9's + ".0.0" is still valid JSON well
+  # under MAX_MANIFEST_BYTES (65536) — so round 1's size bound never fires —
+  # yet is obviously not a real semver component. Both assertions drive the
+  # round-1 "fixed" baseline (git show df0c23d:...), which DID close the
+  # prose-injection leg but NOT this one, to prove the residual bug was
+  # real, then drive the shipped hook to prove it is now closed too.
+  # ===========================================================================
+  BASELINE_HOOK_R2="$WORK/baseline-update-check-df0c23d.sh"
+  git -C "$REPO_ROOT" show df0c23d:plugins/quetrex-setup/scripts/quetrex-update-check.sh > "$BASELINE_HOOK_R2" 2>/dev/null
+
+  DIGITS_MARKET="$WORK/digits-market.json"
+  DIGIT_VERSION="$(printf '9%.0s' $(seq 1 60000)).0.0"
+  printf '{"name":"quetrex","plugins":[{"name":"quetrex-setup","version":"%s"}]}' "$DIGIT_VERSION" > "$DIGITS_MARKET"
+
+  BASE9_BYTES=$(CLAUDE_PLUGIN_DATA="$WORK/c9-baseline" QX_UPDATE_MARKETPLACE_FILE="$DIGITS_MARKET" \
+    QX_UPDATE_INSTALLED_PLUGINS_FILE="$NO_INSTALLED_PLUGINS_FILE" \
+    QX_UPDATE_INSTALLED_SETUP=1.0.0 \
+    hook_env bash "$BASELINE_HOOK_R2" </dev/null | wc -c | tr -d ' ')
+  if [ "$BASE9_BYTES" -gt 1000 ]; then
+    pass "SEC-GLOBAL-9 FAIL-FIRST: the round-1 'fixed' baseline (df0c23d) DOES emit an oversized ($BASE9_BYTES-byte) line for an all-digit manifest version well under the 64KB manifest cap — the shape check passed an arbitrarily long numeric run; the bug is real, not hypothetical"
+  else
+    fail "SEC-GLOBAL-9 FAIL-FIRST: expected the df0c23d baseline to emit a large line for the all-digit fixture (it demonstrably did when this test was authored); got $BASE9_BYTES bytes — the fail-first proof is broken, not the fix"
+  fi
+
+  FIXED9_BYTES=$(CLAUDE_PLUGIN_DATA="$WORK/c9-fixed" QX_UPDATE_MARKETPLACE_FILE="$DIGITS_MARKET" \
+    QX_UPDATE_INSTALLED_PLUGINS_FILE="$NO_INSTALLED_PLUGINS_FILE" \
+    QX_UPDATE_INSTALLED_SETUP=1.0.0 \
+    hook_env bash "$HOOK" </dev/null | wc -c | tr -d ' ')
+  if [ "$FIXED9_BYTES" -eq 0 ]; then
+    pass "SEC-GLOBAL-9: the shipped hook is silent for an all-digit manifest version too long to be a real semver component (got $FIXED9_BYTES bytes)"
+  else
+    fail "SEC-GLOBAL-9: the shipped hook must bound an all-digit manifest version, not echo it (got $FIXED9_BYTES bytes)"
   fi
 fi
 
