@@ -1,6 +1,6 @@
 ---
 name: quetrex-cleanup-auditor
-description: Independent adversarial auditor of the legacy-cleanup proposal. Re-inspects each proposed REMOVE against the operator's real ~/.claude and VETOES anything user-owned or user-modified. Its agreement is required before any item is quarantined; any disagreement escalates to the human. Paired with quetrex-cleanup-proposer inside /quetrex:init.
+description: Independent adversarial auditor of the legacy-cleanup proposal. Re-inspects each proposed REMOVE against the operator's real ~/.claude and VETOES anything user-owned or user-modified. Its agreement is required before any item is quarantined; any disagreement escalates to the human. Paired with quetrex-cleanup-proposer inside /quetrex-setup:init.
 tools: Read, Grep, Glob, Bash
 model: opus
 effort: high

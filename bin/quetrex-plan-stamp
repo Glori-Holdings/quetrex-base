@@ -17,7 +17,7 @@
 # reached an operator in this engine shared one shape: a code path that had
 # never once been EXECUTED (test/plugin.test.js:127-141). A markdown command's
 # prose is model-instructions, not a guaranteed execution — the same failure
-# mode that made /quetrex:init finish with empty enabledPlugins and that made
+# mode that made /quetrex-setup:init finish with empty enabledPlugins and that made
 # bin/quetrex-arm necessary. A stamp that silently does not happen is worse than
 # no stamp: the routine then reads a plan with no `base_sha` and falls back to
 # trusting the handed checkout, which is exactly RC1. As a real executable this

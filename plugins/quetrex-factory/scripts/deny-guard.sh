@@ -350,7 +350,7 @@ target_armed() {  # target_armed <explicit-dir-or-empty> [<anchor-override>]
 # session. This check runs ONLY while the TARGET repo IS armed (C5: judged
 # per-segment via target_armed(), never just the session's own repo — an
 # unarmed repo has no gates at all, by the same rule everything else here
-# already follows, so /quetrex:init creating project.json for the first
+# already follows, so /quetrex-setup:init creating project.json for the first
 # time is unaffected), and is itself bypassable only by the same
 # operator-approved QUETREX_UNLOCK_FLOOR=1 escape hatch every other floor
 # script honors.

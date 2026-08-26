@@ -36,7 +36,7 @@ the failure mode this skill exists to remove. Declare a chain instead:
 **Why the CLAUDE.md extractor toggles the fence before matching headings.** A `#`
 comment *inside* a fenced block otherwise matches the heading rule first and silently
 truncates the chain at that line — proving a subset green and reporting it as green.
-The extractor also accepts backticked list items, which is how `/quetrex:init` writes the
+The extractor also accepts backticked list items, which is how `/quetrex-setup:init` writes the
 section.
 
 ## 2. Chain execution — exit codes are the only truth

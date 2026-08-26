@@ -15,7 +15,7 @@
 #
 # THREE INDEPENDENT SIGNALS. Any ONE of them arms the repo:
 #   (1) the WORKING-TREE file .quetrex/project.json exists as a regular file
-#       — the cheapest check, and the only signal a brand-new /quetrex:init
+#       — the cheapest check, and the only signal a brand-new /quetrex-setup:init
 #       (not yet committed) can produce.
 #   (2) .quetrex/project.json is present in the committed tree at HEAD
 #       (`git cat-file -e HEAD:.quetrex/project.json`) — so deleting the

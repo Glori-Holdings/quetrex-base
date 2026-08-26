@@ -62,7 +62,7 @@ fi
 ```bash
 QX_KANBAN_URL="$(quetrex-api kanban-url)"     || exit 1
 QX_PROJECT_CODE="$(quetrex-api project-code)" || exit 1
-BIND="$(quetrex-api binding-path)" || { echo "Run /quetrex:init" >&2; exit 1; }
+BIND="$(quetrex-api binding-path)" || { echo "Run /quetrex-setup:init" >&2; exit 1; }
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || dirname "$(dirname "$BIND")")"
 echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL"
 ```
@@ -158,7 +158,7 @@ print a secret value or the bearer; the only value-derived output is a masked la
 Each value flows **file → `node` → `quetrex-api` → vault** — never echoed, never on argv as a
 value, never to disk/logs. No `set -x`, no `curl -v`. `unset` after use.
 
-Use the shared helpers (identical pattern to `/quetrex:init` step 5b). `quetrex-api env-scan`
+Use the shared helpers (identical pattern to `/quetrex-setup:init` step 5b). `quetrex-api env-scan`
 parses `$REPO_ROOT/.env`, `.env.local`, `.env.*` (skipping `*.example`/`*.sample`) in
 `node`, filters to relevant credential names, **normalizes `FLY_TOKEN` → `FLY_API_TOKEN`**
 (the exact name step 8 looks up), and emits `FILE<TAB>RAWNAME<TAB>CANON<TAB>****<last4>`:

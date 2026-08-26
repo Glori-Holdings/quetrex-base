@@ -45,8 +45,8 @@ Resolve context in one bash block — the `quetrex-api` tool (shipped on the plu
 all auth/access messaging; do not reinvent it:
 
 ```bash
-QX_KANBAN_URL="$(quetrex-api kanban-url)"     || exit 1   # prints "Run /quetrex:login" on failure
-QX_PROJECT_CODE="$(quetrex-api project-code)" || exit 1   # prints "Run /quetrex:init" on failure
+QX_KANBAN_URL="$(quetrex-api kanban-url)"     || exit 1   # prints "Run /quetrex-setup:login" on failure
+QX_PROJECT_CODE="$(quetrex-api project-code)" || exit 1   # prints "Run /quetrex-setup:init" on failure
 quetrex-api GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1   # validate access
 TASK="$(quetrex-api GET "/api/tasks/$TASK_ID")"            || exit 1
 
@@ -61,7 +61,7 @@ echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL   branchPrefix=$BRANCH_PREFIX"
 ```
 
 If any context fetch or `quetrex-api` call exits non-zero, the tool already printed the correct message
-(401 → `Run /quetrex:login`; 403/404 → `No access — contact your administrator`; other →
+(401 → `Run /quetrex-setup:login`; 403/404 → `No access — contact your administrator`; other →
 `Quetrex API error (HTTP <code>)`). Just stop.
 
 ### 1a. Resolve the cloud environment — before the discussion, not after it

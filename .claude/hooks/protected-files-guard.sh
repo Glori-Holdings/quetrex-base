@@ -756,7 +756,7 @@ if [ "$TOOL_NAME" = "Write" ] || [ "$TOOL_NAME" = "Edit" ]; then
   # ARMED-ONLY block above) -- by construction we only reach this line when
   # the file ALREADY EXISTS at ROOT (an unarmed repo has no project.json and
   # exits at the ARMED-ONLY gate before this point), so protecting it here
-  # can never block /quetrex:init's first-time creation of the file. A
+  # can never block /quetrex-setup:init's first-time creation of the file. A
   # Write/Edit whose target normalizes to exactly that path is denied unless
   # QUETREX_UNLOCK_FLOOR=1 -- the same unlock contract (is_unlocked /
   # allow_unlocked / deny) the floor scripts below use.

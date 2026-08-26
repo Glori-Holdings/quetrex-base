@@ -22,7 +22,7 @@ there. This is not a bug; it is what makes worktrees cheap.
 **Scope, precisely:** the harness applies it to the worktrees it creates for built-in
 agent isolation (`isolation: worktree`). It is **not** a git feature and **not** applied
 to a worktree you create yourself with `git worktree add`. Step 2 of the skill copies the
-entries by hand for exactly that reason. `/quetrex:init` generates the file from the env files
+entries by hand for exactly that reason. `/quetrex-setup:init` generates the file from the env files
 it already scans during adoption.
 
 **Never commit the file's *contents*.** `.worktreeinclude` lists paths; the paths it lists
@@ -52,7 +52,7 @@ pipeline has no terminus.
 
 So the prefix is data, not a constant: `.quetrex/project.json` carries `branchPrefix`,
 defaulting to **`claude/`** — the one prefix that works for both local and cloud builds with
-no repo-admin setup, which is why `/quetrex:init` writes it without asking. A team that
+no repo-admin setup, which is why `/quetrex-setup:init` writes it without asking. A team that
 prefers another convention sets its own value and everything downstream follows. Do not
 hardcode any prefix in new code paths.
 

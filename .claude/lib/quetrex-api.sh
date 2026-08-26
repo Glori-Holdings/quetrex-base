@@ -11,8 +11,8 @@
 #     qapi             — token-safe curl wrapper for the kanban API
 #
 # ---------------------------------------------------------------------------
-# CONTRACTS (consumed here, never written here — owned by /quetrex:login and
-# /quetrex:init). Two JSON files, two shapes:
+# CONTRACTS (consumed here, never written here — owned by /quetrex-setup:login and
+# /quetrex-setup:init). Two JSON files, two shapes:
 #
 #   AUTH — machine level, outside any repo:  ~/.quetrex/auth.json
 #     {
@@ -20,7 +20,7 @@
 #       "token":      "<per-user bearer token>",
 #       "expiresAt":  "<iso8601>"
 #     }
-#   Written by /quetrex:login. `token` is the per-user api_token minted by the
+#   Written by /quetrex-setup:login. `token` is the per-user api_token minted by the
 #   kanban device-flow. Read here via resolve_auth.
 #
 #   PROJECT BINDING — committed per repo:  ./.quetrex/project.json
@@ -28,7 +28,7 @@
 #       "projectCode": "SMA",
 #       "kanbanUrl":   "https://dash.quetrex.com"
 #     }
-#   Written by /quetrex:init, committed. Read here via resolve_project, which
+#   Written by /quetrex-setup:init, committed. Read here via resolve_project, which
 #   walks up the directory tree from $PWD to find it.
 #
 # ---------------------------------------------------------------------------
@@ -70,24 +70,24 @@ _qx_json_get() {
 
 # resolve_auth
 #   Read ~/.quetrex/auth.json; validate presence, fields, and non-expiry.
-#   Sets QX_KANBAN_URL and _QX_TOKEN. On any failure prints "Run /quetrex:login"
+#   Sets QX_KANBAN_URL and _QX_TOKEN. On any failure prints "Run /quetrex-setup:login"
 #   to stderr and returns 1.
 resolve_auth() {
   local f="$HOME/.quetrex/auth.json"
   if [ ! -f "$f" ]; then
-    echo "Run /quetrex:login" >&2
+    echo "Run /quetrex-setup:login" >&2
     return 1
   fi
 
-  QX_KANBAN_URL="$(_qx_json_get "$f" kanbanUrl)" || { echo "Run /quetrex:login" >&2; return 1; }
-  _QX_TOKEN="$(_qx_json_get "$f" token)"         || { echo "Run /quetrex:login" >&2; return 1; }
+  QX_KANBAN_URL="$(_qx_json_get "$f" kanbanUrl)" || { echo "Run /quetrex-setup:login" >&2; return 1; }
+  _QX_TOKEN="$(_qx_json_get "$f" token)"         || { echo "Run /quetrex-setup:login" >&2; return 1; }
 
   local exp
-  exp="$(_qx_json_get "$f" expiresAt)" || { echo "Run /quetrex:login" >&2; return 1; }
+  exp="$(_qx_json_get "$f" expiresAt)" || { echo "Run /quetrex-setup:login" >&2; return 1; }
 
   # Expired? node date math, no jq dependency. exit 0 = still valid.
   if ! node -e 'process.exit(new Date(process.argv[1]) > new Date() ? 0 : 1)' "$exp"; then
-    echo "Run /quetrex:login" >&2
+    echo "Run /quetrex-setup:login" >&2
     return 1
   fi
 
@@ -117,7 +117,7 @@ qx_binding_path() {
 #   Walk up from $PWD to find .quetrex/project.json. Sets QX_PROJECT_CODE.
 #   Keeps auth.json's kanbanUrl as the source of truth, falling back to the
 #   binding's kanbanUrl only if auth has not set one. On miss prints
-#   "Run /quetrex:init" to stderr and returns 1.
+#   "Run /quetrex-setup:init" to stderr and returns 1.
 resolve_project() {
   local dir="$PWD" f=""
   while [ "$dir" != "/" ]; do
@@ -129,17 +129,17 @@ resolve_project() {
   done
 
   if [ -z "$f" ]; then
-    echo "Run /quetrex:init" >&2
+    echo "Run /quetrex-setup:init" >&2
     return 1
   fi
 
   # consumed by skill callers, not internally — hence the disable.
   # shellcheck disable=SC2034
-  QX_PROJECT_CODE="$(_qx_json_get "$f" projectCode)" || { echo "Run /quetrex:init" >&2; return 1; }
+  QX_PROJECT_CODE="$(_qx_json_get "$f" projectCode)" || { echo "Run /quetrex-setup:init" >&2; return 1; }
 
   # auth's kanbanUrl wins; only fall back to the binding if auth set nothing.
   if [ -z "${QX_KANBAN_URL:-}" ]; then
-    QX_KANBAN_URL="$(_qx_json_get "$f" kanbanUrl)" || { echo "Run /quetrex:init" >&2; return 1; }
+    QX_KANBAN_URL="$(_qx_json_get "$f" kanbanUrl)" || { echo "Run /quetrex-setup:init" >&2; return 1; }
   fi
 
   return 0
@@ -152,7 +152,7 @@ resolve_project() {
 #       never appears in argv/stdout/logs; that config file is wiped the instant
 #       curl returns (explicit rm — portable across bash and zsh; zsh's `trap`
 #       has no RETURN pseudo-signal, so we never rely on a trap for the wipe).
-#     - 401      -> "Run /quetrex:login" (stderr), return 1
+#     - 401      -> "Run /quetrex-setup:login" (stderr), return 1
 #     - 403/404  -> "No access — contact your administrator" (stderr), return 1
 #     - other non-2xx -> "Quetrex API error (HTTP <code>)" (stderr), return 1
 #     - 2xx      -> prints the JSON response body to stdout, return 0
@@ -193,7 +193,7 @@ qapi() {
       rc=0
       ;;
     401)
-      echo "Run /quetrex:login" >&2
+      echo "Run /quetrex-setup:login" >&2
       ;;
     403 | 404)
       echo "No access — contact your administrator" >&2
@@ -343,7 +343,7 @@ qx_create_child() {
     return 1
   fi
   if [ -z "${QX_PROJECT_CODE:-}" ]; then
-    echo "Run /quetrex:init" >&2
+    echo "Run /quetrex-setup:init" >&2
     return 1
   fi
 
@@ -500,7 +500,7 @@ qx_is_unblocked() {
 }
 
 # ---------------------------------------------------------------------------
-# ENV-CRED AUTO-DETECT helpers (used by /quetrex:init and /quetrex:deploy).
+# ENV-CRED AUTO-DETECT helpers (used by /quetrex-setup:init and /quetrex:deploy).
 #
 # These let a command discover credentials already on disk in the repo's local
 # env files and import them straight into the project vault WITHOUT ever echoing
