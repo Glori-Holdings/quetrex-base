@@ -13,7 +13,7 @@
 # fail-first comparison fetches the OLD file's bytes at test-run time — the
 # literal old string is never present in any file this grep walks) — so
 # there is nothing in the current working tree that legitimately still reads
-# `/quetrex:login`, `/quetrex:init` or `/quetrex:update`.
+# the login, init or update verbs under the old `quetrex:` namespace.
 #
 # THE TEST STILL EARNS ITS KEEP WITH AN EMPTY LIST: it is the mechanism that
 # would catch a REGRESSION (an old string resurfacing, a rebase reintroducing

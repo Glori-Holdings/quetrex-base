@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # test/golden-repoint.test.sh — AC22 of .quetrex/plan/GLOBAL.json: GOLDEN.md
 # is doctrine. This task's ONLY license to touch it is the command-name
-# rename in drill steps 1 and 2 (/quetrex:login -> /quetrex-setup:login,
-# /quetrex:init -> /quetrex-setup:init) — never an invariant, a drill step's
-# meaning, or a verdict column.
+# rename in drill steps 1 and 2 — the login and init verbs move out of the
+# `quetrex` plugin's namespace to `quetrex-setup`'s — never an invariant, a
+# drill step's meaning, or a verdict column.
 #
 # WHY A MECHANICAL, LINE-BY-LINE CHECK, NOT A PROSE REVIEW. ".claude/CLAUDE.md"
 # already states the general rule ("NEVER amend a spec/invariant/doctrine to
