@@ -106,6 +106,125 @@ else
   notok "reviewer.md no longer forbids re-pinning without re-review — the anchoring discipline regressed"
 fi
 
+# =============================================================================
+# REWORK 1/2 (review-gate finding, 2026-08-26): the reviewer must be strictly
+# read-only for the verify chain — it may never execute a chain command, not
+# even to fill a gap (Finding 1), and the jq selector deciding "green at HEAD"
+# must be skip-aware exactly like git-workflow.md's Gate 2, not the naive
+# "most recent line" check (Finding 2) — a boundedQuick skip line written
+# right after a genuine green at the same sha must never make the command
+# look unproven.
+# =============================================================================
+
+# =============================================================================
+# (f) reviewer.md must NEVER append to verify-ledger.jsonl and must NEVER
+#     `eval` a chain command anywhere — it is strictly read-only on the ledger.
+#     git-workflow.md's §2a is EXEMPT (it is allowed to fill in the ledger);
+#     this check is scoped to reviewer.md only.
+# =============================================================================
+if grep -qF '>> "$LEDGER"' "$REVIEWER"; then
+  notok "reviewer.md appends to \$LEDGER (>> \"\$LEDGER\") — it must never write ledger lines"
+else
+  ok "reviewer.md never appends to \$LEDGER"
+fi
+
+REVIEWER_EVAL_CMD="$(grep -nF 'eval "$cmd"' "$REVIEWER")"
+if [ -n "$REVIEWER_EVAL_CMD" ]; then
+  notok "reviewer.md still executes a chain command with eval \"\$cmd\": $REVIEWER_EVAL_CMD"
+else
+  ok "reviewer.md never executes a chain command via eval \"\$cmd\""
+fi
+
+# =============================================================================
+# (g) FUNCTIONAL: the skip-aware jq selector. The exact program below is the
+#     one both files must ship VERBATIM (never a paraphrase) — reviewer.md's
+#     Step 3 verify_green check and git-workflow.md's §2a fill-in loop must
+#     use the identical selector so the two readers of one ledger can never
+#     disagree about what "green at HEAD" means.
+# =============================================================================
+JQ_SELECTOR='[ .[] | select(.cmd == $cmd and (.skipped != true or .skipReason == "requiredEnv")) ] as $meaningful | ($meaningful | map(select(.sha == $head)) | last) as $at_head | ($meaningful | map(select(.skipped != true)) | last) as $last_genuine | if ($at_head == null) then 0 elif ($at_head.skipped == true) then (if ($last_genuine == null or $last_genuine.exit == 0) then 1 else 0 end) elif ($at_head.exit == 0) then 1 else 0 end'
+
+if grep -qF "$JQ_SELECTOR" "$REVIEWER"; then
+  ok "reviewer.md ships the skip-aware jq selector verbatim"
+else
+  notok "reviewer.md does not ship the skip-aware jq selector verbatim — still using (or diverging from) the naive 'last' check"
+fi
+
+if grep -qF "$JQ_SELECTOR" "$GITWORKFLOW"; then
+  ok "git-workflow.md §2a ships the skip-aware jq selector verbatim"
+else
+  notok "git-workflow.md §2a does not ship the skip-aware jq selector verbatim — still using (or diverging from) the naive 'last' check"
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "SKIP: jq unavailable — skipping the functional selector scenarios (g1)-(g7)"
+else
+  HEAD_SHA="deadbeef00000000000000000000000000000head"
+  OTHER_SHA="0000000000000000000000000000000000other"
+  TMPDIR_LEDGER="$(mktemp -d)"
+  trap 'rm -rf "$TMPDIR_LEDGER"' EXIT
+
+  run_selector() {
+    # $1 = ledger file, $2 = expected 0|1, $3 = case label
+    local ledger="$1" expected="$2" label="$3" got
+    got="$(jq -sc --arg cmd "npm test" --arg head "$HEAD_SHA" "$JQ_SELECTOR" "$ledger" 2>/dev/null)"
+    [ "$got" = "1" ] || got=0   # mirror the shipped shell contract: anything but literal "1" is "not proven"
+    if [ "$got" = "$expected" ]; then
+      ok "selector case $label: expected $expected, got $got"
+    else
+      notok "selector case $label: expected $expected, got $got"
+    fi
+  }
+
+  # (g1) green at HEAD -> 1
+  L="$TMPDIR_LEDGER/g1.jsonl"
+  jq -nc --arg sha "$HEAD_SHA" '{ts:"t1",cmd:"npm test",cwd:"/x",sha:$sha,exit:0,tail:""}' > "$L"
+  run_selector "$L" 1 "g1 (green at HEAD)"
+
+  # (g2) green at HEAD followed by a boundedQuick skip at HEAD -> 1 (THE FINDING)
+  L="$TMPDIR_LEDGER/g2.jsonl"
+  {
+    jq -nc --arg sha "$HEAD_SHA" '{ts:"t1",cmd:"npm test",cwd:"/x",sha:$sha,exit:0,tail:""}'
+    jq -nc --arg sha "$HEAD_SHA" '{ts:"t2",cmd:"npm test",cwd:"/x",sha:$sha,exit:null,skipped:true,skipReason:"boundedQuick",tail:""}'
+  } > "$L"
+  run_selector "$L" 1 "g2 (green at HEAD, then boundedQuick skip at HEAD)"
+
+  # (g3) green at a DIFFERENT sha -> 0
+  L="$TMPDIR_LEDGER/g3.jsonl"
+  jq -nc --arg sha "$OTHER_SHA" '{ts:"t1",cmd:"npm test",cwd:"/x",sha:$sha,exit:0,tail:""}' > "$L"
+  run_selector "$L" 0 "g3 (green at a different sha)"
+
+  # (g4) red at HEAD -> 0
+  L="$TMPDIR_LEDGER/g4.jsonl"
+  jq -nc --arg sha "$HEAD_SHA" '{ts:"t1",cmd:"npm test",cwd:"/x",sha:$sha,exit:1,tail:"boom"}' > "$L"
+  run_selector "$L" 0 "g4 (red at HEAD)"
+
+  # (g5) requiredEnv skip at HEAD, no red anywhere -> 1
+  L="$TMPDIR_LEDGER/g5.jsonl"
+  jq -nc --arg sha "$HEAD_SHA" '{ts:"t1",cmd:"npm test",cwd:"/x",sha:$sha,exit:null,skipped:true,skipReason:"requiredEnv",tail:""}' > "$L"
+  run_selector "$L" 1 "g5 (requiredEnv skip at HEAD, no red anywhere)"
+
+  # (g6) requiredEnv skip at HEAD AFTER a genuine red at HEAD -> 0 (the skip
+  #      must never rescue a real failure recorded for this same command)
+  L="$TMPDIR_LEDGER/g6.jsonl"
+  {
+    jq -nc --arg sha "$HEAD_SHA" '{ts:"t1",cmd:"npm test",cwd:"/x",sha:$sha,exit:1,tail:"boom"}'
+    jq -nc --arg sha "$HEAD_SHA" '{ts:"t2",cmd:"npm test",cwd:"/x",sha:$sha,exit:null,skipped:true,skipReason:"requiredEnv",tail:""}'
+  } > "$L"
+  run_selector "$L" 0 "g6 (requiredEnv skip at HEAD after a genuine red at HEAD)"
+
+  # (g7) missing ledger file -> 0
+  run_selector "$TMPDIR_LEDGER/does-not-exist.jsonl" 0 "g7a (missing ledger file)"
+
+  # (g7) malformed line -> 0
+  L="$TMPDIR_LEDGER/g7b.jsonl"
+  printf '{ this is not valid json\n' > "$L"
+  run_selector "$L" 0 "g7b (malformed ledger line)"
+
+  rm -rf "$TMPDIR_LEDGER"
+  trap - EXIT
+fi
+
 echo
 echo "verify-chain-runs-once.test.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

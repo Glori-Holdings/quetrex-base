@@ -306,10 +306,14 @@ CHAIN_RED=0
 
 while IFS= read -r cmd; do
   [ -n "$cmd" ] || continue
+  # Skip-aware selector — matches Gate 2 above (and reviewer.md's Step 3) exactly:
+  # a boundedQuick line carries no evidence and is ignored entirely; a requiredEnv
+  # skip at HEAD is pass-equivalent unless a genuine red for this command exists
+  # elsewhere in the ledger; a genuine executed line at HEAD decides it directly.
   GREEN_AT_HEAD=$(jq -sc --arg cmd "$cmd" --arg head "$HEAD_SHA" \
-    '[.[] | select(.cmd == $cmd)] | last | if . == null then 0 elif (.exit == 0 and .sha == $head) then 1 else 0 end' \
+    '[ .[] | select(.cmd == $cmd and (.skipped != true or .skipReason == "requiredEnv")) ] as $meaningful | ($meaningful | map(select(.sha == $head)) | last) as $at_head | ($meaningful | map(select(.skipped != true)) | last) as $last_genuine | if ($at_head == null) then 0 elif ($at_head.skipped == true) then (if ($last_genuine == null or $last_genuine.exit == 0) then 1 else 0 end) elif ($at_head.exit == 0) then 1 else 0 end' \
     "$LEDGER" 2>/dev/null)
-  [ "$GREEN_AT_HEAD" = "1" ] && continue   # already proven at this exact sha — NOT re-run
+  [ "$GREEN_AT_HEAD" = "1" ] && continue   # already proven (or pass-equivalent) at this exact sha — NOT re-run
 
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   out=$(cd "$ROOT" && eval "$cmd" 2>&1); code=$?

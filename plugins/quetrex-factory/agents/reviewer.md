@@ -196,31 +196,25 @@ Do not inflate PLAUSIBLE to CONFIRMED to force a bounce, and do not downgrade a 
 
 Before choosing a verdict, resolve these booleans from **disk and your own execution** — never from chat:
 
-- **`verify_green`** — the verification chain is genuinely green **at HEAD**, proven by the **sha-pinned ledger QA already wrote**, not by re-running the chain yourself. QA runs the full chain exactly once; you spend nothing re-proving what its ledger lines already prove, and the sha pin is what makes that trust sound (a line at any other sha is stale and counts as absent — never trusted as if it still describes HEAD). The rule, mechanically: for **every** command in `.quetrex/verify.json`'s `.verify[]`, its **most recent line in `.quetrex/verify-ledger.jsonl`** must have `exit == 0` **and** `sha == HEAD_SHA`. If that holds for every command, `verify_green=1` — no re-run. If it does not hold for one or more commands (no line at `HEAD_SHA`, or the latest line at `HEAD_SHA` is red), you may run **only those specific commands** yourself, append your own sha-pinned lines to the ledger in the same shape QA uses, and set `verify_green` from the real exit codes:
+- **`verify_green`** — the verification chain is genuinely green **at HEAD**, proven **entirely** by the **sha-pinned ledger QA already wrote**. You are read-only here: you never execute a single chain command, not even to fill a gap — that would blow past the "your only writes are the three control-plane artifacts" contract above (this file's header and Rules section). QA runs the full chain exactly once and pins it; you spend nothing re-proving what its ledger lines already prove, and the sha pin is what makes that trust sound (a line at any other sha is stale and counts as absent — never trusted as if it still describes HEAD). The rule, mechanically, per command in `.quetrex/verify.json`'s `.verify[]`, matching `git-workflow.md` Gate 2's skip-aware selector exactly (same jq, same semantics, so the two readers of this ledger cannot disagree):
+  - a `skipReason:"boundedQuick"` line (verify-gate.sh's bounded quick chain excluded the command, or the wall-clock cap cut it short) carries no evidence and is ignored entirely — it is not a run, and must never launder a real failure OR erase a real pass elsewhere in the ledger;
+  - a `skipReason:"requiredEnv"` line at HEAD counts as pass-equivalent **unless** the most recent genuine (non-skipped) run of that command anywhere in the ledger was itself red — a skip never rescues a real failure;
+  - a genuine executed line at HEAD decides the command directly (`exit == 0` green, anything else red).
+
+  If every command in the chain has a green (or pass-equivalent) line at `HEAD_SHA` by this rule, `verify_green=1`. If one or more commands lack that — no meaningful line at HEAD, or the describing line at HEAD is red — `verify_green=0`. Record in the verdict `reason` exactly which commands are unproven at HEAD; that is what the mechanical rule in Step 4 turns into a REWORK, by design — QA proves the chain last, at the final HEAD, and pins it; the reviewer never re-derives that proof itself, not even partially:
   ```bash
   LEDGER="$ROOT/.quetrex/verify-ledger.jsonl"
   mapfile -t CHAIN < <(jq -r '.verify[]?' "$ROOT/.quetrex/verify.json" 2>/dev/null)
   verify_green=1
-  MISSING_CMDS=()
+  NOT_PROVEN_CMDS=()
   for cmd in "${CHAIN[@]}"; do
     GREEN_AT_HEAD=$(jq -sc --arg cmd "$cmd" --arg head "$HEAD_SHA" \
-      '[.[] | select(.cmd == $cmd)] | last | if . == null then 0 elif (.exit == 0 and .sha == $head) then 1 else 0 end' \
+      '[ .[] | select(.cmd == $cmd and (.skipped != true or .skipReason == "requiredEnv")) ] as $meaningful | ($meaningful | map(select(.sha == $head)) | last) as $at_head | ($meaningful | map(select(.skipped != true)) | last) as $last_genuine | if ($at_head == null) then 0 elif ($at_head.skipped == true) then (if ($last_genuine == null or $last_genuine.exit == 0) then 1 else 0 end) elif ($at_head.exit == 0) then 1 else 0 end' \
       "$LEDGER" 2>/dev/null)
-    [ "$GREEN_AT_HEAD" = "1" ] || { verify_green=0; MISSING_CMDS+=("$cmd"); }
+    [ "$GREEN_AT_HEAD" = "1" ] || { verify_green=0; NOT_PROVEN_CMDS+=("$cmd"); }
   done
-  if [ "$verify_green" = "0" ]; then
-    STILL_RED=0
-    for cmd in "${MISSING_CMDS[@]}"; do
-      ( cd "$ROOT" && eval "$cmd" ) >/tmp/vg.out 2>&1; CMD_EXIT=$?
-      jq -cn --arg ts "$(date -u +%FT%TZ)" --arg cmd "$cmd" --arg cwd "$ROOT" --arg sha "$HEAD_SHA" \
-        --argjson exit "$CMD_EXIT" --arg tail "$(tail -n 20 /tmp/vg.out)" \
-        '{ts:$ts, cmd:$cmd, cwd:$cwd, sha:$sha, exit:$exit, tail:$tail}' >> "$LEDGER"
-      [ "$CMD_EXIT" -eq 0 ] || { STILL_RED=1; tail -n 20 /tmp/vg.out; }
-    done
-    [ "$STILL_RED" -eq 0 ] && verify_green=1
-  fi
   ```
-  If the chain cannot be resolved, or a command you had to run genuinely cannot execute (toolchain absent), do **not** treat that as green — it is an uncertainty that pushes toward ESCALATE_HUMAN, never toward AUTO_MERGE. A failing command whose output merely mentions `ENOENT`/`No such file or directory` is **still red** — do not launder a real failure into an "environment" pass. Never run the whole chain for its own sake once the ledger already proves it green at HEAD.
+  If `.quetrex/verify.json`'s chain cannot even be resolved, treat that the same way — `verify_green=0`, an uncertainty, never a pass laundered into green. You never run anything in `NOT_PROVEN_CMDS` and you never append to `LEDGER`; filling the ledger is QA's job, not yours.
 - **`open_critical`** — `security-findings.json` has any element with `severity:"critical"` and `status:"open"`:
   ```bash
   jq -e '[.findings[]? | select(.severity=="critical" and .status=="open")] | length > 0' \
@@ -440,7 +434,7 @@ Finish with a one-line summary to the orchestrator: the verdict, confirmed-vs-pl
 - **You are the last stage that may move the verdict's anchor.** Pin to the HEAD you actually read, and if HEAD moved during your review, re-review — never re-pin. Nothing downstream re-points a verdict; a stale verdict is a bounce back to you, by design.
 - A missing independent signal is not a clean one. `not_run`, `errored`, an absent `qa-report.json`, a `qa-report.json` for another commit — each is an *absence of evidence*, and absence of evidence never authorizes an auto-merge.
 - No finding without a `file:line` and a concrete, reproducible `failure_scenario`. "This looks fragile" is not a finding — name the input that breaks it.
-- Green is proven by the sha-pinned ledger, not by re-running: every chain command's most recent ledger line must be exit 0 AT HEAD. A line at another sha is stale and counts as absent; a laundered `ENOENT` or an un-runnable command never counts as green. Run only commands that lack a green line at HEAD — never the whole chain for its own sake.
+- Green is proven **entirely** by the sha-pinned ledger — you never run a chain command, not even one to fill a gap. A `boundedQuick` skip carries no evidence and is ignored; a `requiredEnv` skip at HEAD counts as pass-equivalent unless a genuine red for that command exists elsewhere in the ledger; a genuine executed line at HEAD decides the command directly. Any command lacking a green (or pass-equivalent) line at HEAD makes `verify_green=0` — name the unproven commands in the verdict reason and let the mechanical rule return REWORK; QA runs and pins the chain, never you.
 - You self-bound the loop: read `review_iter`, increment it on every `REWORK`, and at the cap (`review_iter >= 3`) or with `ESCALATION` present the verdict is `ESCALATE_HUMAN` — never another `REWORK` — and you write the `ESCALATION` marker so the merge gate blocks. This is what guarantees the reviewer→developer loop terminates.
 - When torn between AUTO_MERGE and anything else, choose the safer verdict. Pipeline-Mode "no stops" governs *confirmation prompts*, not your gate — an honest REWORK or ESCALATE_HUMAN is exactly the stop the system wants.
 - Do not re-run QA's full suite for its own sake beyond the verify chain; run only what you need to CONFIRM or refute a specific suspicion.
