@@ -113,6 +113,49 @@ BYTES_NOTGIT_OFFER=$(printf '%s' "$OUT_NOTGIT_OFFER" | wc -c | tr -d ' ')
   || notok "AC9: unarmed-offer.sh on a non-git directory expected 0 bytes/exit 0, got bytes=$BYTES_NOTGIT_OFFER rc=$RC_NOTGIT_OFFER (out: [$OUT_NOTGIT_OFFER])"
 
 # =============================================================================
+# REV-GLOBAL-2 — unarmed-offer.sh's inline arming predicate must carry ALL
+# THREE of qx-armed.sh's independent signals (working-tree file, tracked at
+# HEAD, tracked at the default-branch tip), not only the cheapest one. A
+# repo where .quetrex/project.json was COMMITTED and then removed from the
+# working tree ONLY (SEC-ONECOPY-1's exact class) must still read as ARMED
+# — 0 bytes, never the offer line. Both assertions drive the exact pre-fix
+# baseline (git show 562e025:...) to prove the disagreement was real, then
+# drive the shipped hook to prove it now agrees with the shared helper.
+# =============================================================================
+COMMITTED_DELETED="$TMP/committed-deleted"; mkdir -p "$COMMITTED_DELETED/.quetrex"
+git -C "$COMMITTED_DELETED" init -q -b main 2>/dev/null || git -C "$COMMITTED_DELETED" init -q 2>/dev/null
+git -C "$COMMITTED_DELETED" config user.email t@t; git -C "$COMMITTED_DELETED" config user.name t
+echo '{"code":"QUE"}' > "$COMMITTED_DELETED/.quetrex/project.json"
+git -C "$COMMITTED_DELETED" add -A; git -C "$COMMITTED_DELETED" commit -q -m init
+rm "$COMMITTED_DELETED/.quetrex/project.json"
+
+REV2_FULL="562e0256b6a90ddff60142a3b677577c401b40e2"
+if ! git -C "$ROOT" cat-file -e 562e025^{commit} 2>/dev/null; then
+  git -C "$ROOT" fetch --quiet --depth=1 origin "$REV2_FULL" 2>/dev/null || true
+fi
+if ! git -C "$ROOT" cat-file -e 562e025^{commit} 2>/dev/null; then
+  notok "REV-GLOBAL-2 FAIL-FIRST: baseline commit 562e025 is not reachable in this checkout even after a depth-1 fetch of $REV2_FULL — cannot prove the fix, refusing to report a pass having compared against nothing"
+else
+  BASELINE_OFFER="$TMP/baseline-unarmed-offer.sh"
+  git -C "$ROOT" show 562e025:plugins/quetrex-setup/scripts/unarmed-offer.sh > "$BASELINE_OFFER"
+
+  OUT_CD_BASE="$(fire "$BASELINE_OFFER" "$COMMITTED_DELETED" startup)"; RC_CD_BASE=$?
+  if [ "$RC_CD_BASE" -eq 0 ] && [ "$OUT_CD_BASE" = "$EXPECTED" ]; then
+    ok "REV-GLOBAL-2 FAIL-FIRST: the pre-fix baseline (562e025) DOES print the not-armed offer for a committed-then-working-tree-deleted project.json — it disagrees with the shared qx_repo_armed helper (which would call this repo ARMED); the bug is real, not hypothetical"
+  else
+    notok "REV-GLOBAL-2 FAIL-FIRST: expected the pre-fix baseline to print the offer for the committed-then-deleted fixture (it demonstrably did when this test was authored); got rc=$RC_CD_BASE, out=[$OUT_CD_BASE] — the fail-first proof is broken, not the fix"
+  fi
+
+  OUT_CD="$(fire "$OFFER_HOOK" "$COMMITTED_DELETED" startup)"; RC_CD=$?
+  BYTES_CD=$(printf '%s' "$OUT_CD" | wc -c | tr -d ' ')
+  if [ "$RC_CD" -eq 0 ] && [ "$BYTES_CD" -eq 0 ]; then
+    ok "REV-GLOBAL-2: the shipped unarmed-offer.sh is silent for a committed-then-working-tree-deleted project.json — it now agrees with the shared qx_repo_armed helper (ARMED via signal 2)"
+  else
+    notok "REV-GLOBAL-2: the shipped unarmed-offer.sh must be silent for the committed-then-deleted fixture (got rc=$RC_CD, bytes=$BYTES_CD, out=[$OUT_CD])"
+  fi
+fi
+
+# =============================================================================
 # AC10 — session-state.sh (armed half only): UNARMED git repo -> 0 bytes, exit
 # 0 (the offer is no longer this script's job); ARMED repo -> stdout contains
 # '[quetrex-state]'; ARMED repo with .quetrex/ESCALATION -> stdout contains
