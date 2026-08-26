@@ -1208,6 +1208,32 @@ for k in $CHUNK_IDS; do
   cat "$CHUNKDIR/$k.out"
 done
 
+
+# =============================================================================
+# CHUNK INTEGRITY (perf regression guard). The K-way chunk split above must
+# neither drop nor duplicate a row. Without this, a chunking bug (e.g. an
+# off-by-one in the awk split, or a row landing in two chunks) could
+# silently sweep fewer than 819 rows — or run one row twice while never
+# running another — and still report FAIL=0, because a row that never ran
+# can't fail and $TOTAL/$PASS/$FAIL are themselves derived from what DID
+# run. Assert the combined output swept every one of the 819 golden rows
+# exactly once, independent of that bookkeeping.
+# =============================================================================
+EXPECTED_ROWS=819
+ACTUAL_ROW_LINES="$(cat "$CHUNKDIR"/*.out 2>/dev/null | grep -cE '^(ok|NOT OK) - row ')"
+if [ "$ACTUAL_ROW_LINES" -eq "$EXPECTED_ROWS" ]; then
+  ok "CHUNK INTEGRITY: exactly $EXPECTED_ROWS row lines swept across all chunks (no dropped/extra rows)"
+else
+  notok "CHUNK INTEGRITY: expected $EXPECTED_ROWS row lines, got $ACTUAL_ROW_LINES — the chunk split dropped or duplicated rows"
+fi
+
+DUP_ROW_IDS="$(cat "$CHUNKDIR"/*.out 2>/dev/null | grep -oE '^(ok|NOT OK) - row [^ ]+' | awk '{print $NF}' | sort | uniq -d)"
+if [ -z "$DUP_ROW_IDS" ]; then
+  ok "CHUNK INTEGRITY: no row id ran more than once across chunks"
+else
+  notok "CHUNK INTEGRITY: duplicate row id(s) ran more than once: $DUP_ROW_IDS"
+fi
+
 echo
 echo "merge-gate-sweep.test.sh: $TOTAL row(s) swept, $ORACLE_RED with a genuine describing red, $VIOLATIONS safety violation(s), $MISMATCHES golden mismatch(es)"
 echo "merge-gate-sweep.test.sh: $PASS passed, $FAIL failed"
