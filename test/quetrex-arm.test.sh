@@ -490,6 +490,70 @@ else
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# 8. SEC-GLOBAL-3 FAIL-FIRST — a non-object enabledPlugins must fail loudly,
+#    never silently succeed with the whole safety floor left disabled. Both
+#    assertions drive the exact pre-fix baseline (git show 562e025:...) to
+#    prove the bug was real, then drive the shipped tool to prove it is
+#    fixed — never inferred from reading the diff.
+# ---------------------------------------------------------------------------
+SEC3_FULL="562e0256b6a90ddff60142a3b677577c401b40e2"
+if ! git -C "$REPO_ROOT" cat-file -e 562e025^{commit} 2>/dev/null; then
+  git -C "$REPO_ROOT" fetch --quiet --depth=1 origin "$SEC3_FULL" 2>/dev/null || true
+fi
+if ! git -C "$REPO_ROOT" cat-file -e 562e025^{commit} 2>/dev/null; then
+  fail "SEC-GLOBAL-3 FAIL-FIRST: baseline commit 562e025 is not reachable in this checkout even after a depth-1 fetch of $SEC3_FULL — cannot prove the fix, refusing to report a pass having compared against nothing"
+else
+  BASELINE_ARM3="$WORK/baseline-quetrex-arm-3"
+  git -C "$REPO_ROOT" show 562e025:plugins/quetrex-setup/bin/quetrex-arm > "$BASELINE_ARM3"
+
+  REPO8_BASE="$WORK/repo8-base"
+  mkdir -p "$REPO8_BASE/.claude"
+  printf '{"enabledPlugins":"pwned"}' > "$REPO8_BASE/.claude/settings.json"
+  OUT8_BASE="$(QX_ARM_MARKET_URL="file://$MARKET" bash "$BASELINE_ARM3" "$REPO8_BASE" "$KANBAN_URL" 2>&1)"; RC8_BASE=$?
+  PIN8_BASE="$(json_get "$REPO8_BASE/.claude/settings.json" 'enabledPlugins')"
+  if [ "$RC8_BASE" -eq 0 ] && [ "$PIN8_BASE" = '"pwned"' ]; then
+    pass "SEC-GLOBAL-3 FAIL-FIRST: the pre-fix baseline (562e025) DOES exit 0 while leaving a string enabledPlugins untouched — every plugin silently stays disabled; the bug is real, not hypothetical"
+  else
+    fail "SEC-GLOBAL-3 FAIL-FIRST: expected the pre-fix baseline to exit 0 with enabledPlugins still \"pwned\" (it demonstrably did when this test was authored); got rc=$RC8_BASE, enabledPlugins=$PIN8_BASE — the fail-first proof is broken, not the fix"
+  fi
+
+  REPO8="$WORK/repo8"
+  mkdir -p "$REPO8/.claude"
+  printf '{"enabledPlugins":"pwned"}' > "$REPO8/.claude/settings.json"
+  OUT8="$(run_arm "$REPO8" 2>&1)"; RC8=$?
+  PIN8="$(json_get "$REPO8/.claude/settings.json" 'enabledPlugins')"
+  if [ "$RC8" -ne 0 ] && [ "$PIN8" = '"pwned"' ] && printf '%s' "$OUT8" | grep -qi 'enabledPlugins'; then
+    pass "SEC-GLOBAL-3: a string enabledPlugins now fails loudly (non-zero exit) instead of silently disabling every plugin"
+  else
+    fail "SEC-GLOBAL-3: a string enabledPlugins must fail loudly, never silently succeed (got rc=$RC8, enabledPlugins=$PIN8, output: $OUT8)"
+  fi
+
+  # An ARRAY enabledPlugins must be rejected the same way.
+  REPO8C="$WORK/repo8c"
+  mkdir -p "$REPO8C/.claude"
+  printf '{"enabledPlugins":["pwned"]}' > "$REPO8C/.claude/settings.json"
+  OUT8C="$(run_arm "$REPO8C" 2>&1)"; RC8C=$?
+  if [ "$RC8C" -ne 0 ]; then
+    pass "SEC-GLOBAL-3: an array enabledPlugins also fails loudly"
+  else
+    fail "SEC-GLOBAL-3: an array enabledPlugins must also fail loudly (got rc=$RC8C, output: $OUT8C)"
+  fi
+
+  # A null enabledPlugins (the ONE shape `|| {}` always handled correctly)
+  # must keep working exactly as before.
+  REPO8D="$WORK/repo8d"
+  mkdir -p "$REPO8D/.claude"
+  printf '{"enabledPlugins":null}' > "$REPO8D/.claude/settings.json"
+  OUT8D="$(run_arm "$REPO8D" 2>&1)"; RC8D=$?
+  QPIN8D="$(json_get "$REPO8D/.claude/settings.json" 'enabledPlugins.quetrex@quetrex')"
+  if [ "$RC8D" -eq 0 ] && [ "$QPIN8D" = "true" ]; then
+    pass "SEC-GLOBAL-3: a null enabledPlugins still arms normally (the pre-existing || {} case is unaffected)"
+  else
+    fail "SEC-GLOBAL-3: a null enabledPlugins must still arm normally (got rc=$RC8D, qpin=$QPIN8D, output: $OUT8D)"
+  fi
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "quetrex-arm.test.sh: all checks passed"

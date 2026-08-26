@@ -235,6 +235,22 @@ _qxarm_write_settings() {
       }
     }
 
+    // SEC-GLOBAL-3: `o.enabledPlugins || {}` only replaces a FALSY value
+    // (undefined/null/""/0/false) — a non-object truthy value (a string, an
+    // array, a number) survives that line unchanged, and every write below
+    // is a property assignment through it. Assigning a property onto a
+    // primitive (e.g. the string "pwned") is a silent no-op in sloppy mode:
+    // pinsChanged ends up false, the run reports success, and the entire
+    // safety floor (deny-guard, secret-scan, enforce-branch, merge-gate,
+    // verify-gate — everything quetrex-factory@quetrex loads) never gets
+    // enabled while the operator is told arming succeeded. Fail loudly
+    // instead of guessing.
+    if (o.enabledPlugins !== undefined && o.enabledPlugins !== null &&
+        (typeof o.enabledPlugins !== "object" || Array.isArray(o.enabledPlugins))) {
+      const got = Array.isArray(o.enabledPlugins) ? "an array" : "a " + typeof o.enabledPlugins;
+      console.error("settings.json: enabledPlugins is " + got + ", not an object — refusing to arm (writing through it would silently enable nothing and still report success). Fix enabledPlugins in " + file + " by hand, or remove the key.");
+      process.exit(1);
+    }
     o.enabledPlugins = o.enabledPlugins || {};
     const beforePins = JSON.stringify(o.enabledPlugins);
     // NO VERSION PINS. EVER. Every quetrex-family plugin is enabled with a
