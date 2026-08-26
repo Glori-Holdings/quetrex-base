@@ -326,6 +326,8 @@ while IFS= read -r cmd; do
   [ "$GREEN_AT_HEAD" = "1" ] && continue   # already proven (or pass-equivalent) at this exact sha — NOT re-run
 
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # Invoke this whole block with an explicit long timeout (`timeout: 900000` on the
+  # Bash tool): a chain command is never killed by a tool timeout and never re-launched.
   out=$(cd "$ROOT" && eval "$cmd" 2>&1); code=$?
   tail="$(printf '%s\n' "$out" | tail -20)"
   jq -cn --arg ts "$ts" --arg cmd "$cmd" --arg cwd "$ROOT" \
