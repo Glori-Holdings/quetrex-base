@@ -109,6 +109,21 @@ else
   notok "the file does not state what the environment's Setup script field must contain"
 fi
 
+# 7. The cloud routine must REFUSE an environment whose setup script did not run
+#    (or ran stale). A misconfigured environment that proceeds quietly is how a build
+#    ends up unarmed while looking normal.
+ROUTINE="$ROOT/.claude/lib/cloud-build-routine.md"
+if grep -q 'BASH_DEFAULT_TIMEOUT_MS' "$ROUTINE"; then
+  ok "cloud-build-routine.md checks the timeout the setup script installs"
+else
+  notok "cloud-build-routine.md never checks BASH_DEFAULT_TIMEOUT_MS — a stale setup script stays silent"
+fi
+if grep -q 'bash scripts/cloud-env-setup.sh' "$ROUTINE"; then
+  ok "cloud-build-routine.md names the one-line Setup script field content in its failure path"
+else
+  notok "cloud-build-routine.md does not tell the operator what the Setup script field must contain"
+fi
+
 b="$(basename "${BASH_SOURCE[0]}")"
 echo "$b: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] && echo "$b: all checks passed"

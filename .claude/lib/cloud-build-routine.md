@@ -82,8 +82,22 @@ You should see `quetrex@quetrex` and `quetrex-factory@quetrex`. Their agent defi
 `.claude/lib/dev-pipeline.md` are on disk under the plugin cache, and `quetrex-api`,
 `quetrex-cloud-prep`, `quetrex-env-derive` and `quetrex-plan-stamp` are on PATH.
 
-If they are NOT present, stop and report `transport_failure` (rule 5) saying the environment
-is missing its setup script. **Do not install them yourself** — a build that provisions its
+Then confirm the setup script left the rest of its configuration behind, because a
+stale or half-applied one is the failure that has cost the most here — it produces a
+session that looks normal and is not:
+
+    node -e 'const s=require(os.homedir()+"/.claude/settings.json");console.log(s.env&&s.env.BASH_DEFAULT_TIMEOUT_MS)' 2>/dev/null || \
+      grep -o "BASH_DEFAULT_TIMEOUT_MS[^,}]*" ~/.claude/settings.json
+
+`BASH_DEFAULT_TIMEOUT_MS` must be present and at least `900000`. Without it every verify
+command longer than two minutes — a real suite, build, or E2E — is killed mid-run and
+re-launched, so the same suite runs two or three times per stage and the build's wall
+clock triples for no added proof.
+
+If the plugins are NOT present, or that timeout is missing, stop and report
+`transport_failure` (rule 5) saying the environment's setup script is missing or stale:
+its Setup script field must contain exactly `bash scripts/cloud-env-setup.sh`, and that
+script — which lives in this repo, version-controlled — does the rest. **Do not install them yourself** — a build that provisions its
 own toolchain from an unattended prompt is exactly what this design removed, and an
 environment without the script is a configuration problem a human fixes once, not something
 to work around per run.
