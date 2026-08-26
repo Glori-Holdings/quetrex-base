@@ -288,13 +288,23 @@ performed, not assumed away:
   verdict's sha, which would relabel a judgment nobody re-made. Extend the
   ledger only for what is genuinely missing; never re-point the verdict.
 
-So: for every command in `.quetrex/verify.json`'s `.verify[]`, check THIS
-`$ROOT`'s ledger for its most recent line for that command; if it is
-`exit == 0` at `sha == HEAD_SHA`, it is already proven — **do not run it
-again**. Only for a command whose most recent line is missing, red, or pinned
-to a different sha do you run it now, at the current HEAD, in THIS `$ROOT`,
-and append a fresh sha-pinned ledger line — the same
-`{ts,cmd,cwd,sha,exit,tail}` shape QA and verify-gate.sh write. Because §2
+So: for every command in `.quetrex/verify.json`'s `.verify[]`, decide from
+THIS `$ROOT`'s ledger whether it is already proven at `HEAD_SHA`, using the
+SAME skip-aware rule as Gate 2 and `reviewer.md` Step 3 (identical jq, so the
+readers of this ledger cannot disagree):
+- a `skipReason:"boundedQuick"` line carries no evidence and is ignored
+  entirely — it is not a run, and it must never erase a real pass that
+  precedes it at the same sha (verify-gate.sh's bounded quick chain appends
+  exactly such a line after QA's genuine green on every Stop);
+- a `skipReason:"requiredEnv"` line at HEAD is pass-equivalent unless the
+  most recent genuine (non-skipped) run of that command anywhere in the
+  ledger was red;
+- a genuine executed line at HEAD decides the command directly.
+A command proven green by that rule is **not run again**. Only a command that
+is unproven at HEAD — no meaningful line at `HEAD_SHA`, or a red one — do you
+run now, at the current HEAD, in THIS `$ROOT`, appending a fresh sha-pinned
+ledger line — the same `{ts,cmd,cwd,sha,exit,tail}` shape QA and
+verify-gate.sh write. Because §2
 added no commit, this HEAD is the same commit the review verdict is pinned
 to, so once every command has a green line here, the ledger and the verdict
 agree on one sha — which is precisely what GATE 3 and GATE 2 jointly require:

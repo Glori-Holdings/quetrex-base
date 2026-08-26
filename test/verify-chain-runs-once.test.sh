@@ -81,6 +81,18 @@ else
 fi
 
 # =============================================================================
+# (c2) Neither contract may still describe the NAIVE "most recent line" rule in
+# prose — review iteration 2 found git-workflow.md §2a's paragraph contradicting
+# the skip-aware code block ten lines below it (a boundedQuick skip after a green
+# made the prose say "run it", the code say "proven").
+for f in "$REVIEWER" "$GITWORKFLOW"; do
+  if grep -qiE 'most recent line (for that command|is missing)' "$f"; then
+    notok "$(basename "$f") still describes the naive most-recent-line rule in prose"
+  else
+    ok "$(basename "$f") has no naive most-recent-line prose"
+  fi
+done
+
 # (d) git-workflow.md's §2a must contain the phrase "NOT re-run" (case-insensitive).
 # =============================================================================
 if grep -qiE 'not re-run' "$GITWORKFLOW"; then
