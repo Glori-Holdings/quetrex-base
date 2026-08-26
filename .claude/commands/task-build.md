@@ -205,6 +205,8 @@ The verdict is computed, not remembered:
 #       (default 2 — one automatic recovery, then a human).
 #     - probe says `running` → REFUSE however old it is.
 #     - probe says `refused` → REFUSE, to a HUMAN, and never auto-refired.
+#     - probe says `gate_refused` → REFUSE, to a HUMAN, and never auto-refired
+#       (same non-recoverable shape as `refused` — see below for how it differs).
 #   `liveness` is the 5th argument precisely because `RemoteTrigger` is a TOOL,
 #   not a shell command: the probe cannot happen inside this function, so its
 #   result is passed in and the decision stays executable and testable.
@@ -214,9 +216,26 @@ The verdict is computed, not remembered:
 #   "did this run do anything", and a refusal reports success. So when a run has
 #   ENDED, check the two artifacts a completed build always leaves on origin:
 #       git ls-remote --heads origin '<prefix><TASK>' '<prefix><TASK>-gates-*'
-#   Ended + neither ref present + no PR  -> `refused`.
-#   Ended + refs present                 -> the build got somewhere; treat as
-#                                           dead/gone and recover normally.
+#   Ended + neither ref present + no PR  -> `refused` (the routine declined the
+#                                           prompt itself — QDM-5.1 shape).
+#   Ended + a gates branch IS present + no PR -> do NOT assume dead/gone yet.
+#                                           Run `qx_probe_gate_refusal` (below)
+#                                           first: the pipeline may have run to
+#                                           completion and git-workflow may have
+#                                           correctly REFUSED to open a PR (a red
+#                                           review verdict, an unbacked NSR, an
+#                                           open Critical…) — QDM-6 shape,
+#                                           measured 2026-08-26. That is `gate_refused`,
+#                                           not `dead`/`gone`: the run did not
+#                                           crash, so RECOVERABLE would just
+#                                           refire the same refusal and burn the
+#                                           attempt budget proving it. Only if
+#                                           `qx_probe_gate_refusal` finds no
+#                                           refusal recorded is this genuinely
+#                                           `dead`/`gone` — treat it as such.
+#   Ended + a unit branch is present (no gates branch) -> the build got
+#                                           somewhere; treat as dead/gone and
+#                                           recover normally.
 #   Confirm the reason with `RemoteTrigger action:"get_run_log"` before reporting
 #   it to the operator: the session states why, and that sentence is the whole
 #   value of this verdict.
@@ -276,6 +295,23 @@ qx_actionability() {           # qx_actionability <status> <single|epic> <full|b
             # again, and auto-retrying spends the attempt budget proving that. A refusal is
             # a defect in what we asked for, so it goes to a human with the run attached.
             echo "REFUSE — the cloud routine for $TASK_ID (${routine:-unknown}) ran and REFUSED: it ended without opening a PR or publishing a gates branch, having made no changes. This is not a crash and re-firing it unchanged will refuse again. Read the run at ${monitor:-the routine list} for the stated reason, fix the prompt or the plan, then /quetrex:task-rework $TASK_ID"; return 1 ;;
+          gate_refused)
+            # A run that STARTED, ran the FULL pipeline, and PUBLISHED its gate
+            # evidence — but git-workflow itself declined to open a PR (a red
+            # review verdict, an unbacked nativeSecurityReview, an open Critical…).
+            # MEASURED on QDM-6, 2026-08-26: HEAD c26bc72, qa PASS, review verdict
+            # AUTO_MERGE pinned to HEAD, security findings PASS — git-workflow
+            # still refused because nativeSecurityReview="errored" was read too
+            # strictly. The gates branch existed the entire time; nothing ever
+            # looked at it, so the card sat at in_progress indefinitely.
+            #
+            # Like `refused`, this is deliberately NOT `dead`: the container did
+            # not crash, the pipeline reasoned its way to a documented refusal,
+            # and re-firing the identical prompt refuses identically. Unlike
+            # `refused`, the caller (qx_probe_gate_refusal, below) has already
+            # transitioned the task to needs_human with the reason attached and
+            # left the gates branch in place — this verdict only has to say so.
+            echo "REFUSE — the cloud routine for $TASK_ID (${routine:-unknown}) ran the full pipeline and git-workflow correctly REFUSED to open a PR. Evidence is published on its gates branch; the task has been moved to needs_human with the reason attached. This is not a crash — re-firing it unchanged will refuse again. Read the reason, then /quetrex:task-rework $TASK_ID"; return 1 ;;
           dead|gone)
             if [ "$attempts" -ge "$maxatt" ] 2>/dev/null; then
               echo "REFUSE — the cloud routine for $TASK_ID (${routine:-unknown}) is not running and this task has already been dispatched $attempts time(s), which is its maxDispatchAttempts. Refusing a third fire at the same branch namespace: this needs a human. Read the run at ${monitor:-the routine list}, then either /quetrex:task-rework $TASK_ID or raise maxDispatchAttempts in $payload deliberately"; return 1
@@ -316,6 +352,68 @@ guard with the answer as its 5th argument —
 
 ```bash
 QX_LIVENESS=dead   # or running / gone — from the RemoteTrigger get response, never guessed
+QX_VERDICT="$(qx_actionability "$STATUS" "$KIND" "$MODE" "$PAYLOAD" "$QX_LIVENESS")"; QX_RC=$?
+echo "$QX_VERDICT"
+```
+
+**Before treating a published ref as ordinary `dead`/`gone`, check for a gate refusal.**
+`RemoteTrigger` cannot tell "the container crashed" apart from "the pipeline ran to
+completion and git-workflow correctly refused" — both leave a ref on origin and no PR. The
+routine itself is forbidden to write the board either way (git-workflow's own hard rules:
+"You do not touch the tracker/kanban"; cloud-build-routine.md: "Do NOT depend on cloud
+board-MCP") — reconciling it is this local half's job, the same way it already reconciles
+status from the PR/branch it observes on GitHub.
+
+```bash
+# ── quetrex:exec-block qx_probe_gate_refusal ──────────────────────────────────
+# Executable, and executed: test/git-workflow-gate-refusal.test.sh pushes a real gates
+# branch to a bare remote and drives this end to end, asserting the needs_human
+# transition, the preserved comment, and that an ordinary dead/gone gates branch (no
+# recorded refusal) is correctly left alone.
+#
+# QDM-6, measured 2026-08-26: HEAD c26bc72 published a complete gates branch — qa PASS,
+# review verdict AUTO_MERGE pinned to HEAD, security findings PASS — because git-workflow
+# refused ONLY on nativeSecurityReview="errored" with no independent artifact to back it.
+# The liveness probe saw "a ref is present" and would have called this dead/gone, spending
+# an automatic RECOVERABLE re-fire on a prompt that refuses identically every time, before
+# ever surfacing the actual reason to a human. This function reads that reason directly off
+# the published state.json instead of guessing from ref presence alone.
+qx_probe_gate_refusal() {   # qx_probe_gate_refusal <TASK_ID> <BRANCH_PREFIX>
+  local task="$1" prefix="$2" ref reason
+  ref="$(git ls-remote --heads origin "${prefix}${task}-gates-*" 2>/dev/null \
+         | awk '{print $2}' | sed 's#^refs/heads/##' | sort | tail -n1)"
+  [ -n "$ref" ] || { echo "NONE — no gates branch published for $task"; return 1; }
+  git fetch -q origin "$ref" 2>/dev/null || { echo "NONE — could not fetch $ref"; return 1; }
+  reason="$(git show "origin/$ref:.quetrex/state.json" 2>/dev/null | node -e '
+    let s=""; process.stdin.on("data", d => s += d);
+    process.stdin.on("end", () => {
+      try {
+        const o = JSON.parse(s);
+        if (o.git_workflow === "refused") process.stdout.write(o.git_workflow_reason || "no reason recorded");
+      } catch (e) { /* malformed or missing state.json: not a recorded refusal */ }
+    });
+  ' 2>/dev/null)"
+  [ -n "$reason" ] || { echo "NONE — $ref does not record a git_workflow refusal"; return 1; }
+  echo "GATE_REFUSED $ref: $reason"
+  return 0
+}
+# ── end quetrex:exec-block qx_probe_gate_refusal ──────────────────────────────
+
+QX_GATE_PROBE="$(qx_probe_gate_refusal "$TASK_ID" "$BRANCH_PREFIX")"
+if printf '%s' "$QX_GATE_PROBE" | grep -q '^GATE_REFUSED '; then
+  QX_GATE_REF="$(printf '%s' "$QX_GATE_PROBE" | sed -n 's/^GATE_REFUSED \([^:]*\):.*/\1/p')"
+  QX_GATE_REASON="$(printf '%s' "$QX_GATE_PROBE" | sed 's/^GATE_REFUSED [^:]*: //')"
+  # The transition a routine can never make itself. Do it once, here, and leave the
+  # evidence in place — /quetrex:task-rework reads the gates branch, so tearing it down
+  # here would destroy the one thing the human decision needs.
+  quetrex-api task-status "$TASK_ID" needs_human
+  quetrex-api task-comment "$TASK_ID" "Cloud build's git-workflow gate refused to open a PR: $QX_GATE_REASON
+
+Gate evidence preserved on $QX_GATE_REF — do not delete it; /quetrex:task-rework $TASK_ID reads it."
+  QX_LIVENESS=gate_refused
+else
+  QX_LIVENESS=dead   # or running / gone, from the RemoteTrigger get response as above
+fi
 QX_VERDICT="$(qx_actionability "$STATUS" "$KIND" "$MODE" "$PAYLOAD" "$QX_LIVENESS")"; QX_RC=$?
 echo "$QX_VERDICT"
 ```

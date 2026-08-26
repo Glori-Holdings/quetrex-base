@@ -115,15 +115,38 @@ esac
   echo "REFUSED (STALE VERDICT): verdict is for ${RV_SHA:0:12} but HEAD is ${HEAD_SHA:0:12}."
   echo "Commits landed after review. Re-run the review-gate at HEAD; do NOT re-point the verdict."; }        # -> refuse
 
-# The independent security pass must actually have run — same check the merge gate makes.
+# The independent security pass must have run EITHER natively OR via the
+# security-reviewer agent — same GATE 2b logic merge-gate.sh enforces
+# (plugins/quetrex-factory/scripts/merge-gate.sh's sec_artifact_state()).
+# `errored`/`not_run`/`not_available_in_env` is common and expected: SlashCommand
+# is frequently absent from the reviewer's runtime tool set, which makes the
+# native /security-review structurally unreachable through no fault of the
+# change (reviewer.md's independence_ok route 1 note). Requiring `clean`/`issues`
+# here unconditionally made every cloud build unshippable (QDM-6, measured
+# 2026-08-26: HEAD c26bc72, qa PASS, verdict AUTO_MERGE pinned to HEAD, security
+# findings PASS — refused anyway because nativeSecurityReview was "errored").
+# So a non-native value passes ONLY when the independent security-reviewer
+# artifact affirmatively proves THIS commit clean; otherwise it still refuses.
 NSR="$(jq -r '.inputs.nativeSecurityReview // empty' "$RV" 2>/dev/null)"
 case "$NSR" in
   clean|issues) : ;;
-  *) echo "REFUSED: verdict records nativeSecurityReview='${NSR:-<missing>}' — the independent security pass did not run to completion, so AUTO_MERGE rests on nothing. Re-run the review-gate." ;;   # -> refuse
+  *)
+    SEC_OK=0
+    if [ -f "$SEC" ]; then
+      SEC_FINDINGS="$(jq -c 'if type == "object" then (.findings // []) else . end' "$SEC" 2>/dev/null)"
+      SEC_SHA="$(jq -r 'if type == "object" then (.head_sha // .sha // empty) else empty end' "$SEC" 2>/dev/null)"
+      if [ -n "$SEC_FINDINGS" ] && [ "$SEC_FINDINGS" != "null" ] && [ -n "$SEC_SHA" ] && [ "$SEC_SHA" = "$HEAD_SHA" ]; then
+        SEC_CRIT="$(printf '%s' "$SEC_FINDINGS" | jq '[ .[] | select((.severity // "" | ascii_downcase) == "critical" and (.status // "open" | ascii_downcase) == "open") ] | length' 2>/dev/null)"
+        case "$SEC_CRIT" in ''|*[!0-9]*) SEC_CRIT=-1 ;; esac
+        [ "$SEC_CRIT" = "0" ] && SEC_OK=1
+      fi
+    fi
+    [ "$SEC_OK" = "1" ] || echo "REFUSED: verdict records nativeSecurityReview='${NSR:-<missing>}' and .quetrex/security-findings.json does not independently prove HEAD ($HEAD_SHA) clean — it must exist, parse, be pinned to this exact commit (.head_sha or .sha), and record 0 open Critical findings. Run the security-reviewer against HEAD, or re-run the review-gate."   # -> refuse
+    ;;
 esac
 ```
 
-Only when Gates 1–4 ALL pass do you proceed. State this explicitly in your report: "Artifact gate GREEN: no ESCALATION, ledger last-run all exit 0, 0 open Critical findings, review verdict AUTO_MERGE pinned to `<sha>`, nativeSecurityReview `<clean|issues>`."
+Only when Gates 1–4 ALL pass do you proceed. State this explicitly in your report: "Artifact gate GREEN: no ESCALATION, ledger last-run all exit 0, 0 open Critical findings, review verdict AUTO_MERGE pinned to `<sha>`, nativeSecurityReview `<clean|issues|errored+independent-findings-clean>`."
 
 ## 2. Confirm the tree is already committed — the normal path adds NO commit
 
@@ -261,7 +284,7 @@ gh pr create --base main --head "$BRANCH" \
 
 ## Gate evidence (read from .quetrex/, not asserted)
 - verify-ledger.jsonl — last chain run all exit 0, every command pinned to <sha>
-- review-verdict.json — AUTO_MERGE, sha <sha> == HEAD, nativeSecurityReview <clean|issues>
+- review-verdict.json — AUTO_MERGE, sha <sha> == HEAD, nativeSecurityReview <clean|issues|errored-with-independent-findings-clean>
 - qa-report.json — verdict PASS, sha <sha>, <N> declared coverage gap(s), 0 on a security surface
 - security-findings.json — 0 open Critical (or: not required per plan)
 - ESCALATION — absent
@@ -293,7 +316,7 @@ Then report to the orchestrator: `REFUSED — <exact failing gate and value>`. N
 
 - You NEVER merge, and never enable auto-merge — your terminus is an open PR, and the merge that follows is allowed by `merge-gate.sh` reading artifacts, not by you.
 - You decide from artifacts on disk, never from chat claims by the orchestrator or prior agents. Missing/malformed artifact = not passed.
-- A red verify ledger, an open Critical finding, a verdict that is not `AUTO_MERGE`, a verdict whose `.sha` is not HEAD, a `nativeSecurityReview` that is not `clean`/`issues`, or a present ESCALATION each individually forces REFUSED — no overrides, no exceptions, no combining "it's probably fine."
+- A red verify ledger, an open Critical finding, a verdict that is not `AUTO_MERGE`, a verdict whose `.sha` is not HEAD, a `nativeSecurityReview` that is not `clean`/`issues` AND lacks a `security-findings.json` independently pinned to HEAD with 0 open Critical, or a present ESCALATION each individually forces REFUSED — no overrides, no exceptions, no combining "it's probably fine."
 - **You never stage with `-A` or `.`, and you never commit `.quetrex/*`.** Explicit paths only. A blanket stage sweeps runtime control artifacts into history and moves HEAD past the reviewed commit — it breaks the merge, silently, at the last possible moment.
 - **You never edit `review-verdict.json`** — not its `.sha`, not anything. Only the review-gate writes a verdict, and only for a commit it read.
 - You never bypass a hook block (`--no-verify`, editing hooks, force-push to protected branches are all forbidden).
