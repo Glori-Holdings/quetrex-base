@@ -45,7 +45,7 @@ fi
 
 ### Gate 2 — verify ledger: the LAST run of the chain is all green
 
-The ledger is append-only JSONL: one object per command run `{ts, cmd, cwd, sha, exit, tail}` (`sha` is the commit the run was proven against — merge-gate.sh's GATE 3 requires it to equal HEAD; see §2a below, which re-proves and re-pins it after this stage's own commit moves HEAD). "Green" means the most recent contiguous run of the verify chain ended with every command at `exit == 0` and was not cut short by a non-zero exit. The simplest sound check: the last line must be `exit == 0`, AND no line after the last green chain start is non-zero. Enforce it concretely:
+The ledger is append-only JSONL: one object per command run `{ts, cmd, cwd, sha, exit, tail}` (`sha` is the commit the run was proven against — merge-gate.sh's GATE 3 requires it to equal HEAD; see §2a below, which checks the sha-pin and fills only what is missing). "Green" means the most recent contiguous run of the verify chain ended with every command at `exit == 0` and was not cut short by a non-zero exit. The simplest sound check: the last line must be `exit == 0`, AND no line after the last green chain start is non-zero. Enforce it concretely:
 
 ```bash
 LEDGER="$ROOT/.quetrex/verify-ledger.jsonl"
@@ -70,8 +70,8 @@ LEDGER="$ROOT/.quetrex/verify-ledger.jsonl"
 # green), and a genuine failure at an old sha plus an unrelated requiredEnv skip at HEAD
 # (the skip does not clear a real failure elsewhere in this command's history). This gate
 # is the artifact GATE — it must never be looser than the hook that re-gates the same
-# ledger at the merge boundary, even though §2a below re-executes the chain fresh
-# immediately afterward as defense in depth.
+# ledger at the merge boundary, even though §2a below checks the sha-pin and runs any
+# command still missing a green line at HEAD immediately afterward as defense in depth.
 #
 # So: for EVERY command in .quetrex/verify.json's declared chain (never a boundedQuick
 # placeholder — it carries no evidence either way and must never launder a real failure OR
@@ -249,63 +249,78 @@ Write the reason to `state.json` (§4), report `REFUSED — uncommitted work out
 
 If a hook (secret-scan, deny-guard, enforce-branch) ever blocks an operation here, DO NOT try to circumvent it (no `--no-verify`, no editing hook files). Report the block verbatim to the orchestrator and stop — a blocked operation is a real signal, not an obstacle.
 
-## 2a. Full-chain sha-pin re-verification — REQUIRED, in THIS worktree's `$ROOT`
+## 2a. Ledger sha-pin check — the chain is NOT re-run here
 
 merge-gate.sh's GATE 3 will only allow the merge if EVERY command in the
 current verify chain has its MOST RECENT ledger line both `exit == 0` AND
-`sha == HEAD`. Even on a genuinely clean pipeline that can be untrue here, and
-it must be closed rather than assumed away:
+`sha == HEAD`. QA already proved the chain green exactly once, sha-pinned —
+that is the whole point of the ledger — so this step does not re-run the
+chain. It checks whether the ledger still says so at THIS HEAD, and fills in
+**only the specific commands** that lack a green line here. Even on a
+genuinely clean pipeline that check can still fail (see below), so it must be
+performed, not assumed away:
 
 - In the mandated worktree flow, the main-agent Stop hook resolves `ROOT` to
   `CLAUDE_PROJECT_DIR` — the MAIN checkout, not this worktree — so its
   sha-pinned ledger writes land in the MAIN directory's `.quetrex/`, never in
-  THIS worktree's `.quetrex/verify-ledger.jsonl`. Do NOT rely on that hook to
-  have pinned anything here.
+  THIS worktree's `.quetrex/verify-ledger.jsonl`. Do NOT assume this
+  worktree's ledger already carries QA's lines just because the hook ran.
 - **`merge-gate.sh` resolves its `ROOT` the same way** (`merge-gate.sh:143-152`:
   `CLAUDE_PROJECT_DIR` first, session `cwd` only as a fallback). So which
   `.quetrex/` the gate reads at merge time depends on where the merge command
   is run from and whether `CLAUDE_PROJECT_DIR` is set — and `.quetrex/` is
   git-ignored, so it does **not** travel with the branch. Do not assume one or
-  the other. **Pin the ledger in both** when the worktree and the main checkout
-  are different directories and both are at this same HEAD: run the chain once
-  in `$ROOT`, then append the identical sha-pinned lines to the main checkout's
-  ledger only if `git -C "$MAIN" rev-parse HEAD` equals `$HEAD_SHA`. If the main
-  checkout is at a different commit (the usual case — it is on `main`), do
-  nothing there: writing lines pinned to a sha that is not that tree's HEAD
-  would be manufacturing evidence, and the gate is right to deny.
+  the other. **Reconcile the ledger in both** when the worktree and the main
+  checkout are different directories and both are at this same HEAD: after
+  determining below which commands are already green at HEAD in THIS `$ROOT`,
+  **copy (append) those exact sha-pinned lines** into the main checkout's
+  ledger too — do not re-run the chain there — but only if
+  `git -C "$MAIN" rev-parse HEAD` equals `$HEAD_SHA`. If the main checkout is
+  at a different commit (the usual case — it is on `main`), do nothing there:
+  appending lines pinned to a sha that is not that tree's HEAD would be
+  manufacturing evidence, and the gate is right to deny.
   Resolve the main checkout with
   `MAIN="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)"`,
   then take its parent directory.
-- The ledger is the one artifact a later stage may legitimately re-pin, because
-  re-pinning it means **re-running the commands and observing exit 0 again** —
-  the evidence is regenerated, not relabelled. That is the opposite of editing
-  a verdict's sha, which would relabel a judgment nobody re-made. Re-prove the
-  ledger; never re-point the verdict.
+- The ledger is the one artifact a later stage may legitimately extend, because
+  a new line means **a command actually ran and its exit code was observed** —
+  the evidence is real, not relabelled. That is the opposite of editing a
+  verdict's sha, which would relabel a judgment nobody re-made. Extend the
+  ledger only for what is genuinely missing; never re-point the verdict.
 
-So: re-run the FULL `.verify` chain from `.quetrex/verify.json` once, now, at
-the current HEAD, in THIS `$ROOT`, and append a fresh sha-pinned ledger line
-for every command — the same `{ts,cmd,cwd,sha,exit,tail}` shape QA and
-verify-gate.sh write. Because §2 added no commit, this HEAD is the same commit
-the review verdict is pinned to, so a green run here makes the ledger and the
-verdict agree on one sha — which is precisely what GATE 3 and GATE 2 jointly
-require:
+So: for every command in `.quetrex/verify.json`'s `.verify[]`, check THIS
+`$ROOT`'s ledger for its most recent line for that command; if it is
+`exit == 0` at `sha == HEAD_SHA`, it is already proven — **do not run it
+again**. Only for a command whose most recent line is missing, red, or pinned
+to a different sha do you run it now, at the current HEAD, in THIS `$ROOT`,
+and append a fresh sha-pinned ledger line — the same
+`{ts,cmd,cwd,sha,exit,tail}` shape QA and verify-gate.sh write. Because §2
+added no commit, this HEAD is the same commit the review verdict is pinned
+to, so once every command has a green line here, the ledger and the verdict
+agree on one sha — which is precisely what GATE 3 and GATE 2 jointly require:
 
 ```bash
 HEAD_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+LEDGER="$ROOT/.quetrex/verify-ledger.jsonl"
 CHAIN_RED=0
 
 while IFS= read -r cmd; do
   [ -n "$cmd" ] || continue
+  GREEN_AT_HEAD=$(jq -sc --arg cmd "$cmd" --arg head "$HEAD_SHA" \
+    '[.[] | select(.cmd == $cmd)] | last | if . == null then 0 elif (.exit == 0 and .sha == $head) then 1 else 0 end' \
+    "$LEDGER" 2>/dev/null)
+  [ "$GREEN_AT_HEAD" = "1" ] && continue   # already proven at this exact sha — NOT re-run
+
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   out=$(cd "$ROOT" && eval "$cmd" 2>&1); code=$?
   tail="$(printf '%s\n' "$out" | tail -20)"
   jq -cn --arg ts "$ts" --arg cmd "$cmd" --arg cwd "$ROOT" \
      --arg sha "$HEAD_SHA" --argjson exit "$code" --arg tail "$tail" \
      '{ts:$ts,cmd:$cmd,cwd:$cwd,sha:$sha,exit:$exit,tail:$tail}' \
-     >> "$ROOT/.quetrex/verify-ledger.jsonl"
+     >> "$LEDGER"
   if [ "$code" -ne 0 ]; then
     CHAIN_RED=1
-    echo "REFUSED: full-chain re-verification at HEAD ${HEAD_SHA:0:12} failed — \`$cmd\` exited $code."
+    echo "REFUSED: ledger fill-in at HEAD ${HEAD_SHA:0:12} failed — \`$cmd\` exited $code."
     printf '%s\n' "$tail"
   fi
 done < <(jq -r '.verify[]' "$ROOT/.quetrex/verify.json")
@@ -313,12 +328,14 @@ done < <(jq -r '.verify[]' "$ROOT/.quetrex/verify.json")
 [ "$CHAIN_RED" -eq 0 ] || { echo "Do not push. Do not open a PR."; }   # -> write state.json (§4), report REFUSED, STOP.
 ```
 
-If ANY command in this re-run exits non-zero, treat it exactly like any other
-gate failure: write the reason to `state.json` (§4), report REFUSED, and STOP
-— do not push, do not open a PR. QA proving green earlier does not excuse
-proving it again at the actual HEAD being shipped; a claim of green you did not
-just re-prove at THIS sha is exactly the stale-ledger hole this step exists to
-close. Only when this re-verification is entirely green do you proceed to §3.
+If ANY command run above exits non-zero, treat it exactly like any other gate
+failure: write the reason to `state.json` (§4), report REFUSED, and STOP — do
+not push, do not open a PR. The sha-pinned ledger is what makes this trust
+sound without re-running the whole chain: a line pinned to any other sha is
+stale and counts as absent, so a command already green at THIS exact HEAD is
+NEVER re-run, and a command that is red or missing at HEAD is proven for
+real, once, right here. Only when every command has a green line at HEAD —
+whether it was already there or you just filled it in — do you proceed to §3.
 
 Finally, re-assert that HEAD did not move while you were doing this (a hook or
 a stray command could have committed). If it did, the verdict is stale — refuse
