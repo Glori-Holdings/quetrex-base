@@ -16,7 +16,7 @@ itself. If a check below reveals a platform/plugin-install problem (a plugin not
 enabled, the CLI unhealthy), say so and **point the user at `/doctor`** rather
 than re-implementing those checks here.
 
-What THIS command owns are the nine Quetrex-app checks native `/doctor` knows
+What THIS command owns are the ten Quetrex-app checks native `/doctor` knows
 nothing about. Run them all, then print one line per check:
 
 - `✓ <check> — <what's good>`
@@ -51,17 +51,17 @@ answers:
 ```bash
 if ! quetrex-api kanban-url >/dev/null 2>&1; then
   echo "✗ Board reachable — not logged in on this machine."
-  echo "    Fix: run /quetrex:login"
+  echo "    Fix: run /quetrex-setup:login"
 elif [ -f "$BIND" ] && CODE="$(quetrex-api json-get "$BIND" projectCode 2>/dev/null)" && [ -n "$CODE" ]; then
   if quetrex-api GET "/api/projects/$CODE" >/dev/null 2>&1; then
     echo "✓ Board reachable — authenticated, project $CODE answers."
   else
     echo "✗ Board reachable — logged in, but project $CODE did not answer (access or network)."
-    echo "    Fix: confirm you're a member of $CODE, or re-run /quetrex:login if the token expired."
+    echo "    Fix: confirm you're a member of $CODE, or re-run /quetrex-setup:login if the token expired."
   fi
 else
   echo "✗ Board reachable — this repo is not linked to a Quetrex project."
-  echo "    Fix: run /quetrex:init"
+  echo "    Fix: run /quetrex-setup:init"
 fi
 ```
 
@@ -112,13 +112,13 @@ AUTOUP="$(node -e '
 
 if [ -n "$PINS" ]; then
   echo "✗ Engine — this repo PINS a version ($PINS). While a pin is present the quetrex command layer does not load here, so no /quetrex:* command exists."
-  echo "    Fix: run /quetrex:init — arming rewrites any pin to true."
+  echo "    Fix: run /quetrex-setup:init — arming rewrites any pin to true."
 elif [ "$ENABLED" != "true" ]; then
   echo "✗ Engine — quetrex and/or quetrex-factory are not enabled in this repo's committed settings."
-  echo "    Fix: run /quetrex:init"
+  echo "    Fix: run /quetrex-setup:init"
 elif [ "$AUTOUP" != "true" ]; then
   echo "✗ Engine — extraKnownMarketplaces.quetrex.autoUpdate is not true at the repo level ($SETTINGS) or the global level ($HOME_SETTINGS), so this repo will never see a published fix."
-  echo "    Fix: run /quetrex:init"
+  echo "    Fix: run /quetrex-setup:init"
 elif [ -n "$RUNNING" ]; then
   echo "✓ Engine — enabled, unpinned, auto-updating (running Quetrex v$RUNNING)."
 else
@@ -210,7 +210,7 @@ if [ "${#LEGACY[@]}" -eq 0 ]; then
   echo "✓ No leftover legacy artifacts — global ~/.claude is clean of npm-era Quetrex files."
 else
   echo "✗ Leftover legacy artifacts — ${#LEGACY[@]} npm-era item(s) in ~/.claude: ${LEGACY[*]}"
-  echo "    Fix: run /quetrex:init — it offers the guarded, reversible one-time legacy cleanup (quarantine, never hard-delete)."
+  echo "    Fix: run /quetrex-setup:init — it offers the guarded, reversible one-time legacy cleanup (quarantine, never hard-delete)."
 fi
 ```
 
@@ -224,7 +224,7 @@ has no such route and the URL answers with the dash's Next.js 404 HTML page — 
 Claude Code opened the repo with an MCP server that could never handshake. The
 operator sees it as *"the plugins cannot connect to the dash"*, and it is
 committed, so it hits every teammate and every cloud routine. Detect the stale
-registration; never remove it here (`/quetrex:init` owns the repair):
+registration; never remove it here (`/quetrex-setup:init` owns the repair):
 
 ```bash
 DEAD_MCP="$(node -e '
@@ -238,7 +238,7 @@ if [ -z "$DEAD_MCP" ]; then
   echo "✓ No dead MCP broker — .mcp.json registers no server at the never-built /api/mcp endpoint."
 else
   echo "✗ Dead MCP broker — .mcp.json points quetrex-kanban at $DEAD_MCP, an endpoint that does not exist; MCP fails to connect on every session in this repo."
-  echo "    Fix: run /quetrex:init — arming now removes that registration and commits the repair for the whole team."
+  echo "    Fix: run /quetrex-setup:init — arming now removes that registration and commits the repair for the whole team."
 fi
 ```
 
@@ -270,7 +270,7 @@ elif [ -f "$REPO_ROOT/.claude/CLAUDE.md" ] && node -e '
   echo "✓ Verify chain configured — no .quetrex/verify.json, but the project CLAUDE.md has a ## Verification section."
 else
   echo "✗ Verify chain configured — no .quetrex/verify.json and no ## Verification section."
-  echo "    Fix: run /quetrex:init — it detects and writes your verify chain."
+  echo "    Fix: run /quetrex-setup:init — it detects and writes your verify chain."
 fi
 
 # requiredEnv coverage — report-only, NEVER blocks (doctor's exit code stays
@@ -287,7 +287,7 @@ if { [ -f "$REPO_ROOT/.env.example" ] || [ -f "$REPO_ROOT/.env.sample" ]; } \
    && command -v quetrex-env-derive >/dev/null 2>&1; then
   MISSING_REQUIRED_ENV="$(quetrex-env-derive missing "$REPO_ROOT" 2>/dev/null)"
   if [ -n "$MISSING_REQUIRED_ENV" ]; then
-    echo "✗ requiredEnv not declared — this repo's .quetrex/verify.json predates the derived per-command requiredEnv skip; run /quetrex:init to derive and merge it into your committed verify.json (union-only, never narrows an existing chain)."
+    echo "✗ requiredEnv not declared — this repo's .quetrex/verify.json predates the derived per-command requiredEnv skip; run /quetrex-setup:init to derive and merge it into your committed verify.json (union-only, never narrows an existing chain)."
   fi
 fi
 ```
@@ -332,7 +332,7 @@ if [ -f "$BIND" ] && CODE="$(quetrex-api json-get "$BIND" projectCode 2>/dev/nul
   fi
 else
   echo "✗ Vault wired — no project binding, so no vault to resolve."
-  echo "    Fix: run /quetrex:init to link this repo, then set keys at dash.quetrex.com/keys."
+  echo "    Fix: run /quetrex-setup:init to link this repo, then set keys at dash.quetrex.com/keys."
 fi
 ```
 
@@ -343,7 +343,7 @@ fi
 A plugin **cannot** ship a `permissions.allow` block — Claude Code honours only
 two keys from a plugin's `settings.json` — so the pipeline's terminal grants
 have to live in the customer's own committed `.claude/settings.json`, written
-there by `/quetrex:init` step 4e. When they are missing, nothing fails early:
+there by `/quetrex-setup:init` step 4e. When they are missing, nothing fails early:
 the architect plans, the developers build, QA and the reviewer pass, and then
 the very last step tries to `git push` / `gh pr create`, hits a permission
 prompt, and **hangs with the work already done**. In an unattended cloud build
@@ -368,7 +368,7 @@ if [ -z "$MISSING_PERMS" ]; then
   echo "✓ Pipeline permissions granted — this repo's .claude/settings.json allows the terminal git push and gh pr calls."
 else
   echo "✗ Pipeline permissions granted — .claude/settings.json is missing $MISSING_PERMS, so the pipeline runs the whole build and then HANGS at the final push/PR step waiting for a human to approve it."
-  echo "    Fix: run /quetrex:init — its step 4e unions the FULL pipeline grant set (12 entries) into your own committed .claude/settings.json, not only the ones named above: the git worktree/checkout/merge/diff/rev-parse/add/commit calls, Bash(jq:*), Bash(mkdir:*), and Edit(/**) — the file-write grant, anchored at your project root. It only ever adds, never removes or narrows an existing entry, and never touches permissions.deny/ask. See init.md step 4e for the exact list; every entry lands in your own settings, so it is visible and revocable by you."
+  echo "    Fix: run /quetrex-setup:init — its step 4e unions the FULL pipeline grant set (12 entries) into your own committed .claude/settings.json, not only the ones named above: the git worktree/checkout/merge/diff/rev-parse/add/commit calls, Bash(jq:*), Bash(mkdir:*), and Edit(/**) — the file-write grant, anchored at your project root. It only ever adds, never removes or narrows an existing entry, and never touches permissions.deny/ask. See init.md step 4e for the exact list; every entry lands in your own settings, so it is visible and revocable by you."
 fi
 ```
 
@@ -420,7 +420,7 @@ say_state() {  # say_state <repo-relative-path> <state>
 
 if ! git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "✗ Arming committed — $REPO_ROOT is not a git repository, so there is nothing for a teammate or a cloud routine to clone."
-  echo "    Fix: git init and commit this repo, then run /quetrex:init."
+  echo "    Fix: git init and commit this repo, then run /quetrex-setup:init."
 else
   say_state ".quetrex/project.json" "$(tracked_state .quetrex/project.json)"
 
@@ -479,9 +479,50 @@ whole point is that locally-fine and clone-armed are different questions.
 
 ---
 
+## Check 10 — user-scope plugin hygiene
+
+`quetrex-setup` (login/init/update, three commands + a one-line unarmed
+offer) is meant to be enabled ONCE, at **user** scope, machine-wide — it is
+what lets an unarmed repo be armed at all. `quetrex` and `quetrex-factory`
+(the pipeline itself) are meant to be enabled per repo, at **project** scope,
+by `/quetrex-setup:init` — never at user scope, where they would leak the
+full 11-command pipeline and its gate hooks into every repo on the machine,
+armed or not, which is exactly the surface this split exists to shrink.
+
+```bash
+HYGIENE="$(node -e '
+  const fs = require("fs");
+  let o = {};
+  try { o = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
+  const e = o.enabledPlugins || {};
+  const truthy = (v) => v === true || Array.isArray(v) || typeof v === "string";
+  const OTHER_RE = /^quetrex(-[a-z0-9]+)?@quetrex$/;
+  const others = Object.keys(e).filter((k) => OTHER_RE.test(k) && k !== "quetrex-setup@quetrex" && truthy(e[k]));
+  const setupOn = e["quetrex-setup@quetrex"] === true;
+  if (others.length) console.log("BAD_OTHER:" + others.join(","));
+  if (!setupOn) console.log("BAD_SETUP");
+' "$HOME_SETTINGS")"
+
+if [ -n "$HYGIENE" ]; then
+  if printf '%s' "$HYGIENE" | grep -q '^BAD_OTHER:'; then
+    NAMES="$(printf '%s' "$HYGIENE" | sed -n 's/^BAD_OTHER://p')"
+    echo "✗ User-scope plugin hygiene — $NAMES enabled at USER scope (~/.claude/settings.json). This leaks the full pipeline command layer and its gate hooks into every repo on the machine, armed or not."
+    echo "    Fix: remove $NAMES from ~/.claude/settings.json's enabledPlugins; let /quetrex-setup:init enable it per repo, at project scope."
+  fi
+  if printf '%s' "$HYGIENE" | grep -q '^BAD_SETUP$'; then
+    echo "✗ User-scope plugin hygiene — quetrex-setup is not enabled at USER scope, so an unarmed repo has no path to /quetrex-setup:login, :init or :update."
+    echo "    Fix: enable quetrex-setup@quetrex: true in ~/.claude/settings.json's enabledPlugins (once per machine)."
+  fi
+else
+  echo "✓ User-scope plugin hygiene — quetrex-setup is enabled at user scope; no pipeline plugin leaks in at user scope."
+fi
+```
+
+---
+
 ## Final summary
 
-After the nine checks, print a one-line roll-up: *"Quetrex health: N/9 green."*
+After the ten checks, print a one-line roll-up: *"Quetrex health: N/10 green."*
 If any check surfaced a **platform or plugin-install** symptom (a plugin not
 enabled, the CLI itself unhealthy, marketplace unreachable), add one line
 directing the user to native **`/doctor`** for that layer — this command
