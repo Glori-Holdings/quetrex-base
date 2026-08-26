@@ -51,11 +51,18 @@ verify-gate.sh
 format.sh
 auto-format.sh
 right-size-router.sh'
+# quetrex-update-check.sh and quetrex-bound-version-guard.sh MOVED to
+# quetrex-setup with the setup-plugin split (GLOBAL.json) — they are no
+# longer registered by `quetrex`'s own hooks.json. See SETUP_OWNED below.
 QUETREX_OWNED='session-state.sh
-quetrex-update-check.sh
 edit-gate.sh
-quetrex-bound-version-guard.sh
 protected-files-guard.sh'
+# quetrex-setup is enabled MACHINE-WIDE (every repo, armed or not), so its
+# three SessionStart hooks are just as much a duplication hazard here as
+# quetrex's or quetrex-factory's.
+SETUP_OWNED='unarmed-offer.sh
+quetrex-update-check.sh
+quetrex-bound-version-guard.sh'
 
 # WHICH PLUGINS ARE ACTUALLY ENABLED HERE. This is the whole point, and getting it
 # wrong inverts the test into a hazard. A script is only a DUPLICATE if the plugin
@@ -85,7 +92,8 @@ fi
 OWNED=""
 if [ "$RC_F" -eq 0 ]; then OWNED="$FACTORY_OWNED"; FACTORY_ON=yes; else FACTORY_ON=no; fi
 if enabled "quetrex@quetrex"; then OWNED="$(printf '%s\n%s' "$OWNED" "$QUETREX_OWNED" | grep -v '^$')"; QUETREX_ON=yes; else QUETREX_ON=no; fi
-echo "# enabled here: quetrex-factory=$FACTORY_ON quetrex=$QUETREX_ON"
+if enabled "quetrex-setup@quetrex"; then OWNED="$(printf '%s\n%s' "$OWNED" "$SETUP_OWNED" | grep -v '^$')"; SETUP_ON=yes; else SETUP_ON=no; fi
+echo "# enabled here: quetrex-factory=$FACTORY_ON quetrex=$QUETREX_ON quetrex-setup=$SETUP_ON"
 
 NO_PLUGIN_ENABLED=0
 [ -z "$OWNED" ] && NO_PLUGIN_ENABLED=1
@@ -123,17 +131,13 @@ else
 fi
 
 # --- ASSERTION 2: the owned list still matches the real plugins --------------
-# Recompute from whatever plugin copies are reachable. Absence is reported, never
-# silent — same convention as hook-parity.test.sh's ASSERTION 3.
-FOUND=""
-for cand in "$HOME"/.claude/plugins/marketplaces/quetrex/plugins/quetrex-factory/hooks/hooks.json \
-            "$HOME"/.claude/plugins/cache/quetrex/quetrex-factory/*/hooks/hooks.json \
-            "$ROOT/../quetrex-plugins/plugins/quetrex-factory/hooks/hooks.json"; do
-  [ -f "$cand" ] && FOUND="$cand"
-done
-
-if [ -n "$FOUND" ]; then
-  LIVE="$(node -e '
+# Recompute from whatever plugin copies are reachable, and from THIS repo's
+# own shipped source (quetrex-base ships the quetrex-setup source directly,
+# so that copy is always reachable, unlike factory's which may live only in a
+# machine's plugin cache). Absence is reported, never silent — same
+# convention as hook-parity.test.sh's ASSERTION 3.
+live_hook_basenames() {  # live_hook_basenames <hooks.json path> -> newline-separated basenames
+  node -e '
     const fs=require("fs");
     const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
     const s=new Set();
@@ -144,24 +148,48 @@ if [ -n "$FOUND" ]; then
           if (m) s.add(m[1]);
         }
     process.stdout.write([...s].sort().join("\n"));
-  ' "$FOUND" 2>/dev/null)"
-  # Compare against the FULL committed catalogue, never the enabled-filtered $OWNED.
-  # Drift in what factory ships is a fact about factory, not about whether this
-  # particular repo happens to enable it — checking the filtered list would report
-  # phantom drift in every repo with the plugin switched off.
-  MISSING=""
+  ' "$1" 2>/dev/null
+}
+
+# Compare against the FULL committed catalogue, never the enabled-filtered
+# $OWNED. Drift in what a plugin ships is a fact about that plugin, not about
+# whether this particular repo happens to enable it — checking the filtered
+# list would report phantom drift in every repo with the plugin switched off.
+ALL_OWNED_CATALOGUES="$(printf '%s\n%s\n%s' "$FACTORY_OWNED" "$QUETREX_OWNED" "$SETUP_OWNED")"
+
+assert_no_drift() {  # assert_no_drift <label> <live-basenames>
+  local label="$1" live="$2" missing=""
   while IFS= read -r s; do
     [ -n "$s" ] || continue
-    printf '%s\n%s' "$FACTORY_OWNED" "$QUETREX_OWNED" | grep -qxF "$s" || MISSING="$MISSING $s"
-  done <<< "$LIVE"
-  if [ -z "$MISSING" ]; then
-    ok "ASSERTION 2: every script the live quetrex-factory registers is in the committed owned-list (checked against $(basename "$(dirname "$(dirname "$FOUND")")"))"
+    printf '%s\n' "$ALL_OWNED_CATALOGUES" | grep -qxF "$s" || missing="$missing $s"
+  done <<< "$live"
+  if [ -z "$missing" ]; then
+    ok "ASSERTION 2: every script $label registers is in the union of the committed owned-lists"
   else
-    notok "ASSERTION 2: the live quetrex-factory registers script(s) missing from this file's committed owned-list:$MISSING — the list has drifted and ASSERTION 1 is now blind to them"
+    notok "ASSERTION 2: $label registers script(s) missing from the committed owned-lists:$missing — the list has drifted and ASSERTION 1 is now blind to them"
   fi
+}
+
+FOUND=""
+for cand in "$HOME"/.claude/plugins/marketplaces/quetrex/plugins/quetrex-factory/hooks/hooks.json \
+            "$HOME"/.claude/plugins/cache/quetrex/quetrex-factory/*/hooks/hooks.json \
+            "$ROOT/../quetrex-plugins/plugins/quetrex-factory/hooks/hooks.json"; do
+  [ -f "$cand" ] && FOUND="$cand"
+done
+if [ -n "$FOUND" ]; then
+  assert_no_drift "the live quetrex-factory (checked against $(basename "$(dirname "$(dirname "$FOUND")")"))" "$(live_hook_basenames "$FOUND")"
 else
-  echo "# no factory hooks.json reachable (fresh clone / CI runner) — ASSERTION 2 could not run"
-  ok "ASSERTION 2: skipped, no factory copy reachable (reported, not silent; ASSERTION 1 still runs from committed state)"
+  echo "# no factory hooks.json reachable (fresh clone / CI runner) — ASSERTION 2 (factory) could not run"
+  ok "ASSERTION 2: skipped for factory, no copy reachable (reported, not silent; ASSERTION 1 still runs from committed state)"
+fi
+
+# quetrex-setup's own hooks.json is this repo's committed source, so it is
+# ALWAYS reachable here — no fresh-clone caveat applies.
+SETUP_HOOKS_JSON="$ROOT/plugins/quetrex-setup/hooks/hooks.json"
+if [ -f "$SETUP_HOOKS_JSON" ]; then
+  assert_no_drift "quetrex-setup's own hooks/hooks.json" "$(live_hook_basenames "$SETUP_HOOKS_JSON")"
+else
+  notok "ASSERTION 2: plugins/quetrex-setup/hooks/hooks.json not found at $SETUP_HOOKS_JSON — cannot verify SETUP_OWNED against the real manifest"
 fi
 
 # --- ASSERTION 3: the installer must not be able to re-create the duplication -
@@ -187,6 +215,55 @@ if [ -f "$INSTALLER" ]; then
   fi
 else
   ok "ASSERTION 3: skipped, no project-gates installer present (reported, not silent)"
+fi
+
+# --- FAIL-FIRST (mechanical, AC28): a deliberate re-registration of
+# unarmed-offer.sh (a SETUP_OWNED script) in .claude/settings.json must make
+# ASSERTION 1's duplicate-detection logic go red — proving SETUP_OWNED is
+# actually wired into the check, not just declared and never consulted.
+# Never mutates the real committed settings.json: builds a throwaway copy.
+# A trailing suffix after the X-run in a mktemp template is a GNU-only
+# feature; BSD/macOS mktemp leaves it un-substituted (see-once portability
+# bug: `mktemp foo.XXXXXX.json` on macOS literally returns that fixed
+# non-random path). Make a private dir instead and name the file inside it —
+# the pattern every other fixture in this repo already uses.
+FIXTURE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qx-nodupe-fixture.XXXXXX")"
+FIXTURE_SETTINGS="$FIXTURE_DIR/settings.json"
+trap 'rm -rf "$FIXTURE_DIR"' EXIT
+node -e '
+  const fs=require("fs");
+  const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+  j.hooks = j.hooks || {};
+  j.hooks.SessionStart = j.hooks.SessionStart || [];
+  j.hooks.SessionStart.push({
+    matcher: "startup|resume|compact",
+    hooks: [{ type: "command", command: "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/unarmed-offer.sh\"" }],
+  });
+  fs.writeFileSync(process.argv[2], JSON.stringify(j));
+' "$SETTINGS" "$FIXTURE_SETTINGS"
+
+FIXTURE_CMDS="$(node -e '
+  const fs=require("fs");
+  const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+  const out=[];
+  for (const [ev,groups] of Object.entries((j&&j.hooks)||{}))
+    for (const g of groups||[])
+      for (const h of (g&&g.hooks)||[])
+        if (h&&typeof h.command==="string") out.push(ev+"\t"+h.command);
+  process.stdout.write(out.join("\n"));
+' "$FIXTURE_SETTINGS")"
+
+FIXTURE_DUPES=0
+while IFS= read -r script; do
+  [ -n "$script" ] || continue
+  hits="$(printf '%s' "$FIXTURE_CMDS" | grep -E -- "[/\"']${script%.sh}\.sh" || true)"
+  [ -n "$hits" ] && FIXTURE_DUPES=$((FIXTURE_DUPES + 1))
+done <<< "$(printf '%s\n%s\n%s' "$FACTORY_OWNED" "$QUETREX_OWNED" "$SETUP_OWNED")"
+
+if [ "$FIXTURE_DUPES" -ge 1 ]; then
+  ok "FAIL-FIRST (AC28): planting a duplicate unarmed-offer.sh registration in a settings.json fixture makes the duplicate-detection logic report >= 1 hit — SETUP_OWNED is actually consulted, not decorative"
+else
+  notok "FAIL-FIRST (AC28): planting a duplicate unarmed-offer.sh registration was NOT detected — SETUP_OWNED is declared but never actually consulted by the detection logic"
 fi
 
 echo

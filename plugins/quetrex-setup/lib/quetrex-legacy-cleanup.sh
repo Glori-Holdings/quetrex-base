@@ -4,7 +4,7 @@
 #
 # INVOKED BY NAME as `quetrex-cleanup <subcommand>` (bin/quetrex-cleanup is a
 # thin launcher that resolves and execs this file). It is invoked from
-# /quetrex:init after two agreeing AI agents (proposer + adversarial auditor)
+# /quetrex-setup:init after two agreeing AI agents (proposer + adversarial auditor)
 # and a per-item human KEEP/REMOVE gate. This script is the mechanism, NOT the
 # judgment: it enumerates and classifies (read-only), and quarantines only the
 # EXACT items it is explicitly told to — it never decides on its own.
@@ -51,10 +51,27 @@ set -uo pipefail
 
 HOME_CLAUDE="$HOME/.claude"
 
-# Plugin root: this file lives at <root>/.claude/lib/, so root is two dirs up.
-# ${CLAUDE_PLUGIN_ROOT} is preferred when the caller (a hook) exported it.
+# Plugin root, for baseline_for()'s PRISTINE-vs-MODIFIED comparison below.
+# This file lives at <plugin-root>/lib/ (quetrex-setup's own flat layout), so
+# its OWN plugin root is one dir up — but the actual current-shipped .claude/
+# baseline tree that HOOK_BASENAMES compares against (session-state.sh and
+# friends) lives in a SIBLING plugin, `quetrex`, not in quetrex-setup itself
+# (quetrex-setup ships no .claude/ tree of its own). ${CLAUDE_PLUGIN_ROOT} is
+# preferred when the caller (a hook) exported it — untrue in practice for this
+# launcher (it runs from /quetrex-setup:init's slash-command bash, where that
+# variable is UNSET, exactly like every other bin/ tool in this plugin) — so
+# the fallback resolves the DEV-CHECKOUT root three dirs up
+# (lib -> quetrex-setup -> plugins -> repo root), which is where `quetrex`'s
+# .claude/ tree actually lives when this script runs from inside this
+# repository. NOTE (pre-existing, not introduced by the setup-plugin split):
+# in a real installed-plugin scenario (a target repo's own plugin cache),
+# neither resolution reaches a sibling `quetrex` checkout at all — a
+# git-subdir install pulls in only plugins/quetrex-setup/ — so most
+# HOOK_BASENAMES already have no baseline to compare against and fall through
+# to LEGACY (human decides), never a wrong PRISTINE. That gap predates this
+# move and is unrelated to it.
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$SELF_DIR/../.." && pwd)}"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$SELF_DIR/../../.." && pwd)}"
 
 # Plugin-local state ONLY for the once-per-machine marker (never ~/.claude,
 # never the repo).

@@ -28,8 +28,8 @@ If `TASK_ID` is empty, print usage and stop:
 ## 2. Resolve context via the `quetrex-api` tool
 
 ```bash
-QX_KANBAN_URL="$(quetrex-api kanban-url)"     || exit 1   # prints "Run /quetrex:login" on failure
-QX_PROJECT_CODE="$(quetrex-api project-code)" || exit 1   # prints "Run /quetrex:init" on failure
+QX_KANBAN_URL="$(quetrex-api kanban-url)"     || exit 1   # prints "Run /quetrex-setup:login" on failure
+QX_PROJECT_CODE="$(quetrex-api project-code)" || exit 1   # prints "Run /quetrex-setup:init" on failure
 echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL"
 ```
 

@@ -7,7 +7,7 @@
 # terminal stage and then STALLED, paging the operator on his phone to approve
 # `gh pr create` — a step that is supposed to be fully automatic.
 # Glori-Holdings/quetrex-demo's `.claude/settings.json` had no `permissions` key
-# at all, even though `/quetrex:init` step 4e computes exactly that union and
+# at all, even though `/quetrex-setup:init` step 4e computes exactly that union and
 # init.md's own prose (`## 4e`) explains why the pipeline hangs without it.
 #
 # THE MECHANISM. init.md step 6 staged every arming artifact with
@@ -44,7 +44,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INIT_MD="$REPO_ROOT/.claude/commands/init.md"
+INIT_MD="$REPO_ROOT/plugins/quetrex-setup/commands/init.md"
 
 if [ ! -f "$INIT_MD" ]; then
   echo "NOT OK - init.md not found at $INIT_MD"
@@ -149,8 +149,8 @@ if [ -n "$STAGE_BLOCK" ]; then
   else
     fail "AC4-BLOCK-1: the staging block exited 0 on a repo where the binding could not be staged (index held: [$(printf '%s' "$STAGED_B1" | tr '\n' ' ')]). init would report success and the repo would have NO gates. Output: [$OUT_B1]"
   fi
-  if printf '%s' "$OUT_B1" | grep -qF '.quetrex/project.json' && printf '%s' "$OUT_B1" | grep -qF '/quetrex:init'; then
-    pass "AC4-BLOCK-1: the failure names the artifact (.quetrex/project.json) and the remediation (/quetrex:init)"
+  if printf '%s' "$OUT_B1" | grep -qF '.quetrex/project.json' && printf '%s' "$OUT_B1" | grep -qF '/quetrex-setup:init'; then
+    pass "AC4-BLOCK-1: the failure names the artifact (.quetrex/project.json) and the remediation (/quetrex-setup:init)"
   else
     fail "AC4-BLOCK-1: the failure output does not name both the artifact and the remediation — a loud failure nobody can act on is barely better than a silent one. Output: [$OUT_B1]"
   fi

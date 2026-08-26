@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# test/quetrex-arm.test.sh — behavioural test for bin/quetrex-arm, the
-# deterministic cloud-arming tool called by .claude/commands/init.md (steps
-# 4h/4i) in place of the buried, non-executing inline node prose it replaces.
+# test/quetrex-arm.test.sh — behavioural test for
+# plugins/quetrex-setup/bin/quetrex-arm, the deterministic cloud-arming tool
+# called by plugins/quetrex-setup/commands/init.md (steps 4h/4i) in place of
+# the buried, non-executing inline node prose it replaces.
 #
 # Run: bash test/quetrex-arm.test.sh
 #
 # Proves:
-#   1. Fresh repo: writes the enabledPlugins pin (concrete factory version,
-#      never `true`) and extraKnownMarketplaces.quetrex in the EXACT required
-#      shape — and writes NO .mcp.json at all.
+#   1. Fresh repo: writes enabledPlugins for quetrex, quetrex-factory AND
+#      quetrex-setup as the literal boolean `true` (NEVER a version pin) and
+#      extraKnownMarketplaces.quetrex in the EXACT required shape — and
+#      writes NO .mcp.json at all.
 #   2. Idempotent: a second run on the same repo makes NO changes (byte-
 #      identical settings.json, still no .mcp.json) and exits 0.
 #   3. Non-destructive: a pre-existing unrelated enabledPlugins entry and a
@@ -26,10 +28,10 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ARM="$REPO_ROOT/bin/quetrex-arm"
+ARM="$REPO_ROOT/plugins/quetrex-setup/bin/quetrex-arm"
 
 if [ ! -f "$ARM" ]; then
-  echo "FAIL: bin/quetrex-arm not found at $ARM"
+  echo "FAIL: quetrex-arm not found at $ARM"
   exit 1
 fi
 if ! command -v node >/dev/null 2>&1; then
@@ -77,18 +79,18 @@ json_get() {
 }
 
 # ---------------------------------------------------------------------------
-# 0. bin/quetrex-arm itself: executable, valid bash syntax.
+# 0. quetrex-arm itself: executable, valid bash syntax.
 # ---------------------------------------------------------------------------
 if [ -x "$ARM" ]; then
-  pass "bin/quetrex-arm is executable"
+  pass "quetrex-arm is executable"
 else
-  fail "bin/quetrex-arm must be executable (chmod +x)"
+  fail "quetrex-arm must be executable (chmod +x)"
 fi
 
 if bash -n "$ARM"; then
-  pass "bin/quetrex-arm passes bash -n syntax check"
+  pass "quetrex-arm passes bash -n syntax check"
 else
-  fail "bin/quetrex-arm has a bash syntax error"
+  fail "quetrex-arm has a bash syntax error"
 fi
 
 # ---------------------------------------------------------------------------
@@ -139,7 +141,7 @@ FPIN="$(json_get "$SETTINGS1" 'enabledPlugins.quetrex-factory@quetrex')"
 # `claude plugin list` across four checkouts: pin absent -> enabled; true ->
 # enabled; ["1.2.1"] (the exact installed version) -> FAILED TO LOAD; ["1.1.0"] ->
 # FAILED TO LOAD. Booleans only now; the engine auto-updates and the version is
-# surfaced by bin/quetrex-version in the status bar.
+# surfaced by quetrex-version in the status bar.
 if [ "$FPIN" = "true" ]; then
   pass "enabledPlugins['quetrex-factory@quetrex'] is exactly true (never a version pin)"
 else
@@ -150,6 +152,16 @@ case "$FPIN" in
   '['*|'"'*) fail "enabledPlugins['quetrex-factory@quetrex'] must not be an array or a string (got: $FPIN)" ;;
   *)         pass "enabledPlugins['quetrex-factory@quetrex'] is neither an array nor a version string" ;;
 esac
+
+# AC15/AC17: quetrex-setup is enabled at PROJECT scope too — a cloud routine
+# and a teammate's fresh clone are provisioned from the repo's own
+# .claude/settings.json and both need quetrex-api/quetrex-env-derive on PATH.
+SPIN="$(json_get "$SETTINGS1" 'enabledPlugins.quetrex-setup@quetrex')"
+if [ "$SPIN" = "true" ]; then
+  pass "enabledPlugins['quetrex-setup@quetrex'] === true"
+else
+  fail "enabledPlugins['quetrex-setup@quetrex'] should be true (got: $SPIN)"
+fi
 
 MKT="$(json_get "$SETTINGS1" 'extraKnownMarketplaces.quetrex.source')"
 EXPECT_MKT='{"source":"github","repo":"Glori-Holdings/quetrex-plugins"}'
@@ -273,7 +285,7 @@ fi
 #    carry a committed quetrex-kanban registration pointing at
 #    <kanban>/api/mcp, a route the kanban never had; Claude Code fails to
 #    connect it on every single session, in every clone, for every teammate.
-#    Re-running /quetrex:init (hence quetrex-arm) is the remediation path, so
+#    Re-running /quetrex-setup:init (hence quetrex-arm) is the remediation path, so
 #    the removal is asserted four ways: the whole-file delete, the
 #    preserve-other-servers case, the preserve-other-top-level-keys case, and
 #    the leave-a-real-url-alone case.
@@ -305,7 +317,7 @@ else
 fi
 
 if printf '%s' "$OUT4" | grep -qi 'removed the dead quetrex-kanban broker'; then
-  pass "removal is reported out loud, so /quetrex:init can tell the operator"
+  pass "removal is reported out loud, so /quetrex-setup:init can tell the operator"
 else
   fail "removal must be reported in the output (got: $OUT4)"
 fi
@@ -423,16 +435,186 @@ fi
 
 QPIN3="$(json_get "$REPO3/.claude/settings.json" 'enabledPlugins.quetrex@quetrex')"
 FPIN3="$(json_get "$REPO3/.claude/settings.json" 'enabledPlugins.quetrex-factory@quetrex')"
-if [ "$QPIN3" = "true" ] && [ "$FPIN3" = "true" ]; then
-  pass "arming offline still enables BOTH plugins with true"
+SPIN3="$(json_get "$REPO3/.claude/settings.json" 'enabledPlugins.quetrex-setup@quetrex')"
+if [ "$QPIN3" = "true" ] && [ "$FPIN3" = "true" ] && [ "$SPIN3" = "true" ]; then
+  pass "arming offline still enables ALL THREE plugins with true"
 else
-  fail "arming offline must enable both plugins with true (quetrex=$QPIN3, factory=$FPIN3)"
+  fail "arming offline must enable all three plugins with true (quetrex=$QPIN3, factory=$FPIN3, setup=$SPIN3)"
 fi
 
 if printf '%s' "$OFFLINE_OUT" | grep -qi 'unreachable\|deferred'; then
   fail "arming must no longer mention an unreachable marketplace or a deferred pin (got: $OFFLINE_OUT)"
 else
   pass "arming offline reports no marketplace/pin caveat — there is nothing to defer"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. SEC-GLOBAL-4 FAIL-FIRST — an unparseable settings.json must be REFUSED,
+#    never silently replaced (which drops permissions.deny and every other
+#    key it holds). Both assertions drive the exact pre-fix baseline
+#    (git show 562e025:...) to prove the bug was real, then drive the shipped
+#    tool to prove it is fixed — never inferred from reading the diff.
+# ---------------------------------------------------------------------------
+SEC4_FULL="562e0256b6a90ddff60142a3b677577c401b40e2"
+if ! git -C "$REPO_ROOT" cat-file -e 562e025^{commit} 2>/dev/null; then
+  git -C "$REPO_ROOT" fetch --quiet --depth=1 origin "$SEC4_FULL" 2>/dev/null || true
+fi
+if ! git -C "$REPO_ROOT" cat-file -e 562e025^{commit} 2>/dev/null; then
+  fail "SEC-GLOBAL-4 FAIL-FIRST: baseline commit 562e025 is not reachable in this checkout even after a depth-1 fetch of $SEC4_FULL — cannot prove the fix, refusing to report a pass having compared against nothing"
+else
+  BASELINE_ARM="$WORK/baseline-quetrex-arm"
+  git -C "$REPO_ROOT" show 562e025:plugins/quetrex-setup/bin/quetrex-arm > "$BASELINE_ARM"
+
+  REPO9_BASE="$WORK/repo9-base"
+  mkdir -p "$REPO9_BASE/.claude"
+  printf '{ // a comment, then broken\n "permissions": {"deny": ["Bash(curl:*)"]}' > "$REPO9_BASE/.claude/settings.json"
+  BEFORE9_BASE="$(cat "$REPO9_BASE/.claude/settings.json")"
+  OUT9_BASE="$(QX_ARM_MARKET_URL="file://$MARKET" bash "$BASELINE_ARM" "$REPO9_BASE" "$KANBAN_URL" 2>&1)"; RC9_BASE=$?
+  AFTER9_BASE="$(cat "$REPO9_BASE/.claude/settings.json")"
+  if [ "$RC9_BASE" -eq 0 ] && [ "$AFTER9_BASE" != "$BEFORE9_BASE" ] && ! printf '%s' "$AFTER9_BASE" | grep -q 'permissions'; then
+    pass "SEC-GLOBAL-4 FAIL-FIRST: the pre-fix baseline (562e025) DOES silently replace an unparseable settings.json, dropping permissions.deny — the bug is real, not hypothetical"
+  else
+    fail "SEC-GLOBAL-4 FAIL-FIRST: expected the pre-fix baseline to replace the file and drop permissions.deny (it demonstrably did when this test was authored); got rc=$RC9_BASE, before=[$BEFORE9_BASE], after=[$AFTER9_BASE] — the fail-first proof is broken, not the fix"
+  fi
+
+  REPO9="$WORK/repo9"
+  mkdir -p "$REPO9/.claude"
+  printf '{ // a comment, then broken\n "permissions": {"deny": ["Bash(curl:*)"]}' > "$REPO9/.claude/settings.json"
+  BEFORE9="$(cat "$REPO9/.claude/settings.json")"
+  OUT9="$(run_arm "$REPO9" 2>&1)"; RC9=$?
+  AFTER9="$(cat "$REPO9/.claude/settings.json")"
+  if [ "$RC9" -ne 0 ] && [ "$AFTER9" = "$BEFORE9" ]; then
+    pass "SEC-GLOBAL-4: an unparseable settings.json is refused (non-zero exit) and left byte-identical — permissions.deny survives"
+  else
+    fail "SEC-GLOBAL-4: an unparseable settings.json must be refused and left byte-identical (got rc=$RC9, before=[$BEFORE9], after=[$AFTER9], output: $OUT9)"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 8. SEC-GLOBAL-3 FAIL-FIRST — a non-object enabledPlugins must fail loudly,
+#    never silently succeed with the whole safety floor left disabled. Both
+#    assertions drive the exact pre-fix baseline (git show 562e025:...) to
+#    prove the bug was real, then drive the shipped tool to prove it is
+#    fixed — never inferred from reading the diff.
+# ---------------------------------------------------------------------------
+SEC3_FULL="562e0256b6a90ddff60142a3b677577c401b40e2"
+if ! git -C "$REPO_ROOT" cat-file -e 562e025^{commit} 2>/dev/null; then
+  git -C "$REPO_ROOT" fetch --quiet --depth=1 origin "$SEC3_FULL" 2>/dev/null || true
+fi
+if ! git -C "$REPO_ROOT" cat-file -e 562e025^{commit} 2>/dev/null; then
+  fail "SEC-GLOBAL-3 FAIL-FIRST: baseline commit 562e025 is not reachable in this checkout even after a depth-1 fetch of $SEC3_FULL — cannot prove the fix, refusing to report a pass having compared against nothing"
+else
+  BASELINE_ARM3="$WORK/baseline-quetrex-arm-3"
+  git -C "$REPO_ROOT" show 562e025:plugins/quetrex-setup/bin/quetrex-arm > "$BASELINE_ARM3"
+
+  REPO8_BASE="$WORK/repo8-base"
+  mkdir -p "$REPO8_BASE/.claude"
+  printf '{"enabledPlugins":"pwned"}' > "$REPO8_BASE/.claude/settings.json"
+  OUT8_BASE="$(QX_ARM_MARKET_URL="file://$MARKET" bash "$BASELINE_ARM3" "$REPO8_BASE" "$KANBAN_URL" 2>&1)"; RC8_BASE=$?
+  PIN8_BASE="$(json_get "$REPO8_BASE/.claude/settings.json" 'enabledPlugins')"
+  if [ "$RC8_BASE" -eq 0 ] && [ "$PIN8_BASE" = '"pwned"' ]; then
+    pass "SEC-GLOBAL-3 FAIL-FIRST: the pre-fix baseline (562e025) DOES exit 0 while leaving a string enabledPlugins untouched — every plugin silently stays disabled; the bug is real, not hypothetical"
+  else
+    fail "SEC-GLOBAL-3 FAIL-FIRST: expected the pre-fix baseline to exit 0 with enabledPlugins still \"pwned\" (it demonstrably did when this test was authored); got rc=$RC8_BASE, enabledPlugins=$PIN8_BASE — the fail-first proof is broken, not the fix"
+  fi
+
+  REPO8="$WORK/repo8"
+  mkdir -p "$REPO8/.claude"
+  printf '{"enabledPlugins":"pwned"}' > "$REPO8/.claude/settings.json"
+  OUT8="$(run_arm "$REPO8" 2>&1)"; RC8=$?
+  PIN8="$(json_get "$REPO8/.claude/settings.json" 'enabledPlugins')"
+  if [ "$RC8" -ne 0 ] && [ "$PIN8" = '"pwned"' ] && printf '%s' "$OUT8" | grep -qi 'enabledPlugins'; then
+    pass "SEC-GLOBAL-3: a string enabledPlugins now fails loudly (non-zero exit) instead of silently disabling every plugin"
+  else
+    fail "SEC-GLOBAL-3: a string enabledPlugins must fail loudly, never silently succeed (got rc=$RC8, enabledPlugins=$PIN8, output: $OUT8)"
+  fi
+
+  # An ARRAY enabledPlugins must be rejected the same way.
+  REPO8C="$WORK/repo8c"
+  mkdir -p "$REPO8C/.claude"
+  printf '{"enabledPlugins":["pwned"]}' > "$REPO8C/.claude/settings.json"
+  OUT8C="$(run_arm "$REPO8C" 2>&1)"; RC8C=$?
+  if [ "$RC8C" -ne 0 ]; then
+    pass "SEC-GLOBAL-3: an array enabledPlugins also fails loudly"
+  else
+    fail "SEC-GLOBAL-3: an array enabledPlugins must also fail loudly (got rc=$RC8C, output: $OUT8C)"
+  fi
+
+  # A null enabledPlugins (the ONE shape `|| {}` always handled correctly)
+  # must keep working exactly as before.
+  REPO8D="$WORK/repo8d"
+  mkdir -p "$REPO8D/.claude"
+  printf '{"enabledPlugins":null}' > "$REPO8D/.claude/settings.json"
+  OUT8D="$(run_arm "$REPO8D" 2>&1)"; RC8D=$?
+  QPIN8D="$(json_get "$REPO8D/.claude/settings.json" 'enabledPlugins.quetrex@quetrex')"
+if [ "$RC8D" -eq 0 ] && [ "$QPIN8D" = "true" ]; then
+    pass "SEC-GLOBAL-3: a null enabledPlugins still arms normally (the pre-existing || {} case is unaffected)"
+  else
+    fail "SEC-GLOBAL-3: a null enabledPlugins must still arm normally (got rc=$RC8D, qpin=$QPIN8D, output: $OUT8D)"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 9. REV-GLOBAL-1 FAIL-FIRST — quetrex-arm must not abort under bash 3.2
+#    (the shebang-resolved /bin/bash on a stock Mac) when NO stack pack is
+#    detected. `local extra=("${@:3}")` / `local extra_names=("$@")` are
+#    EMPTY arrays in that case, and "${extra[@]}" / "${extra_names[@]}"
+#    under `set -u` is an "unbound variable" error on bash 3.2 (bash 4+
+#    treats an empty array expansion as fine — which is exactly why the
+#    default `bash test/quetrex-arm.test.sh` invocation, using whatever
+#    `bash` resolves to in PATH, could not see this). Both assertions drive
+#    an EXPLICIT /bin/bash, first against the exact pre-fix baseline
+#    (git show 562e025:...) to prove the abort was real, then against the
+#    shipped tool to prove it now writes settings.json cleanly.
+# ---------------------------------------------------------------------------
+if [ ! -x /bin/bash ]; then
+  echo "SKIP: REV-GLOBAL-1 — /bin/bash not present on this machine, cannot drive the exact interpreter the finding depends on"
+else
+  SEC_REV1_FULL="562e0256b6a90ddff60142a3b677577c401b40e2"
+  if ! git -C "$REPO_ROOT" cat-file -e 562e025^{commit} 2>/dev/null; then
+    git -C "$REPO_ROOT" fetch --quiet --depth=1 origin "$SEC_REV1_FULL" 2>/dev/null || true
+  fi
+  if ! git -C "$REPO_ROOT" cat-file -e 562e025^{commit} 2>/dev/null; then
+    fail "REV-GLOBAL-1 FAIL-FIRST: baseline commit 562e025 is not reachable in this checkout even after a depth-1 fetch of $SEC_REV1_FULL — cannot prove the fix, refusing to report a pass having compared against nothing"
+  else
+    BASELINE_ARM_REV1="$WORK/baseline-quetrex-arm-rev1"
+    git -C "$REPO_ROOT" show 562e025:plugins/quetrex-setup/bin/quetrex-arm > "$BASELINE_ARM_REV1"
+
+    REPO10_BASE="$WORK/repo10-base"
+    mkdir -p "$REPO10_BASE"
+    # No stack-pack arg at all — the no-pack path (any repo that is not
+    # Next.js/Python/Rust/Swift), reproduced with the exact call shape
+    # init.md uses when step 4h detects nothing.
+    OUT10_BASE="$(/bin/bash "$BASELINE_ARM_REV1" "$REPO10_BASE" "$KANBAN_URL" 2>&1)"; RC10_BASE=$?
+    if [ "$RC10_BASE" -ne 0 ] && printf '%s' "$OUT10_BASE" | grep -qi 'unbound variable' && [ ! -f "$REPO10_BASE/.claude/settings.json" ]; then
+      pass "REV-GLOBAL-1 FAIL-FIRST: the pre-fix baseline (562e025) DOES abort with 'unbound variable' under /bin/bash on a no-pack fixture, and settings.json is never written — the bug is real, not hypothetical"
+    else
+      fail "REV-GLOBAL-1 FAIL-FIRST: expected the pre-fix baseline to abort with 'unbound variable' under /bin/bash and write no settings.json (it demonstrably did when this test was authored); got rc=$RC10_BASE, settings.json exists=$([ -f "$REPO10_BASE/.claude/settings.json" ] && echo yes || echo no), output: $OUT10_BASE — the fail-first proof is broken, not the fix"
+    fi
+
+    REPO10="$WORK/repo10"
+    mkdir -p "$REPO10"
+    OUT10="$(/bin/bash "$ARM" "$REPO10" "$KANBAN_URL" 2>&1)"; RC10=$?
+    QPIN10="$(json_get "$REPO10/.claude/settings.json" 'enabledPlugins.quetrex@quetrex')"
+    if [ "$RC10" -eq 0 ] && [ "$QPIN10" = "true" ] && ! printf '%s' "$OUT10" | grep -qi 'unbound variable'; then
+      pass "REV-GLOBAL-1: the shipped tool arms cleanly under /bin/bash on a no-pack fixture — no 'unbound variable', enabledPlugins written"
+    else
+      fail "REV-GLOBAL-1: the shipped tool must arm cleanly under /bin/bash with no stack pack (got rc=$RC10, qpin=$QPIN10, output: $OUT10)"
+    fi
+
+    # The WITH-a-stack-pack path must also stay clean under bash 3.2 (this
+    # path already worked pre-fix per the review's control case; guard
+    # against a regression from the fix itself).
+    REPO10C="$WORK/repo10c"
+    mkdir -p "$REPO10C"
+    OUT10C="$(/bin/bash "$ARM" "$REPO10C" "$KANBAN_URL" quetrex-nextjs 2>&1)"; RC10C=$?
+    NPIN10C="$(json_get "$REPO10C/.claude/settings.json" 'enabledPlugins.quetrex-nextjs@quetrex')"
+    if [ "$RC10C" -eq 0 ] && [ "$NPIN10C" = "true" ]; then
+      pass "REV-GLOBAL-1: the shipped tool still arms cleanly under /bin/bash WITH a stack pack (no regression from the empty-array guard)"
+    else
+      fail "REV-GLOBAL-1: the shipped tool must still arm cleanly under /bin/bash with a stack pack (got rc=$RC10C, npin=$NPIN10C, output: $OUT10C)"
+    fi
+  fi
 fi
 
 echo

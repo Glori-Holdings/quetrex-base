@@ -22,9 +22,10 @@ ENFORCE_BRANCH="$REPO_ROOT/plugins/quetrex-factory/scripts/enforce-branch.sh"
 MERGE_GATE="$REPO_ROOT/plugins/quetrex-factory/scripts/merge-gate.sh"
 VERIFY_GATE="$REPO_ROOT/plugins/quetrex-factory/scripts/verify-gate.sh"
 SESSION_STATE="$REPO_ROOT/.claude/hooks/session-state.sh"
+UNARMED_OFFER="$REPO_ROOT/plugins/quetrex-setup/scripts/unarmed-offer.sh"
 EDIT_GATE="$REPO_ROOT/.claude/hooks/edit-gate.sh"
 
-for h in "$DENY_GUARD" "$SECRET_SCAN" "$ENFORCE_BRANCH" "$MERGE_GATE" "$VERIFY_GATE" "$SESSION_STATE" "$EDIT_GATE"; do
+for h in "$DENY_GUARD" "$SECRET_SCAN" "$ENFORCE_BRANCH" "$MERGE_GATE" "$VERIFY_GATE" "$SESSION_STATE" "$UNARMED_OFFER" "$EDIT_GATE"; do
   if [ ! -f "$h" ]; then
     echo "FAIL: hook not found at $h"
     exit 1
@@ -140,15 +141,27 @@ for shape in Write Edit; do
   fi
 done
 
-SESSION_OFFER_LINE="Quetrex: this repo is not armed (no .quetrex/project.json). Offer the user /quetrex:init; if they say yes, run it."
+# The offer moved to quetrex-setup's unarmed-offer.sh (enabled machine-wide);
+# session-state.sh (shipped in `quetrex`, loaded only once armed) now owns
+# ONLY the armed half and must be silent here.
+SESSION_OFFER_LINE="Quetrex: this repo is not armed (no .quetrex/project.json). Offer the user /quetrex-setup:init; if they say yes, run it."
 for src in startup resume compact; do
-  OUT=$(printf '{}' | CLAUDE_PROJECT_DIR="$FIXTURE" bash "$SESSION_STATE" "$src" 2>/tmp/qa-uai.e.$$); CODE=$?
+  OUT=$(printf '{}' | CLAUDE_PROJECT_DIR="$FIXTURE" bash "$UNARMED_OFFER" "$src" 2>/tmp/qa-uai.e.$$); CODE=$?
   ERR=$(cat /tmp/qa-uai.e.$$); rm -f /tmp/qa-uai.e.$$
   LINE_COUNT=$(printf '%s' "$OUT" | grep -c '^' || true)
   if [ "$CODE" -eq 0 ] && [ "$OUT" = "$SESSION_OFFER_LINE" ] && [ "$LINE_COUNT" -eq 1 ]; then
-    ok "unarmed: session-state ($src) prints exactly the one-line offer"
+    ok "unarmed: unarmed-offer.sh ($src) prints exactly the one-line offer"
   else
-    notok "unarmed: session-state ($src) expected exactly 1 line == offer text, got code=$CODE lines=$LINE_COUNT out=[$OUT] err=[$ERR]"
+    notok "unarmed: unarmed-offer.sh ($src) expected exactly 1 line == offer text, got code=$CODE lines=$LINE_COUNT out=[$OUT] err=[$ERR]"
+  fi
+
+  OUT_SS=$(printf '{}' | CLAUDE_PROJECT_DIR="$FIXTURE" bash "$SESSION_STATE" "$src" 2>/tmp/qa-uai.e.$$); CODE_SS=$?
+  ERR_SS=$(cat /tmp/qa-uai.e.$$); rm -f /tmp/qa-uai.e.$$
+  BYTES_SS=$(printf '%s' "$OUT_SS" | wc -c | tr -d ' ')
+  if [ "$CODE_SS" -eq 0 ] && [ "$BYTES_SS" -eq 0 ]; then
+    ok "unarmed: session-state ($src) is silent (0 bytes) — the offer moved to unarmed-offer.sh"
+  else
+    notok "unarmed: session-state ($src) expected 0 bytes, got code=$CODE_SS bytes=$BYTES_SS out=[$OUT_SS] err=[$ERR_SS]"
   fi
 done
 

@@ -1,5 +1,5 @@
 ---
-description: Log in to the Quetrex kanban via browser device-flow and store a per-user API token at ~/.quetrex/auth.json. Run once per machine before /quetrex:init. Usage: /quetrex:login [kanbanUrl]
+description: Log in to the Quetrex kanban via browser device-flow and store a per-user API token at ~/.quetrex/auth.json. Run once per machine before /quetrex-setup:init. Usage: /quetrex-setup:login [kanbanUrl]
 argument-hint: "[kanbanUrl — defaults to https://dash.quetrex.com]"
 ---
 
@@ -52,7 +52,7 @@ is safe to hold in a shell var — but do **not** print it; only show `USER_CODE
 # NEVER `read ... < <(...)` here. `read` returns NON-ZERO when the final line
 # carries no trailing newline, so a `|| { fatal }` guard fires on SUCCESS — the
 # values are in the variables and the command aborts anyway. That defect shipped
-# in this command and in /quetrex:update, and it made both fail 100% of the time:
+# in this command and in /quetrex-setup:update, and it made both fail 100% of the time:
 # a new teammate could not even log in. Capture, check, then split.
 DEVICE_FIELDS="$(node -e '
   let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
@@ -137,14 +137,14 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   case "$STATUS" in
     ok)      break ;;
     pending) sleep "$INTERVAL" ;;
-    expired) echo "Login code expired — run /quetrex:login again." >&2; exit 1 ;;
+    expired) echo "Login code expired — run /quetrex-setup:login again." >&2; exit 1 ;;
     denied)  echo "Login was denied in the browser." >&2; exit 1 ;;
-    *)       echo "Login failed — run /quetrex:login again." >&2; exit 1 ;;
+    *)       echo "Login failed — run /quetrex-setup:login again." >&2; exit 1 ;;
   esac
 done
 
 if [ "$STATUS" != "ok" ]; then
-  echo "Login timed out after $MINUTES minutes — run /quetrex:login again." >&2
+  echo "Login timed out after $MINUTES minutes — run /quetrex-setup:login again." >&2
   exit 1
 fi
 
@@ -164,7 +164,7 @@ email.
 
 ```bash
 # Confirm auth loaded (suppress the tool's own message so only the login-specific one shows).
-quetrex-api kanban-url >/dev/null 2>&1 || { echo "Login saved, but auth could not be loaded — run /quetrex:login again." >&2; exit 1; }
+quetrex-api kanban-url >/dev/null 2>&1 || { echo "Login saved, but auth could not be loaded — run /quetrex-setup:login again." >&2; exit 1; }
 
 ME="$(quetrex-api GET /api/users/me)" || exit 1   # the CALLER'S OWN record (bound to this token), not a list
 EMAIL="$(node -e '

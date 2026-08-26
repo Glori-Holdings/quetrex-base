@@ -150,15 +150,15 @@
 <p class="sub">Two commands. One is per machine, one is per repository.</p>
 
 <h3>2.1 &nbsp;Once per machine</h3>
-<pre><code>/quetrex:login</code></pre>
+<pre><code>/quetrex-setup:login</code></pre>
 <p>Opens a browser device flow against the Quetrex board and writes a per-user API token to <code>~/.quetrex/auth.json</code> with mode <code>600</code>. The token is never printed. Run it once; every other command assumes it.</p>
 
 <h3>2.2 &nbsp;Once per repository</h3>
-<pre><code>/quetrex:init</code></pre>
+<pre><code>/quetrex-setup:init</code></pre>
 <p>Links this repo to a board project (writing <code>.quetrex/project.json</code>, which pins the project code and its branch prefix) and then arms the repo: it enables the engine, records the marketplace, unions in the permissions the pipeline needs, and makes sure a verify chain is declared. It is non-destructive and idempotent — re-running it on an already-armed repo is the supported way to repair one.</p>
 
 <h3>2.3 &nbsp;What arming writes, and why every character matters</h3>
-<p><code>/quetrex:init</code> writes this into the repo&rsquo;s checked-in <code>.claude/settings.json</code>. You should not hand-write it, but you should be able to recognise a broken one:</p>
+<p><code>/quetrex-setup:init</code> writes this into the repo&rsquo;s checked-in <code>.claude/settings.json</code>. You should not hand-write it, but you should be able to recognise a broken one:</p>
 
 <pre><code>{
   "extraKnownMarketplaces": {
@@ -169,13 +169,15 @@
   },
   "enabledPlugins": {
     "quetrex@quetrex": true,
-    "quetrex-factory@quetrex": true
+    "quetrex-factory@quetrex": true,
+    "quetrex-setup@quetrex": true
   }
 }</code></pre>
 
 <ul>
-  <li><code>"quetrex@quetrex": true</code> is the command layer. Without it you get no <code>/quetrex:*</code> commands at all — no login, no init, no build. It is the plugin to check first when the commands are simply not there.</li>
+  <li><code>"quetrex@quetrex": true</code> is the command layer. Without it you get no <code>/quetrex:*</code> commands at all — no build, no deploy, no doctor. It is the plugin to check first when the commands are simply not there.</li>
   <li><code>"quetrex-factory@quetrex": true</code> is the build engine: the specialist agents, the pipeline definition, and the hooks.</li>
+  <li><code>"quetrex-setup@quetrex": true</code> is enabled here TOO, at project scope, alongside its machine-wide enablement — a cloud routine and a teammate's fresh clone are provisioned from this repo's own settings.json, and both need the tools quetrex-setup ships (<code>quetrex-api</code>, <code>quetrex-env-derive</code>) on PATH.</li>
   <li><code>"autoUpdate": true</code> on the marketplace entry is required, not decoration. A third-party marketplace defaults to auto-update <em>off</em>, which freezes the catalog: a fix published today would never reach anyone on the team.</li>
 </ul>
 
@@ -186,15 +188,15 @@
 
 <h3>2.4 &nbsp;The marketplace</h3>
 <p><strong>The marketplace is public.</strong> <code>Glori-Holdings/quetrex-plugins</code> and the engine repo behind it are public on purpose: a fresh cloud routine has no credentials of yours, and it has to be able to install the engine unauthenticated before it can do anything else. Nothing secret lives there — it carries plugin definitions, agent prompts, and hook scripts.</p>
-<p>The same marketplace also carries optional per-stack packs (<code>quetrex-nextjs</code>, <code>quetrex-python</code>, <code>quetrex-rust</code>, <code>quetrex-swift</code>). They are optional, and <code>/quetrex:init</code> does not enable them.</p>
+<p>The same marketplace also carries optional per-stack packs (<code>quetrex-nextjs</code>, <code>quetrex-python</code>, <code>quetrex-rust</code>, <code>quetrex-swift</code>). They are optional, and <code>/quetrex-setup:init</code> does not enable them.</p>
 
 <h3>2.5 &nbsp;Checking your work</h3>
 <pre><code>/quetrex:doctor</code></pre>
-<p>Health-checks the Quetrex layer of the current repo: board reachable, engine enabled and auto-updating and never pinned, no stale legacy artifacts, verify chain configured, deploy target set. It reports in the checkmark-and-fix style of the native <code>/doctor</code> and tells you the command that fixes each finding. It is triage — it is not how a feature gets armed. Arming is <code>/quetrex:login</code> and <code>/quetrex:init</code>.</p>
+<p>Health-checks the Quetrex layer of the current repo: board reachable, engine enabled and auto-updating and never pinned, no stale legacy artifacts, verify chain configured, deploy target set. It reports in the checkmark-and-fix style of the native <code>/doctor</code> and tells you the command that fixes each finding. It is triage — it is not how a feature gets armed. Arming is <code>/quetrex-setup:login</code> and <code>/quetrex-setup:init</code>.</p>
 
 <div class="panel">
   <span class="label">Naming</span>
-  <p>Every Quetrex command is namespaced with a colon: <code>/quetrex:init</code>, <code>/quetrex:task-build</code>. If you find a command written with a hyphen where the colon should be, it is a stale name from the retired npm-era packaging and no longer exists — delete it and use the namespaced one.</p>
+  <p>Every Quetrex command is namespaced with a colon: <code>/quetrex-setup:init</code>, <code>/quetrex:task-build</code>. If you find a command written with a hyphen where the colon should be, it is a stale name from the retired npm-era packaging and no longer exists — delete it and use the namespaced one.</p>
 </div>
 
 <h2 id="s3"><span class="num">3</span>The daily loop</h2>
@@ -304,7 +306,7 @@
 <h2 id="s6"><span class="num">6</span>Keeping the engine current</h2>
 <p class="sub">Auto-update is the mechanism. This command is how you force it and confirm it.</p>
 
-<pre><code>/quetrex:update</code></pre>
+<pre><code>/quetrex-setup:update</code></pre>
 <p>Pulls the latest engine into this machine&rsquo;s plugin cache and reports what is now running. It will never create a version pin — see the warning in section 2.3 for why that would be an outage rather than a preference. Day to day you should not need it: <code>autoUpdate</code> on the marketplace entry is what keeps the whole team current, and the running version shows in the status bar.</p>
 
 <h2 id="s7"><span class="num">7</span>Known limits</h2>
@@ -325,8 +327,8 @@
 <table>
   <thead><tr><th>Command</th><th>When</th></tr></thead>
   <tbody>
-    <tr><td><code>/quetrex:login</code></td><td>Once per machine, before anything else.</td></tr>
-    <tr><td><code>/quetrex:init</code></td><td>Once per repo, to link and arm it. Re-run to repair.</td></tr>
+    <tr><td><code>/quetrex-setup:login</code></td><td>Once per machine, before anything else.</td></tr>
+    <tr><td><code>/quetrex-setup:init</code></td><td>Once per repo, to link and arm it. Re-run to repair.</td></tr>
     <tr><td><code>/quetrex:doctor</code></td><td>When something is off and you want the fix named.</td></tr>
     <tr><td><code>/quetrex:task-new</code></td><td>Put work on the board.</td></tr>
     <tr><td><code>/quetrex:task-refine</code></td><td>Sharpen it into a buildable spec. Highest-leverage step.</td></tr>
@@ -335,7 +337,7 @@
     <tr><td><code>/quetrex:merge</code></td><td>Gate-checked squash merge, plus cleanup.</td></tr>
     <tr><td><code>/quetrex:deploy</code></td><td>Manual deploy. Also <code>rollback</code>.</td></tr>
     <tr><td><code>/quetrex:task-complete</code></td><td>Close a deployed task.</td></tr>
-    <tr><td><code>/quetrex:update</code></td><td>Force the engine forward and report the version.</td></tr>
+    <tr><td><code>/quetrex-setup:update</code></td><td>Force the engine forward and report the version.</td></tr>
   </tbody>
 </table>
 </div>
@@ -346,7 +348,7 @@
     <li>Quetrex is a routine-fired kanban: plan, approve, build in the cloud, gated merge, manual deploy.</li>
     <li>Compute runs only on Anthropic servers. You do not sit and watch an agent type.</li>
     <li>Booleans and <code>autoUpdate</code> in settings. Never pin a version.</li>
-    <li>A repo is armed by <code>/quetrex:login</code> then <code>/quetrex:init</code>, and an unarmed repo has no gates at all.</li>
+    <li>A repo is armed by <code>/quetrex-setup:login</code> then <code>/quetrex-setup:init</code>, and an unarmed repo has no gates at all.</li>
   </ol>
 </div>
 

@@ -395,10 +395,10 @@ resolve_from_verify_json || resolve_from_claude_md || {
   #
   # THE FIX. Block once, with one labelled, actionable line, exactly the
   # shape every other reason in this file already uses — self-resolving
-  # the moment /quetrex:init writes .quetrex/verify.json, same as any other
+  # the moment /quetrex-setup:init writes .quetrex/verify.json, same as any other
   # blocked reason here resolves once its underlying cause is fixed. An
   # UNARMED repo is unaffected: it already exited above, before this line.
-  block "VERIFY GATE: this repo is armed (.quetrex/project.json) but has no verify chain — run /quetrex:init to write .quetrex/verify.json. BLOCKS finish."
+  block "VERIFY GATE: this repo is armed (.quetrex/project.json) but has no verify chain — run /quetrex-setup:init to write .quetrex/verify.json. BLOCKS finish."
 }
 
 mkdir -p "$QDIR"
@@ -502,7 +502,7 @@ for ((CHAIN_IDX=0; CHAIN_IDX<${#CHAIN[@]}; CHAIN_IDX++)); do
     # ledger in its history carries lint and test and never build.
     #
     # The skip is a legitimate, human-confirmed state (the requiredEnv map is committed and
-    # `/quetrex:init` only writes it after an explicit confirmation), so it belongs in the
+    # `/quetrex-setup:init` only writes it after an explicit confirmation), so it belongs in the
     # evidence rather than in a log nobody parses. It is recorded as skipped — NOT as
     # exit 0 — so nothing can mistake it for a pass: `exit` stays null and `skipped` is
     # true. merge-gate decides what a skip is worth; this hook's job is to state it.

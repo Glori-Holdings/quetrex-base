@@ -257,7 +257,7 @@ engine.
 | Artifact | Written by | Read by |
 |---|---|---|
 | `plan/<TASK_ID>.json` | architect | developer, database-architect, qa, reviewer, security-reviewer, merge-gate |
-| `verify.json` | `/quetrex:init` (project config) | every stage, verify-gate, merge-gate |
+| `verify.json` | `/quetrex-setup:init` (project config) | every stage, verify-gate, merge-gate |
 | `verify-ledger.jsonl` | qa, git-workflow, verify-gate | reviewer, git-workflow, merge-gate |
 | `qa-report.json` | qa | reviewer |
 | `security-findings.json` | security-reviewer | reviewer, git-workflow, merge-gate |
@@ -352,7 +352,7 @@ written by exactly one code path, and it is a human decision, not an inference:
   `.quetrex/verify.json`.
 - `quetrex-env-derive propose <repo-root>` — read-only. Prints one JSON object —
   `{candidates, chain, requiredEnv, requiredEnvDeclined}` — built from committed evidence for a
-  human to review. Writes nothing, ever; this is what `/quetrex:init` shows the operator before
+  human to review. Writes nothing, ever; this is what `/quetrex-setup:init` shows the operator before
   asking anything.
 - `quetrex-env-derive seed-chain <repo-root> <cmd>...` — creates `.quetrex/verify.json`'s
   `.verify[]` only when the file is absent and at least one non-blank command was given. Never
@@ -362,7 +362,7 @@ written by exactly one code path, and it is a human decision, not an inference:
   `--cmd`/`--env` pairs a human supplied — refusing each one unless `--cmd` is a byte-for-byte
   member of `.verify[]` and every `--env` name independently proves out against COMMITTED evidence
   — and with zero pairs and zero `--decline` flags it writes nothing at all, structurally, not by
-  prose discipline. This is called interactively during `/quetrex:init`, after `propose` has
+  prose discipline. This is called interactively during `/quetrex-setup:init`, after `propose` has
   surfaced candidates and a human has answered a scannable confirmation question for each one; an
   unattended run that skips that question calls `declare` with nothing to write and nothing gets
   written.

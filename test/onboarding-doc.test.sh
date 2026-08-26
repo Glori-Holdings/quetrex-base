@@ -82,8 +82,8 @@ req "model-manual-deploy"   "manual deploy"
 # The single worst error the old document made, named and negated.
 req "model-no-watching"     "You do not sit and watch an agent type."
 # Arming — a reader must be able to get a working command layer.
-req "arm-login"             "/quetrex:login"
-req "arm-init"              "/quetrex:init"
+req "arm-login"             "/quetrex-setup:login"
+req "arm-init"              "/quetrex-setup:init"
 req "arm-scoped"            "unarmed repo has no gates at all"
 req "arm-plugin-commands"   "\"quetrex@quetrex\": true"
 req "arm-plugin-engine"     "\"quetrex-factory@quetrex\": true"
@@ -99,7 +99,7 @@ req "cmd-task-rework"       "/quetrex:task-rework"
 req "cmd-merge"             "/quetrex:merge"
 req "cmd-deploy"            "/quetrex:deploy"
 req "cmd-task-complete"     "/quetrex:task-complete"
-req "cmd-update"            "/quetrex:update"
+req "cmd-update"            "/quetrex-setup:update"
 req "cmd-doctor"            "/quetrex:doctor"
 # The build transport and the evidence a merge is gated on.
 req "build-spec-branch"     "quetrex-spec/"
@@ -166,6 +166,28 @@ norm() {
 # whenever grep short-circuits and SIGPIPEs the producer, so every check but
 # the last silently inverted. That bug was observed in this very file.
 # ---------------------------------------------------------------------------
+# forb_present <id> <needle> <text> -> 0 if the forbidden claim is genuinely
+# present, 1 otherwise.
+#
+# no-npm-setup is a special case: the retired npm-era BARE command was
+# `/quetrex-setup` (no colon, one word). The setup-plugin split then
+# introduced a REAL, current plugin literally named `quetrex-setup`, whose
+# commands are always namespaced `/quetrex-setup:<verb>` — a legitimate
+# substring collision with the retired-form needle. Strip every occurrence
+# of the current, colon-namespaced form before testing for the bare legacy
+# one, so the current product is never flagged as its own retired
+# predecessor. Every OTHER forbidden id is tested as a plain substring.
+forb_present() {
+  local id="$1" needle="$2" text="$3"
+  if [ "$id" = "no-npm-setup" ]; then
+    text="${text//\/quetrex-setup:/}"
+  fi
+  case "$text" in
+    *"$needle"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 scan_doc() {
   local f="$1" txt i
   txt="$(norm "$f")"
@@ -176,9 +198,7 @@ scan_doc() {
     esac
   done
   for i in "${!FORB_ID[@]}"; do
-    case "$txt" in
-      *"${FORB_STR[$i]}"*) echo "PRESENT:${FORB_ID[$i]}" ;;
-    esac
+    forb_present "${FORB_ID[$i]}" "${FORB_STR[$i]}" "$txt" && echo "PRESENT:${FORB_ID[$i]}"
   done
   return 0
 }
@@ -209,10 +229,11 @@ for i in "${!REQ_ID[@]}"; do
 done
 
 for i in "${!FORB_ID[@]}"; do
-  case "$DOCTXT" in
-    *"${FORB_STR[$i]}"*) fail "doc is free of [${FORB_ID[$i]}]: ${FORB_STR[$i]}" ;;
-    *) pass "doc is free of [${FORB_ID[$i]}]: ${FORB_STR[$i]}" ;;
-  esac
+  if forb_present "${FORB_ID[$i]}" "${FORB_STR[$i]}" "$DOCTXT"; then
+    fail "doc is free of [${FORB_ID[$i]}]: ${FORB_STR[$i]}"
+  else
+    pass "doc is free of [${FORB_ID[$i]}]: ${FORB_STR[$i]}"
+  fi
 done
 
 if [ -z "$VIOLATIONS" ]; then
@@ -315,6 +336,7 @@ if [ -s "$SNIPPET" ]; then
     const p = o.enabledPlugins || {};
     if (p["quetrex@quetrex"] !== true) process.exit(1);
     if (p["quetrex-factory@quetrex"] !== true) process.exit(1);
+    if (p["quetrex-setup@quetrex"] !== true) process.exit(1);
     for (const k of Object.keys(p)) {
       if (Array.isArray(p[k]) || typeof p[k] === "string") process.exit(1);
     }

@@ -41,7 +41,8 @@ trap cleanup EXIT
 # "collects both, not just the first" is actually exercised.
 # =============================================================================
 SHROOT="$TMPROOT/shfix"
-mkdir -p "$SHROOT/.claude/hooks" "$SHROOT/.claude/lib" "$SHROOT/.claude/skills/x/scripts" "$SHROOT/bin" "$SHROOT/test"
+mkdir -p "$SHROOT/.claude/hooks" "$SHROOT/.claude/lib" "$SHROOT/.claude/skills/x/scripts" "$SHROOT/bin" "$SHROOT/test" \
+  "$SHROOT/plugins/quetrex-setup/scripts" "$SHROOT/plugins/quetrex-setup/bin" "$SHROOT/plugins/quetrex-setup/lib"
 
 cat > "$SHROOT/.claude/hooks/aaa-good.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -58,6 +59,23 @@ cat > "$SHROOT/bin/zzz-bad-last" <<'EOF'
 #!/usr/bin/env bash
 for x in 1 2 3; do
   echo "$x"
+EOF
+
+# quetrex-setup's own glob families (AC24): a good file in each so the fixture
+# proves they are collected at all, plus one deliberately bad one so the
+# collect-everything proof covers them too, not just the pre-existing globs.
+cat > "$SHROOT/plugins/quetrex-setup/scripts/good-scripts.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "fine"
+EOF
+cat > "$SHROOT/plugins/quetrex-setup/bin/good-bin" <<'EOF'
+#!/usr/bin/env bash
+echo "fine"
+EOF
+cat > "$SHROOT/plugins/quetrex-setup/lib/ccc-bad-setup.sh" <<'EOF'
+#!/usr/bin/env bash
+if [ 1 -eq 1 ]; then
+  echo "unterminated
 EOF
 
 SH_OUT="$(bash "$CHECK_SH" "$SHROOT" 2>&1)"; SH_CODE=$?
@@ -77,18 +95,25 @@ if printf '%s' "$SH_OUT" | grep -qF 'zzz-bad-last'; then
 else
   fail "check-sh.sh did not report zzz-bad-last (the old for-loop would have stopped before reaching it) (out: [$SH_OUT])"
 fi
-NOTOK_N="$(printf '%s\n' "$SH_OUT" | grep -c '^NOT OK - ')"
-if [ "$NOTOK_N" -eq 2 ]; then
-  pass "check-sh.sh reports exactly 2 NOT OK lines — the good file is not misreported"
+if printf '%s' "$SH_OUT" | grep -qF 'ccc-bad-setup.sh'; then
+  pass "check-sh.sh ALSO reports a bad file under plugins/quetrex-setup/lib/ — the new AC24 globs are actually collected, not silent no-ops"
 else
-  fail "check-sh.sh: expected exactly 2 NOT OK lines, got $NOTOK_N (out: [$SH_OUT])"
+  fail "check-sh.sh did not report plugins/quetrex-setup/lib/ccc-bad-setup.sh — the plugins/quetrex-setup/lib/* glob is not wired (out: [$SH_OUT])"
+fi
+NOTOK_N="$(printf '%s\n' "$SH_OUT" | grep -c '^NOT OK - ')"
+if [ "$NOTOK_N" -eq 3 ]; then
+  pass "check-sh.sh reports exactly 3 NOT OK lines — the good files are not misreported"
+else
+  fail "check-sh.sh: expected exactly 3 NOT OK lines, got $NOTOK_N (out: [$SH_OUT])"
 fi
 
-# GREEN: remove the 2 bad files, confirm it goes back to a clean pass.
-rm -f "$SHROOT/.claude/hooks/bbb-bad-first.sh" "$SHROOT/bin/zzz-bad-last"
+# GREEN: remove the 3 bad files, confirm it goes back to a clean pass. 3 good
+# files now remain: aaa-good.sh, plugins/quetrex-setup/scripts/good-scripts.sh,
+# plugins/quetrex-setup/bin/good-bin.
+rm -f "$SHROOT/.claude/hooks/bbb-bad-first.sh" "$SHROOT/bin/zzz-bad-last" "$SHROOT/plugins/quetrex-setup/lib/ccc-bad-setup.sh"
 SH_GREEN_OUT="$(bash "$CHECK_SH" "$SHROOT" 2>&1)"; SH_GREEN_CODE=$?
-if [ "$SH_GREEN_CODE" -eq 0 ] && printf '%s' "$SH_GREEN_OUT" | grep -qE '^ok - check:sh: 1 shell file'; then
-  pass "check-sh.sh: GREEN once the bad files are gone (exit 0, 1 file(s) pass)"
+if [ "$SH_GREEN_CODE" -eq 0 ] && printf '%s' "$SH_GREEN_OUT" | grep -qE '^ok - check:sh: 3 shell file'; then
+  pass "check-sh.sh: GREEN once the bad files are gone (exit 0, 3 file(s) pass)"
 else
   fail "check-sh.sh: expected a clean green pass after removing the bad files, got exit $SH_GREEN_CODE (out: [$SH_GREEN_OUT])"
 fi
@@ -109,7 +134,8 @@ fi
 # =============================================================================
 JROOT="$TMPROOT/jfix"
 mkdir -p "$JROOT/.claude" "$JROOT/.claude/templates" "$JROOT/.quetrex" "$JROOT/.claude-plugin" "$JROOT/hooks" \
-  "$JROOT/plugins/quetrex-factory/.claude-plugin" "$JROOT/plugins/quetrex-factory/hooks"
+  "$JROOT/plugins/quetrex-factory/.claude-plugin" "$JROOT/plugins/quetrex-factory/hooks" \
+  "$JROOT/plugins/quetrex-setup/.claude-plugin" "$JROOT/plugins/quetrex-setup/hooks"
 
 printf '{ this is not json' > "$JROOT/package.json"                       # first in the list, bad
 echo '{}' > "$JROOT/.claude/settings.json"
@@ -118,7 +144,9 @@ echo '{}' > "$JROOT/.quetrex/verify.json"
 echo '{}' > "$JROOT/.claude-plugin/plugin.json"
 echo '{}' > "$JROOT/hooks/hooks.json"
 echo '{}' > "$JROOT/plugins/quetrex-factory/.claude-plugin/plugin.json"
-printf '{ "also": not json' > "$JROOT/plugins/quetrex-factory/hooks/hooks.json"   # last in the list, bad
+echo '{}' > "$JROOT/plugins/quetrex-factory/hooks/hooks.json"
+echo '{}' > "$JROOT/plugins/quetrex-setup/.claude-plugin/plugin.json"
+printf '{ "also": not json' > "$JROOT/plugins/quetrex-setup/hooks/hooks.json"   # last in the list, bad
 
 J_OUT="$(bash "$CHECK_JSON" "$JROOT" 2>&1)"; J_CODE=$?
 
@@ -132,27 +160,45 @@ if printf '%s' "$J_OUT" | grep -qF 'NOT OK - package.json'; then
 else
   fail "check-json.sh did not report package.json (out: [$J_OUT])"
 fi
-if printf '%s' "$J_OUT" | grep -qF 'NOT OK - plugins/quetrex-factory/hooks/hooks.json'; then
-  pass "check-json.sh ALSO reports the LAST bad file (plugins/quetrex-factory/hooks/hooks.json) — proves the uncaught-throw-stops-the-loop bug is gone"
+if printf '%s' "$J_OUT" | grep -qF 'NOT OK - plugins/quetrex-setup/hooks/hooks.json'; then
+  pass "check-json.sh ALSO reports the LAST bad file (plugins/quetrex-setup/hooks/hooks.json) — proves the uncaught-throw-stops-the-loop bug is gone, and that the AC25 addition is actually checked"
 else
-  fail "check-json.sh did not report plugins/quetrex-factory/hooks/hooks.json (the old for-loop would have thrown on package.json and never reached it) (out: [$J_OUT])"
+  fail "check-json.sh did not report plugins/quetrex-setup/hooks/hooks.json (the old for-loop would have thrown on package.json and never reached it) (out: [$J_OUT])"
 fi
 JNOTOK_N="$(printf '%s\n' "$J_OUT" | grep -c '^NOT OK - ')"
 if [ "$JNOTOK_N" -eq 2 ]; then
-  pass "check-json.sh reports exactly 2 NOT OK lines — the 6 well-formed files are not misreported"
+  pass "check-json.sh reports exactly 2 NOT OK lines — the 8 well-formed files are not misreported"
 else
   fail "check-json.sh: expected exactly 2 NOT OK lines, got $JNOTOK_N (out: [$J_OUT])"
 fi
 
 # GREEN: fix both files, confirm a clean pass.
 echo '{}' > "$JROOT/package.json"
-echo '{}' > "$JROOT/plugins/quetrex-factory/hooks/hooks.json"
+echo '{}' > "$JROOT/plugins/quetrex-setup/hooks/hooks.json"
 J_GREEN_OUT="$(bash "$CHECK_JSON" "$JROOT" 2>&1)"; J_GREEN_CODE=$?
-if [ "$J_GREEN_CODE" -eq 0 ] && printf '%s' "$J_GREEN_OUT" | grep -qE '^ok - check:json: 8 JSON files parse'; then
-  pass "check-json.sh: GREEN once both files are fixed (exit 0, 8 files parse)"
+if [ "$J_GREEN_CODE" -eq 0 ] && printf '%s' "$J_GREEN_OUT" | grep -qE '^ok - check:json: 10 JSON files parse'; then
+  pass "check-json.sh: GREEN once both files are fixed (exit 0, 10 files parse)"
 else
   fail "check-json.sh: expected a clean green pass after fixing both files, got exit $J_GREEN_CODE (out: [$J_GREEN_OUT])"
 fi
+
+# =============================================================================
+# AC24 — the new plugins/quetrex-setup/* glob families in check-sh.sh are not
+# a silent no-op: each one actually matches at least one REAL file in the
+# shipped tree (a glob that matches nothing would report 0 bad and 0 files
+# checked from that family without ever failing loudly).
+# =============================================================================
+for pattern in "plugins/quetrex-setup/scripts/*" "plugins/quetrex-setup/bin/*" "plugins/quetrex-setup/lib/*" "plugins/quetrex-setup/*.sh"; do
+  matched=0
+  for f in "$TOOLROOT"/$pattern; do
+    [ -f "$f" ] && matched=$((matched + 1))
+  done
+  if [ "$matched" -ge 1 ]; then
+    pass "AC24: glob '$pattern' matches $matched real file(s) in the shipped tree — not a silent no-op"
+  else
+    fail "AC24: glob '$pattern' matches 0 real files in the shipped tree — this glob is a silent no-op"
+  fi
+done
 
 # =============================================================================
 # A bad [root] must fail loudly, never silently fall back to `cd`'s failure

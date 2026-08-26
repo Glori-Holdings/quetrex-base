@@ -59,7 +59,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GATE_HOOK="${QX_VERIFY_GATE_HOOK:-$REPO_ROOT/plugins/quetrex-factory/scripts/verify-gate.sh}"
 MERGE_HOOK="${QX_MERGE_GATE_HOOK:-$REPO_ROOT/plugins/quetrex-factory/scripts/merge-gate.sh}"
-DERIVE="$REPO_ROOT/bin/quetrex-env-derive"
+DERIVE="$REPO_ROOT/plugins/quetrex-setup/bin/quetrex-env-derive"
 
 if [ ! -f "$GATE_HOOK" ]; then echo "FAIL: verify-gate hook not found at $GATE_HOOK"; exit 1; fi
 if [ ! -f "$MERGE_HOOK" ]; then echo "FAIL: merge-gate hook not found at $MERGE_HOOK"; exit 1; fi

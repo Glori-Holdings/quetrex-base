@@ -11,7 +11,7 @@
 # so a 679-line test suite dedicated to this command never touched it.
 #
 # branchPrefix comes from .quetrex/project.json — committed data that anyone with repo write
-# access controls, and that /quetrex:init writes.
+# access controls, and that /quetrex-setup:init writes.
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

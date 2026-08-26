@@ -5,18 +5,18 @@
 # Run: bash test/init-arming.test.sh
 #
 # ---------------------------------------------------------------------------
-# PART A — /quetrex:init step 5c must be able to author a requiredEnv entry.
+# PART A — /quetrex-setup:init step 5c must be able to author a requiredEnv entry.
 #
-# The bash block in .claude/commands/init.md step 5c is the ONLY caller of
+# The bash block in plugins/quetrex-setup/commands/init.md step 5c is the ONLY caller of
 # `quetrex-env-derive declare`, the ONLY writer of `.quetrex/verify.json`'s
 # `requiredEnv`. It used to guard that call with
 #
 #     if [ -n "${QUETREX_INIT_NONINTERACTIVE:-}" ] || [ ! -t 0 ] || [ ! -t 1 ]
 #
-# and put the `declare` call in the `else` branch. `/quetrex:init` only ever
+# and put the `declare` call in the `else` branch. `/quetrex-setup:init` only ever
 # runs through Claude Code's Bash tool, where NEITHER stdin NOR stdout is a
 # TTY — so that condition was true 100% of the time and the writer was
-# structurally unreachable. Consequence: every repo armed by /quetrex:init
+# structurally unreachable. Consequence: every repo armed by /quetrex-setup:init
 # shipped with no `requiredEnv`, verify-gate's declarative env skip never
 # fired, and the first cloud build of any repo whose verify chain needs a
 # credential died on an unset variable no sandbox could ever hold.
@@ -36,7 +36,7 @@
 #
 # Nothing is version-pinned anywhere (a pinned enabledPlugins entry makes the
 # plugin count as DISABLED and the whole /quetrex:* command layer stops
-# loading), so config carries no version at all. `/quetrex:update` and
+# loading), so config carries no version at all. `/quetrex-setup:update` and
 # `/quetrex:doctor` both tell the operator the running engine version "lives
 # in the status bar" — but nothing installed it, so in every armed repo the
 # one place the product says to look was blank. A Claude Code plugin CANNOT
@@ -55,9 +55,9 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INIT_MD="$REPO_ROOT/.claude/commands/init.md"
-ARM="$REPO_ROOT/bin/quetrex-arm"
-ENV_DERIVE="$REPO_ROOT/bin/quetrex-env-derive"
+INIT_MD="$REPO_ROOT/plugins/quetrex-setup/commands/init.md"
+ARM="$REPO_ROOT/plugins/quetrex-setup/bin/quetrex-arm"
+ENV_DERIVE="$REPO_ROOT/plugins/quetrex-setup/bin/quetrex-env-derive"
 
 for f in "$INIT_MD" "$ARM" "$ENV_DERIVE"; do
   if [ ! -f "$f" ]; then
@@ -118,7 +118,7 @@ fi
 
 # --- A1: the block must carry no TTY test in EXECUTABLE code -------------
 # `[ -t 0 ]`/`[ -t 1 ]` are false in every Claude Code Bash tool invocation,
-# which is the ONLY way /quetrex:init ever executes. A TTY test here is not a
+# which is the ONLY way /quetrex-setup:init ever executes. A TTY test here is not a
 # conservative guard; it is an unconditional off switch. Whole-line comments
 # are stripped first — the block is expected to WARN about this in prose, and
 # a warning is not a guard.
@@ -345,7 +345,7 @@ fi
 # --- B9: a previously-written BARE registration is repaired --------------
 # The bare form exits 127 when CLAUDE_PROJECT_DIR is unset. It is OUR string,
 # not the operator's, so re-arming repairs it — the same "re-running
-# /quetrex:init is the remediation path" contract as the dead-MCP purge.
+# /quetrex-setup:init is the remediation path" contract as the dead-MCP purge.
 FIXG="$WORK/repo-g"
 mkdir -p "$FIXG/.claude"
 cat > "$FIXG/.claude/settings.json" <<'JSON'

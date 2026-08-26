@@ -22,22 +22,30 @@
 # (any OTHER plugin, including quetrex-factory, discovered from inside a
 # quetrex process without ever executing anything found there).
 #
-# REGISTERED IN BOTH quetrex AND quetrex-factory (HOOKFIX correction 1,
-# 2026-08-21, verified against https://code.claude.com/docs/en/hooks.md):
-# under managed-settings `allowManagedHooksOnly: true`, ONLY plugins FORCE-
-# ENABLED in managed settings' own enabledPlugins are exempt from the hook
-# lockdown — every OTHER hook, including every hook a merely-enabled (not
-# force-enabled) plugin registers, is silently blocked. An operator's managed
-# settings can force-enable quetrex-factory@quetrex without force-enabling
-# quetrex@quetrex, and in that exact configuration EVERY hook quetrex
-# registers — including a copy of this guard living only here — would be dark.
-# Shipping the guard in a SINGLE plugin therefore fails in precisely the
-# strictest, most locked-down configuration it exists to protect. So it ships
-# and registers as a SessionStart hook in BOTH plugin roots. Do NOT "clean up"
-# the apparent duplicate registration — that reintroduces the hole. (The
-# quetrex-factory-side registration lives in a different repository,
-# Glori-Holdings/quetrex-plugins, and is a cross-repo follow-up outside this
-# workstream's file ownership — see the HOOKFIX developer report.)
+# SHOULD BE REGISTERED IN BOTH quetrex-setup AND quetrex-factory (HOOKFIX
+# correction 1, 2026-08-21, verified against
+# https://code.claude.com/docs/en/hooks.md) — BUT, AS OF SEC-GLOBAL-7
+# (2026-08-26), IT IS CURRENTLY REGISTERED IN quetrex-setup ONLY. This is a
+# real, open gap, not a documentation nit: under managed-settings
+# `allowManagedHooksOnly: true`, ONLY plugins FORCE-ENABLED in managed
+# settings' own enabledPlugins are exempt from the hook lockdown — every
+# OTHER hook, including every hook a merely-enabled (not force-enabled)
+# plugin registers, is silently blocked. An operator's managed settings can
+# force-enable quetrex-factory@quetrex without force-enabling
+# quetrex-setup@quetrex, and in that exact configuration this guard — which
+# lives only in quetrex-setup — goes dark. quetrex-factory's own
+# hooks.json (plugins/quetrex-factory/hooks/hooks.json, THIS repo) carries no
+# reference to this script today; it is advisory-only (always exits 0,
+# blocks nothing), so no enforcement floor is lost while this gap stands, but
+# it should still be closed. The quetrex-factory-side registration belongs
+# in a DIFFERENT repository, Glori-Holdings/quetrex-plugins, and is a
+# cross-repo follow-up outside this workstream's file ownership — see the
+# HOOKFIX developer report and .quetrex/security-findings.json (SEC-GLOBAL-7).
+# Do NOT "clean up" the single registration below on the assumption a second
+# one exists elsewhere in THIS repo — it does not, yet. (This file previously
+# shipped inside `quetrex`; it moved to quetrex-setup with the setup-plugin
+# split so it keeps firing in every repo, armed or not — see GLOBAL's plan
+# notes.)
 #
 # SESSION DEDUP. Because it can now run TWICE in one session (both plugins
 # enabled), it must not print twice for the same staleness. Keyed on the
@@ -58,7 +66,7 @@
 # AT MOST one stdout line total for the whole invocation (never one per stale
 # plugin) and prints nothing to stderr.
 #
-# Register as: bash "${CLAUDE_PLUGIN_ROOT}/.claude/hooks/quetrex-bound-version-guard.sh"
+# Register as: bash "${CLAUDE_PLUGIN_ROOT}/scripts/quetrex-bound-version-guard.sh"
 # (repo rule: a plugin hook command resolves via ${CLAUDE_PLUGIN_ROOT}, never
 # ~/.claude — reading the machine-global installed_plugins.json from INSIDE
 # the script is a different layer, exactly like ${CLAUDE_PROJECT_DIR} inside
@@ -72,6 +80,32 @@
 # walks the real filesystem shape.
 
 set -uo pipefail
+
+# --- SEC-GLOBAL-2 hardening --------------------------------------------------
+# This guard now fires machine-wide (every SessionStart, armed repo or not —
+# see the WHY THIS EXISTS note above), and its PATH walk discovers a
+# .claude-plugin/plugin.json from ANY plugin that ships a bin/ on PATH, not
+# only quetrex's own. That file's .name and .version are therefore hostile
+# input from any such repo (direnv, .envrc, project settings env can all put
+# a hostile ./bin on PATH), yet they were printed verbatim in the STALE BIND
+# line. Both are validated to a plain, safe shape before resolve_plugin_json
+# ever returns them; an unsafe shape is folded into the SAME "cannot be
+# resolved -> skip this candidate, never guess harder" rule the fallback path
+# already documents below (never executed, never sourced — this is purely
+# about what reaches the final printf).
+valid_plugin_name() {  # <string> -> true (0) if safely shaped
+  [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]
+}
+valid_plugin_version() {  # <string> -> true (0) if safely shaped
+  # SEC-GLOBAL-9: bound each numeric run to 6 digits and the whole token to
+  # 64 characters — an earlier [0-9]+ accepted an arbitrarily long all-digit
+  # string (e.g. a 50,000-digit "version"), which this script has NO size
+  # bound to catch afterward (unlike quetrex-update-check.sh's
+  # MAX_MANIFEST_BYTES), so the ceiling was the plugin.json file size, not a
+  # deliberate limit.
+  [ "${#1}" -le 64 ] || return 1
+  [[ "$1" =~ ^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}([-+][A-Za-z0-9.-]{1,40})?$ ]]
+}
 
 # --- read hook input (best-effort; absence is fine) -------------------------
 INPUT=""
@@ -180,6 +214,14 @@ resolve_plugin_json() {
       [ -n "$name" ] && { RP_NAME="$name"; RP_VERSION="$ver"; }
     fi
   fi
+  # SEC-GLOBAL-2: clamp before returning. An unsafely-shaped name or version
+  # (from either the primary plugin.json read or the path-derived fallback)
+  # is cleared to empty here so the caller's
+  # `[ -n "$RP_NAME" ] && [ -n "$RP_VERSION" ] || continue` skips this
+  # candidate entirely — it is never printed and never fed to installed_version_for.
+  [ -n "$RP_NAME" ] && ! valid_plugin_name "$RP_NAME" && RP_NAME=""
+  [ -n "$RP_VERSION" ] && ! valid_plugin_version "$RP_VERSION" && RP_VERSION=""
+  return 0
 }
 
 version_lt() {  # version_lt <a> <b> -> 0 (true, a < b) if a sorts strictly before b
@@ -194,6 +236,14 @@ for root in "${CAND_ROOTS[@]}"; do
   [ -n "$RP_NAME" ] && [ -n "$RP_VERSION" ] || continue
   inst="$(installed_version_for "$RP_NAME")"
   [ -n "$inst" ] || continue
+  # SEC-GLOBAL-2 (round 2, still open): `inst` is the THIRD value interpolated
+  # into the STALE BIND printf below, read out of installed_plugins.json —
+  # itself reachable via the real CLAUDE_CONFIG_DIR env var pointed at a
+  # repo-controlled file, not only the QX_BOUND_* test seam. RP_NAME/
+  # RP_VERSION are already clamped inside resolve_plugin_json; `inst` must be
+  # clamped the same way before it can reach STALE/the printf, or it skips
+  # every guard the other two fields got.
+  valid_plugin_version "$inst" || continue
   if version_lt "$RP_VERSION" "$inst"; then
     STALE+=("${RP_NAME} ${RP_VERSION} (installed: ${inst})")
   fi

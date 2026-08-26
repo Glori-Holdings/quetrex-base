@@ -71,26 +71,27 @@ const VERBS = ['init', 'login', 'task-new', 'task-refine', 'task-build',
   'task-rework', 'task-complete', 'task-merge', 'deploy'];
 const LEGACY_CMD_RE = '/' + 'q-' + '(' + VERBS.join('|') + ')';
 
-// The de-prefixed core command set (the eight files renamed from q-*.md). New
-// capabilities (update.md, doctor.md) are added by other workstreams and are
-// intentionally NOT required here — the invariant this test owns is that the
-// core eight are de-prefixed and that ZERO q-*.md files remain.
-const CORE_COMMANDS = ['deploy', 'init', 'login', 'task-build',
+// The de-prefixed command set that STAYS in `quetrex` (.claude/commands/)
+// after the setup-plugin split. login/init/update git-mv'd OUT to
+// plugins/quetrex-setup/commands/ — see SETUP_COMMANDS below and AC2.
+const CORE_COMMANDS = ['deploy', 'doctor', 'merge', 'task-build',
   'task-complete', 'task-new', 'task-refine', 'task-rework'].map((n) => `${n}.md`);
+// The three commands quetrex-setup owns exclusively.
+const SETUP_COMMANDS = ['login.md', 'init.md', 'update.md'];
 
 // Guards that quetrex-factory owns; quetrex must NOT re-register them (enabling
 // quetrex depends_on quetrex-factory, so a copy here would double-register).
 const ENGINE_GUARDS = ['deny-guard.sh', 'secret-scan.sh', 'enforce-branch.sh', 'auto-format.sh'];
-// The command-layer hooks unique to quetrex, which it keeps registering.
-// quetrex-update-check.sh is the one hook the command-layer plugin legitimately
-// owns: a non-blocking SessionStart nudge that a newer engine version exists.
-// quetrex-bound-version-guard.sh (HOOKFIX G1) and protected-files-guard.sh
-// (HOOKFIX G4) are new, quetrex-owned scripts that are NOT part of the
-// six-script safety floor quetrex-factory ships (plugins/quetrex-factory/
-// scripts/, the one-copy location) — they are command-layer additions,
-// registered here exactly like the other three.
-const KEPT_HOOKS = ['session-state.sh', 'edit-gate.sh', 'quetrex-update-check.sh',
-  'quetrex-bound-version-guard.sh', 'protected-files-guard.sh'];
+// The command-layer hooks `quetrex` keeps registering post-split.
+// quetrex-update-check.sh and quetrex-bound-version-guard.sh (HOOKFIX G1)
+// MOVED to quetrex-setup with the split (see SETUP_HOOKS below) — quetrex-setup
+// is enabled machine-wide, so they now fire in every repo, armed or not.
+// protected-files-guard.sh (HOOKFIX G4) stays here; neither of these three is
+// part of the six-script safety floor quetrex-factory ships (plugins/
+// quetrex-factory/scripts/, the one-copy location).
+const KEPT_HOOKS = ['session-state.sh', 'edit-gate.sh', 'protected-files-guard.sh'];
+// The SessionStart hooks quetrex-setup owns exclusively.
+const SETUP_HOOKS = ['unarmed-offer.sh', 'quetrex-update-check.sh', 'quetrex-bound-version-guard.sh'];
 
 // --- 0. THIS REPO IS THE PLUGIN -------------------------------------------
 // Everything at this repo root is shipped to every consumer of the `quetrex`
@@ -121,7 +122,8 @@ check('no shipped file declares an mcpServers block', () => {
   const hits = gitGrep('mcpServers', [
     ':(exclude)test/**',
     ':(exclude).claude/commands/**',
-    ':(exclude)bin/quetrex-arm',
+    ':(exclude)plugins/quetrex-setup/commands/**',
+    ':(exclude)plugins/quetrex-setup/bin/quetrex-arm',
   ]);
   assert.deepStrictEqual(
     hits, [],
@@ -137,12 +139,12 @@ check('no shipped file declares an mcpServers block', () => {
 // SAID ("does init.md contain the right sentence") and never what they DID, so
 // the first human to walk a path was the one who found it broken.
 //
-// The worst instance: /quetrex:login and /quetrex:update both used
+// The worst instance: /quetrex-setup:login and /quetrex-setup:update both used
 //     read -r A B < <(node -e '... process.stdout.write(a+" "+b) ...')
 //         || { echo "unreadable"; exit 1; }
 // `read` returns NON-ZERO when the final line has no trailing newline. The
 // values land in the variables correctly and the guard fires anyway — so both
-// commands failed 100% of the time, on healthy input. /quetrex:login is the
+// commands failed 100% of the time, on healthy input. /quetrex-setup:login is the
 // FIRST command a teammate runs on a new machine, so onboarding was impossible.
 //
 // These two checks are cheap and they close that class permanently.
@@ -157,8 +159,10 @@ check('no shipped command reads from a process substitution (read returns non-ze
   );
 });
 
-check('every bash block embedded in every command is syntactically valid', () => {
-  const dir = path.join(REPO_ROOT, '.claude/commands');
+// AC18/AC27: covers BOTH command directories — the three moved commands are
+// no less load-bearing than the eight that stayed.
+function checkBashBlocksIn(dirRel) {
+  const dir = path.join(REPO_ROOT, dirRel);
   const failures = [];
   let blocks = 0;
   for (const file of fs.readdirSync(dir).filter((x) => x.endsWith('.md'))) {
@@ -170,14 +174,45 @@ check('every bash block embedded in every command is syntactically valid', () =>
       try {
         execFileSync('bash', ['-n', tmp], { stdio: 'pipe' });
       } catch (e) {
-        failures.push(file + ' block#' + (i + 1) + ': ' + String(e.stderr || '').trim().split('\n')[0]);
+        failures.push(dirRel + '/' + file + ' block#' + (i + 1) + ': ' + String(e.stderr || '').trim().split('\n')[0]);
       } finally {
         try { fs.unlinkSync(tmp); } catch {}
       }
     });
   }
+  return { blocks, failures };
+}
+
+check('every bash block embedded in every command is syntactically valid', () => {
+  const a = checkBashBlocksIn('.claude/commands');
+  const b = checkBashBlocksIn('plugins/quetrex-setup/commands');
+  const blocks = a.blocks + b.blocks;
+  const failures = [...a.failures, ...b.failures];
   assert.ok(blocks > 50, 'expected to find the command bash blocks, found only ' + blocks);
   assert.deepStrictEqual(failures, [], 'bash syntax errors in shipped command blocks:\n  ' + failures.join('\n  '));
+});
+
+// --- AC2: the command split is exact, and the moved files carry real history
+check('the command split is exact: quetrex-setup owns login/init/update, quetrex keeps the pipeline eight', () => {
+  const setupDir = path.join(REPO_ROOT, 'plugins/quetrex-setup/commands');
+  const coreDir = path.join(REPO_ROOT, '.claude/commands');
+  const setupFiles = fs.readdirSync(setupDir).filter((f) => f.endsWith('.md')).sort();
+  const coreFiles = fs.readdirSync(coreDir).filter((f) => f.endsWith('.md')).sort();
+  assert.deepStrictEqual(setupFiles, [...SETUP_COMMANDS].sort(),
+    `plugins/quetrex-setup/commands/ must contain EXACTLY ${SETUP_COMMANDS.join(', ')}, got: ${setupFiles.join(', ')}`);
+  assert.deepStrictEqual(coreFiles, [...CORE_COMMANDS].sort(),
+    `.claude/commands/ must contain EXACTLY ${CORE_COMMANDS.join(', ')}, got: ${coreFiles.join(', ')}`);
+
+  // A real `git mv`, not a copy+delete: each moved file must carry >= 2
+  // commits under --follow (the original history plus the move itself).
+  for (const f of SETUP_COMMANDS) {
+    const out = execFileSync('git',
+      ['log', '--follow', '--format=%H', '--', `plugins/quetrex-setup/commands/${f}`],
+      { cwd: REPO_ROOT, encoding: 'utf8' });
+    const commits = out.split('\n').filter(Boolean);
+    assert.ok(commits.length >= 2,
+      `plugins/quetrex-setup/commands/${f} has only ${commits.length} commit(s) under --follow — expected >= 2, proving a real git mv preserved history`);
+  }
 });
 
 // --- 0c. THE MERGE PATH MUST STAY CONNECTED -------------------------------
@@ -270,7 +305,7 @@ check('no shipped file still prescribes a feature/ branch prefix', () => {
 // what merge-gate.sh reads. GitHub-side review is additive, and the app without workflows
 // delivers none of it anyway.
 check('init does NOT ask about the Claude GitHub App, and records why', () => {
-  const init = read('.claude/commands/init.md');
+  const init = read('plugins/quetrex-setup/commands/init.md');
   assert.ok(
     !/run `?\/install-github-app`?\?/i.test(init),
     'init must never ask "Run /install-github-app?" — it cannot run it, so a yes produces nothing while reading as done',
@@ -432,15 +467,39 @@ check('hooks.json registers ONLY the command-layer hooks, never the engine guard
     'hooks.json must wire exactly the kept command-layer hooks and nothing else');
 });
 
+// AC26: the SessionStart hooks that moved to quetrex-setup wire there, and
+// ENGINE_GUARDS appear in NEITHER plugin's hooks.json.
+check('plugins/quetrex-setup/hooks/hooks.json wires exactly the setup-owned hooks', () => {
+  const h = readJson('plugins/quetrex-setup/hooks/hooks.json');
+  const wired = new Set(hookCommands(h).map(hookBasename).filter(Boolean));
+  for (const g of ENGINE_GUARDS) {
+    assert.ok(!wired.has(g),
+      `${g} is owned by quetrex-factory — quetrex-setup must not re-register it`);
+  }
+  assert.deepStrictEqual([...wired].sort(), [...SETUP_HOOKS].sort(),
+    'plugins/quetrex-setup/hooks/hooks.json must wire exactly the setup-owned hooks and nothing else');
+  // Moved hooks must be gone from the root plugin's own hooks.json.
+  const rootWired = new Set(hookCommands(readJson('hooks/hooks.json')).map(hookBasename).filter(Boolean));
+  for (const moved of ['quetrex-update-check.sh', 'quetrex-bound-version-guard.sh']) {
+    assert.ok(!rootWired.has(moved),
+      `${moved} moved to quetrex-setup and must no longer be wired in the root hooks/hooks.json`);
+  }
+});
+
 // --- 4. no command sources a lib the way the retired installer required ----
+// AC27: scans BOTH command directories — the three moved commands are no less
+// load-bearing than the eight that stayed in `quetrex`.
+const COMMAND_DIRS = ['.claude/commands', 'plugins/quetrex-setup/commands'];
 check('no command sources a lib from ~/.claude (the plugin ships bin/quetrex-api on PATH)', () => {
-  const dir = path.join(REPO_ROOT, '.claude', 'commands');
-  for (const f of fs.readdirSync(dir)) {
-    const body = read(`.claude/commands/${f}`);
-    assert.ok(!/source\s+~\/\.claude\/lib/.test(body),
-      `${f} still sources a lib from ~/.claude — a plugin never seeds that path; call the bin/quetrex-api tool by name`);
-    assert.ok(!body.includes('${CLAUDE_PLUGIN_ROOT}'),
-      `${f} references \${CLAUDE_PLUGIN_ROOT}, which is UNSET in slash-command bash — call the bundled quetrex-api tool by name instead`);
+  for (const dirRel of COMMAND_DIRS) {
+    const dir = path.join(REPO_ROOT, dirRel);
+    for (const f of fs.readdirSync(dir)) {
+      const body = read(`${dirRel}/${f}`);
+      assert.ok(!/source\s+~\/\.claude\/lib/.test(body),
+        `${dirRel}/${f} still sources a lib from ~/.claude — a plugin never seeds that path; call the bin/quetrex-api tool by name`);
+      assert.ok(!body.includes('${CLAUDE_PLUGIN_ROOT}'),
+        `${dirRel}/${f} references \${CLAUDE_PLUGIN_ROOT}, which is UNSET in slash-command bash — call the bundled quetrex-api tool by name instead`);
+    }
   }
 });
 
@@ -448,13 +507,15 @@ check('no command sources a lib from ~/.claude (the plugin ships bin/quetrex-api
 // invocation form (not just `source`) — a `bash ~/.claude/lib/...` call or a
 // bare mention is just as broken in a fresh clone as `source` was.
 check('no command invokes or references ~/.claude/lib in any form (the per-project gate-copy is retired)', () => {
-  const dir = path.join(REPO_ROOT, '.claude', 'commands');
-  for (const f of fs.readdirSync(dir)) {
-    const body = read(`.claude/commands/${f}`);
-    assert.ok(!/bash\s+~\/\.claude\/lib/.test(body),
-      `${f} still invokes a lib via bash ~/.claude/lib — the per-project gate-copy is retired; the quetrex-factory plugin pin delivers the guards instead`);
-    assert.ok(!/~\/\.claude\/lib/.test(body),
-      `${f} still references ~/.claude/lib in some form — a plugin never seeds that path, and the per-project gate-copy it used to run is retired`);
+  for (const dirRel of COMMAND_DIRS) {
+    const dir = path.join(REPO_ROOT, dirRel);
+    for (const f of fs.readdirSync(dir)) {
+      const body = read(`${dirRel}/${f}`);
+      assert.ok(!/bash\s+~\/\.claude\/lib/.test(body),
+        `${dirRel}/${f} still invokes a lib via bash ~/.claude/lib — the per-project gate-copy is retired; the quetrex-factory plugin pin delivers the guards instead`);
+      assert.ok(!/~\/\.claude\/lib/.test(body),
+        `${dirRel}/${f} still references ~/.claude/lib in some form — a plugin never seeds that path, and the per-project gate-copy it used to run is retired`);
+    }
   }
 });
 
@@ -497,7 +558,7 @@ check('zero broad /q-<anything> command references remain under .claude/ (catche
 // So: booleans only, auto-update via extraKnownMarketplaces, and the running
 // version is surfaced in the status bar (bin/quetrex-version) instead of frozen
 // into config. These tests previously ENFORCED the array pin; they now forbid it.
-const PIN_KEYS = ['quetrex@quetrex', 'quetrex-factory@quetrex'];
+const PIN_KEYS = ['quetrex@quetrex', 'quetrex-factory@quetrex', 'quetrex-setup@quetrex'];
 const isVersionPin = (v) => Array.isArray(v) || typeof v === 'string';
 
 check('committed enabledPlugins uses booleans only — never a version pin', () => {
@@ -534,11 +595,11 @@ check('no shipped writer emits a version pin for either quetrex plugin', () => {
   );
 });
 
-check('bin/quetrex-arm still enables both plugins, with true', () => {
-  const body = read('bin/quetrex-arm');
+check('quetrex-arm still enables all three plugins, with true', () => {
+  const body = read('plugins/quetrex-setup/bin/quetrex-arm');
   for (const key of PIN_KEYS) {
     const re = new RegExp('enabledPlugins\\["' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"\\]\\s*=\\s*true');
-    assert.ok(re.test(body), `bin/quetrex-arm must set enabledPlugins["${key}"] = true`);
+    assert.ok(re.test(body), `quetrex-arm must set enabledPlugins["${key}"] = true`);
   }
 });
 
@@ -554,19 +615,19 @@ check('the plugin declares no hard dependency (it made a pinned engine fatal)', 
 });
 
 check('the version reporter used by the status bar ships and is executable', () => {
-  assert.ok(exists('bin/quetrex-version'), 'bin/quetrex-version must ship — it is where the version is surfaced now');
-  const st = fs.statSync(path.join(REPO_ROOT, 'bin/quetrex-version'));
-  assert.ok((st.mode & 0o111) !== 0, 'bin/quetrex-version must be executable');
-  const out = execFileSync('bash', [path.join(REPO_ROOT, 'bin/quetrex-version'), '--plain'], { encoding: 'utf8' }).trim();
+  assert.ok(exists('plugins/quetrex-setup/bin/quetrex-version'), 'quetrex-version must ship — it is where the version is surfaced now');
+  const st = fs.statSync(path.join(REPO_ROOT, 'plugins/quetrex-setup/bin/quetrex-version'));
+  assert.ok((st.mode & 0o111) !== 0, 'quetrex-version must be executable');
+  const out = execFileSync('bash', [path.join(REPO_ROOT, 'plugins/quetrex-setup/bin/quetrex-version'), '--plain'], { encoding: 'utf8' }).trim();
   assert.match(out, /^\d+\.\d+\.\d+$/, 'quetrex-version --plain must print a bare semver, got: ' + out);
-  const pretty = execFileSync('bash', [path.join(REPO_ROOT, 'bin/quetrex-version')], { encoding: 'utf8' }).trim();
+  const pretty = execFileSync('bash', [path.join(REPO_ROOT, 'plugins/quetrex-setup/bin/quetrex-version')], { encoding: 'utf8' }).trim();
   assert.match(pretty, /^Quetrex v\d+\.\d+\.\d+$/, 'quetrex-version must print "Quetrex vX.Y.Z", got: ' + pretty);
 });
 
 // --- 5bb. one branch-prefix default, and it is claude/ ---------------------
 // `claude/` is the only prefix an Anthropic cloud routine can push to without a
 // repo admin loosening the branch restriction, so it is the default everywhere
-// and /quetrex:init does not ask. Two competing defaults in the same system is
+// and /quetrex-setup:init does not ask. Two competing defaults in the same system is
 // the confusion this replaced — assert there is exactly one.
 check('every branch-prefix fallback defaults to claude/, never feature/', () => {
   const stale = gitGrep('(branchPrefix *\\|\\| *"feature/"|BRANCH_PREFIX="feature/"|echo .feature/.)', [':!test/']);
@@ -575,7 +636,7 @@ check('every branch-prefix fallback defaults to claude/, never feature/', () => 
 });
 
 check('init.md sets the branch prefix without prompting for it', () => {
-  const body = read('.claude/commands/init.md');
+  const body = read('plugins/quetrex-setup/commands/init.md');
   assert.ok(/BRANCH_PREFIX="claude\/"/.test(body),
     'init.md must default BRANCH_PREFIX to claude/');
   assert.ok(/do NOT ask the user|Do not prompt for this/i.test(body),
@@ -587,7 +648,7 @@ check('init.md sets the branch prefix without prompting for it', () => {
 // bare "Edit"/"Write" grants every path on the machine with no prompt. And
 // Claude Code consults Edit(path)/Read(path) rules ONLY — a Write(path) rule is
 // accepted, never enforced, and warns at startup. Both mistakes look correct in
-// review, so assert against both, here and in the need[] array /quetrex:init
+// review, so assert against both, here and in the need[] array /quetrex-setup:init
 // unions into every customer repo.
 const BARE_EDIT_GRANTS = ['Write', 'Edit', 'NotebookEdit', 'MultiEdit'];
 check('the file-edit permission grant is path-scoped and uses an enforceable Edit() rule', () => {
@@ -604,7 +665,7 @@ check('the file-edit permission grant is path-scoped and uses an enforceable Edi
 });
 
 check('init.md seeds customer repos with the same scoped, enforceable grant', () => {
-  const body = read('.claude/commands/init.md');
+  const body = read('plugins/quetrex-setup/commands/init.md');
   const need = body.match(/const need\s*=\s*\[[\s\S]*?\]/);
   assert.ok(need, 'init.md must still declare the need[] permission array');
   const entries = [...need[0].matchAll(/"([^"]+)"/g)].map((m) => m[1]);

@@ -1646,7 +1646,7 @@ evaluate_vector() {
   # the BASE branch's version, not the PR's. The cloud build ran the chain the
   # PR HEAD's verify.json defines and wrote ledger entries for THOSE commands.
   # So any PR that renames or replaces a verify command ("add a lint step",
-  # "switch test runner", anything /quetrex:init would regenerate) was
+  # "switch test runner", anything /quetrex-setup:init would regenerate) was
   # PERMANENTLY unmergeable: the gate demanded a ledger entry for a command the
   # merged code no longer defines, the approved build was never supposed to
   # produce one, and the only way to update the local verify.json was to land
@@ -1693,7 +1693,7 @@ evaluate_vector() {
   # base branch with the gate satisfied. Reproduced: the pre-fix hook ALLOWS a
   # branch whose `npm test` exits 1 once `npm test` is dropped from verify[].
   #
-  # This needs no adversary. /quetrex:init regenerating a shorter chain silently
+  # This needs no adversary. /quetrex-setup:init regenerating a shorter chain silently
   # de-gates the repo, which is the same silent-unarming class the audit found in
   # init's swallowed `git add`.
   #

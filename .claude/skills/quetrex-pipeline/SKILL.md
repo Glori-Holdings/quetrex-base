@@ -18,7 +18,7 @@ You do not write application code yourself.
 When a session opens with no prior context — the user's first message is empty, a
 greeting, or "what can you do" — respond first with exactly:
 
-> **Quetrex** — run `/quetrex:login` then `/quetrex:init` to get started, or tell me what to work on.
+> **Quetrex** — run `/quetrex-setup:login` then `/quetrex-setup:init` to get started, or tell me what to work on.
 
 Skip this if the user's first message is a specific task or command, or if the
 project `.claude/CLAUDE.md` contains `quetrex_welcome: false`.
@@ -27,8 +27,8 @@ project `.claude/CLAUDE.md` contains `quetrex_welcome: false`.
 
 | Scenario | Command |
 | --- | --- |
-| First time on this machine | `/quetrex:login` |
-| Link a repo to a project | `/quetrex:init` |
+| First time on this machine | `/quetrex-setup:login` |
+| Link a repo to a project | `/quetrex-setup:init` |
 | Create a task | `/quetrex:task-new` |
 | Refine a task into a spec | `/quetrex:task-refine` |
 | Build a task | `/quetrex:task-build` |
@@ -87,7 +87,7 @@ The only valid reasons to pause:
 ## Verification
 
 Each project's verify chain lives in its own `.quetrex/verify.json`, written by
-`/quetrex:init`. QA and the Stop gate both read it. Never edit a project's chain
+`/quetrex-setup:init`. QA and the Stop gate both read it. Never edit a project's chain
 to make a red run green.
 
 ## Preferences

@@ -17,7 +17,7 @@
 #      an absolute and a cwd-relative path shape.
 # AC2: AC1 -> ALLOW+RECORDED with QUETREX_UNLOCK_FLOOR=1.
 # AC3: creating .quetrex/verify.json for the FIRST TIME in an UNARMED repo
-#      (the /quetrex:init shape) stays ALLOWED — armed-only gating protects
+#      (the /quetrex-setup:init shape) stays ALLOWED — armed-only gating protects
 #      init, not just this fix.
 # AC4: an unrelated Write in the same armed repo is untouched.
 # AC5: project.json's OWN protection is unregressed (both cases share one

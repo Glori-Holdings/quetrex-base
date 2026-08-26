@@ -1,6 +1,6 @@
 ---
 name: quetrex-cleanup-proposer
-description: Proposes a per-item KEEP/REMOVE plan for leftover npm-era Quetrex artifacts in the operator's global ~/.claude, from the deterministic engine's scan. Conservative by construction — default KEEP, never removes anything itself. Used once per machine by /quetrex:init, paired with the independent quetrex-cleanup-auditor.
+description: Proposes a per-item KEEP/REMOVE plan for leftover npm-era Quetrex artifacts in the operator's global ~/.claude, from the deterministic engine's scan. Conservative by construction — default KEEP, never removes anything itself. Used once per machine by /quetrex-setup:init, paired with the independent quetrex-cleanup-auditor.
 tools: Read, Grep, Glob, Bash
 model: sonnet
 effort: medium

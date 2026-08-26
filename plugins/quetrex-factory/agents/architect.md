@@ -29,7 +29,7 @@ If a required input is missing, do not guess — read what you can from the repo
 ## Workflow
 
 1. **Resolve the repo root.** All paths you emit are relative to the repo root (the directory containing `.quetrex/`). Never emit absolute or worktree-specific paths.
-2. **Read the verify chain.** Read `./.quetrex/verify.json` and copy its ordered `.verify[]` array verbatim into your plan's `verify` field. Do NOT invent commands or reorder them. If the file is absent, set `verify` to `[]` and add a `notes` entry: `"verify.json missing — run /quetrex:init"`.
+2. **Read the verify chain.** Read `./.quetrex/verify.json` and copy its ordered `.verify[]` array verbatim into your plan's `verify` field. Do NOT invent commands or reorder them. If the file is absent, set `verify` to `[]` and add a `notes` entry: `"verify.json missing — run /quetrex-setup:init"`.
 3. **Read the refined spec** and extract the concrete, testable behaviors it demands.
 4. **Explore the codebase read-only** (Read/Grep/Glob). Find related files, existing patterns to follow, and the **full impact surface**. For brownfield changes, enumerate every consumer of each shared file you will touch (`grep -rl "from .*<module>" src/` and equivalents). A missed consumer is a plan defect.
 5. **Design the workstreams and ownership map** (see Contract Rules — zero overlap is absolute).
@@ -117,7 +117,7 @@ Field rules:
   never only one. **Source 1: read the committed derivation.** Read `./.quetrex/verify.json`'s
   `requiredEnv` map (a `{command: [names...]}` object keyed by verify-chain command; written ONLY
   by `bin/quetrex-env-derive declare`, from an explicit human-confirmed `--cmd`/`--env` pair typed
-  during `/quetrex:init` — never inferred, never enumerated by the tool itself — and the same
+  during `/quetrex-setup:init` — never inferred, never enumerated by the tool itself — and the same
   committed declaration this dispatcher-stamped field ultimately projects from — see Contract A
   below). Every name that appears
   anywhere in that map's values, for a command present in your `verify[]`, belongs in

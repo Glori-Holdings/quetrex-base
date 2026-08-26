@@ -33,8 +33,8 @@ Run a single bash block. The `quetrex-api` tool (shipped on the plugin's PATH) o
 auth/access messaging — do not reinvent it.
 
 ```bash
-QX_KANBAN_URL="$(quetrex-api kanban-url)"     || exit 1   # prints "Run /quetrex:login" on failure
-QX_PROJECT_CODE="$(quetrex-api project-code)" || exit 1   # prints "Run /quetrex:init" on failure
+QX_KANBAN_URL="$(quetrex-api kanban-url)"     || exit 1   # prints "Run /quetrex-setup:login" on failure
+QX_PROJECT_CODE="$(quetrex-api project-code)" || exit 1   # prints "Run /quetrex-setup:init" on failure
 echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL"
 ```
 
@@ -48,7 +48,7 @@ If either call fails, surface its message verbatim and stop. Do not continue.
 quetrex-api GET "/api/projects/$QX_PROJECT_CODE" >/dev/null || exit 1
 ```
 
-A non-zero exit means `quetrex-api` already printed the correct message (401 → `Run /quetrex:login`,
+A non-zero exit means `quetrex-api` already printed the correct message (401 → `Run /quetrex-setup:login`,
 403/404 → `No access — contact your administrator`, other → `Quetrex API error (HTTP <code>)`).
 Just stop.
 

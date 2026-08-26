@@ -26,8 +26,8 @@ only by a live run with the operator present.
 
 | # | step | passes when | how |
 |---|---|---|---|
-| 1 | `/quetrex:login` on a cold machine | `~/.quetrex/auth.json` exists; `/api/projects` answers 200 with the stored token | AUTO |
-| 2 | `/quetrex:init` in a fresh clone | `.quetrex/project.json` + `.quetrex/verify.json` are **committed** (not merely on disk); `enabledPlugins` carries the engine unpinned; `/quetrex:doctor` reports every check green | AUTO |
+| 1 | `/quetrex-setup:login` on a cold machine | `~/.quetrex/auth.json` exists; `/api/projects` answers 200 with the stored token | AUTO |
+| 2 | `/quetrex-setup:init` in a fresh clone | `.quetrex/project.json` + `.quetrex/verify.json` are **committed** (not merely on disk); `enabledPlugins` carries the engine unpinned; `/quetrex:doctor` reports every check green | AUTO |
 | 3 | `/quetrex:task-new` → `/quetrex:task-refine` | card exists on the board in `backlog` with the refined description written back | AUTO |
 | 4 | `/quetrex:task-build` plan half | architect plan written; substrate announced out loud ("planning locally; the build dispatches to Anthropic's cloud after you approve"); **scope approved from the phone** | DRILL |
 | 5 | build half | the pipeline runs **entirely on Anthropic's servers** — no build step executes on the operator's machine; the card moves as it progresses; a run needing a human is visible without being at the terminal | DRILL |

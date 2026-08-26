@@ -8,16 +8,6 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/session-state.sh\"",
             "timeout": 30
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/quetrex-update-check.sh\"",
-            "timeout": 15
-          },
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/.claude/hooks/quetrex-bound-version-guard.sh\"",
-            "timeout": 10
           }
         ]
       }

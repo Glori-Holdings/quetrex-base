@@ -1,5 +1,5 @@
 ---
-description: Link this repo to a Quetrex project (writes ./.quetrex/project.json with its branchPrefix) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, enable the quetrex-factory engine in enabledPlugins (never version-pinned) so its build gates run locally and in cloud routines, union in the permissions the pipeline needs, generate .worktreeinclude, offer to import local env creds into the vault, open a PR). Usage: /quetrex:init [project name]
+description: Link this repo to a Quetrex project (writes ./.quetrex/project.json with its branchPrefix) or create one, then non-destructively adopt the repo (clean stale tracker refs, ensure project Verification rules, enable the quetrex-factory engine in enabledPlugins (never version-pinned) so its build gates run locally and in cloud routines, union in the permissions the pipeline needs, generate .worktreeinclude, offer to import local env creds into the vault, open a PR). Usage: /quetrex-setup:init [project name]
 argument-hint: "[project name — only used when the repo is not yet linked]"
 ---
 
@@ -36,7 +36,7 @@ Run a single bash block. The `quetrex-api` tool (shipped on the plugin's PATH) o
 messaging — do not reinvent it.
 
 ```bash
-QX_KANBAN_URL="$(quetrex-api kanban-url)" || exit 1   # prints "Run /quetrex:login" on miss/expiry
+QX_KANBAN_URL="$(quetrex-api kanban-url)" || exit 1   # prints "Run /quetrex-setup:login" on miss/expiry
 ```
 
 If it fails, surface its message verbatim and stop. `QX_KANBAN_URL` is now set from
@@ -104,7 +104,7 @@ PAYLOAD="$(node -e 'process.stdout.write(JSON.stringify({name:process.argv[1]}))
 if ! RESP="$(quetrex-api POST /api/projects "$PAYLOAD")"; then
   # quetrex-api already printed a message. The most common failure here is 403 — project
   # creation currently requires admin. Give the clearer, action-specific guidance.
-  echo "Creating a project requires admin — ask a super_admin to create it, or get added to an existing project, then re-run /quetrex:init." >&2
+  echo "Creating a project requires admin — ask a super_admin to create it, or get added to an existing project, then re-run /quetrex-setup:init." >&2
   exit 1
 fi
 CODE="$(node -e '
@@ -472,11 +472,11 @@ checkout? (Nothing here was derived — you are the only source of this pairing.
 **`AskUserQuestion` IS the human confirmation. Never test for a terminal here.** The
 requirement that a human authorises every pairing is absolute and unchanged — but the
 authorising surface is the `AskUserQuestion` tool call above, which is a tool call, not a
-terminal. `/quetrex:init` only ever executes through Claude Code's Bash tool, where
+terminal. `/quetrex-setup:init` only ever executes through Claude Code's Bash tool, where
 neither stdin nor stdout is ever a terminal, so a terminal test in this step is not a
 conservative fallback: it is an unconditional off switch. One shipped, and the
 consequence was measured — `quetrex-env-derive declare`, the ONLY writer of
-`requiredEnv`, became structurally unreachable, so no repo `/quetrex:init` ever armed
+`requiredEnv`, became structurally unreachable, so no repo `/quetrex-setup:init` ever armed
 carried a `requiredEnv` map, `verify-gate`'s declarative env skip never fired anywhere,
 and the first cloud build of any repo whose chain needs a credential died on an unset
 variable no sandbox could hold. The one existing map in the wild had to be typed by hand.
@@ -532,7 +532,7 @@ carries this write into a reviewed commit; nothing further is needed here.
 
 **Already-adopted repos.** Because 5c is union-only and never narrows an existing
 `.verify[]` or a pre-existing `requiredEnv`/`requiredEnvDeclined` entry, simply
-**re-running `/quetrex:init`** is the complete remediation for a repo whose
+**re-running `/quetrex-setup:init`** is the complete remediation for a repo whose
 `.quetrex/verify.json` predates this field — it re-proposes and, once the human
 confirms, merges into whatever is already committed, without touching a command, a
 name, or anything a human already wrote by hand. `/quetrex:doctor` Check 5 detects
@@ -740,7 +740,33 @@ neither reports it as outstanding.
 ---
 
 
-## 4h. Arm the repo for cloud execution — `quetrex-arm`
+## 4h. Detect a stack pack, then arm the repo for cloud execution — `quetrex-arm`
+
+**First, detect a stack pack from this repo's own committed evidence.** A stack pack
+(`quetrex-nextjs`, `quetrex-python`, `quetrex-rust`, `quetrex-swift`, …) ships stack-specific
+skills as a separate marketplace plugin — never guessed at, never installed speculatively,
+only enabled when this repo's own root gives real evidence of that stack. Checked in this
+order (first match wins; a Next.js `package.json` is checked ahead of a bare `package.json`
+so a Next.js repo that also happens to carry an unrelated `requirements.txt` still gets the
+Next.js pack); no match writes no pack key and is not an error:
+
+```bash
+STACK_PACK=""
+if [ -f "$REPO_ROOT/package.json" ] && node -e '
+  let o; try { o = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); } catch { process.exit(1); }
+  const deps = Object.assign({}, o.dependencies || {}, o.devDependencies || {});
+  process.exit(deps.next ? 0 : 1);
+' "$REPO_ROOT/package.json" 2>/dev/null; then
+  STACK_PACK="quetrex-nextjs"
+elif [ -f "$REPO_ROOT/pyproject.toml" ] || [ -f "$REPO_ROOT/requirements.txt" ]; then
+  STACK_PACK="quetrex-python"
+elif [ -f "$REPO_ROOT/Cargo.toml" ]; then
+  STACK_PACK="quetrex-rust"
+elif [ -f "$REPO_ROOT/Package.swift" ]; then
+  STACK_PACK="quetrex-swift"
+fi
+[ -n "$STACK_PACK" ] && echo "stack pack detected: $STACK_PACK" || echo "stack pack: none detected"
+```
 
 Cloud routines and every teammate read which engine to run from what is **committed** in
 this repo — `.claude/settings.json` `enabledPlugins` + `extraKnownMarketplaces` — never from
@@ -752,25 +778,33 @@ slash-command bash, unlike the plugin-root path variable, which is unset in this
 call it by name, never source it):
 
 ```bash
-QUETREX_ARM_OUTPUT="$(quetrex-arm "$REPO_ROOT" "$QX_KANBAN_URL")"; QUETREX_ARM_RC=$?
+QUETREX_ARM_OUTPUT="$(quetrex-arm "$REPO_ROOT" "$QX_KANBAN_URL" ${STACK_PACK:+"$STACK_PACK"})"; QUETREX_ARM_RC=$?
 printf '%s\n' "$QUETREX_ARM_OUTPUT"
 if [ "$QUETREX_ARM_RC" -ne 0 ]; then
-  echo "quetrex-arm failed — .claude/settings.json may be only partially armed. Re-run /quetrex:init once resolved." >&2
+  echo "quetrex-arm failed — .claude/settings.json may be only partially armed. Re-run /quetrex-setup:init once resolved." >&2
 fi
 ```
 
 `quetrex-arm` idempotently and non-destructively writes, into `$REPO_ROOT`:
 
-- `.claude/settings.json` `enabledPlugins`: `"quetrex@quetrex": true` and
-  `"quetrex-factory@quetrex": true` — **booleans, never version pins.** A pinned entry
-  (array or string) makes the plugin count as *disabled* for dependency resolution, and the
-  whole `/quetrex:*` command layer then fails to load: measured across four checkouts, pin
-  absent → enabled, `true` → enabled, `["1.2.1"]` (the exact installed version) → **failed
-  to load**, `["1.1.0"]` → **failed to load**. Pinning also broke updates — a stale pin, or
-  one naming a version a machine lacks, strands the team while every repo looks configured.
-  The engine tracks the marketplace via `autoUpdate` and the running version is surfaced in
-  the status bar (`quetrex-version`), not frozen into config. Any legacy pin found is
-  rewritten to `true`. Arming needs no network for this.
+- `.claude/settings.json` `enabledPlugins`: `"quetrex@quetrex": true`,
+  `"quetrex-factory@quetrex": true`, `"quetrex-setup@quetrex": true`, and — when step 4h's
+  detection above found one — the detected stack pack, e.g. `"quetrex-nextjs@quetrex": true`
+  — **booleans, never version pins.** A pinned entry (array or string) makes the plugin
+  count as *disabled* for dependency resolution, and the whole `/quetrex:*` command layer
+  then fails to load: measured across four checkouts, pin absent → enabled, `true` →
+  enabled, `["1.2.1"]` (the exact installed version) → **failed to load**, `["1.1.0"]` →
+  **failed to load**. Pinning also broke updates — a stale pin, or one naming a version a
+  machine lacks, strands the team while every repo looks configured. The engine tracks the
+  marketplace via `autoUpdate` and the running version is surfaced in the status bar
+  (`quetrex-version`), not frozen into config. Any legacy pin found on any
+  `quetrex[-<name>]@quetrex` key — not just the two originally-pinned ones — is rewritten to
+  `true`. Arming needs no network for this.
+  `quetrex-setup` is enabled here at PROJECT scope too, not only machine-wide: a cloud
+  routine and a teammate's fresh clone are provisioned from THIS repo's own
+  `.claude/settings.json`, and both need `quetrex-api` / `quetrex-env-derive` on PATH
+  (`.claude/lib/cloud-build-routine.md` names them explicitly) — see `bin/quetrex-arm`'s own
+  `bin_split` decision notes for the full reasoning.
 - `.claude/settings.json` `extraKnownMarketplaces.quetrex.source`:
   `{"source":"github","repo":"Glori-Holdings/quetrex-plugins"}` — without this the
   `quetrex-factory` pin above cannot resolve.
@@ -778,7 +812,7 @@ fi
   `{"type":"command","command":"bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/statusline-command.sh\""}`.
   **A Claude Code plugin cannot register a `statusLine`**, so the repo has to carry it or
   the running engine version is displayed nowhere: nothing is version-pinned, so config
-  names no version, and both `/quetrex:update` and `/quetrex:doctor` tell the operator the
+  names no version, and both `/quetrex-setup:update` and `/quetrex:doctor` tell the operator the
   version "lives in the status bar." Before this, that bar was empty in every armed repo,
   and a teammate silently stranded on an old engine had no on-screen signal at all. The
   renderer reads the version at runtime via `quetrex-version`, so the committed copy never
@@ -788,7 +822,7 @@ fi
   operator set is left byte-for-byte alone, and an existing
   `.claude/statusline-command.sh` in the repo is never overwritten. The single exception
   is a repair, not a clobber — a registration that already points at *our* script but
-  omits the default is rewritten to the guarded form, so **re-running `/quetrex:init` is
+  omits the default is rewritten to the guarded form, so **re-running `/quetrex-setup:init` is
   the remediation path**. If the shipped script cannot be located, arming registers
   **nothing** rather than a status bar pointing at a file that does not exist.
 It also **removes** one thing, and this is a repair, not an omission:
@@ -798,7 +832,7 @@ It also **removes** one thing, and this is a repair, not an omission:
   kanban has no `/api/mcp` route and the URL answers with the dash's Next.js 404 HTML page,
   so Claude Code opened every armed repo with an MCP server that could never handshake —
   surfacing to the operator as "the plugins cannot connect to the dash." Arming now purges
-  the registration, which makes **re-running `/quetrex:init` the remediation path** for a
+  the registration, which makes **re-running `/quetrex-setup:init` the remediation path** for a
   repo armed by an older engine. Nothing is lost; the broker never worked. Only that exact
   url is touched — another `mcpServers` entry, another top-level key, or a `quetrex-kanban`
   entry pointing at something real all survive untouched, and `.mcp.json` is deleted only if
@@ -837,7 +871,7 @@ QX_HOOK_URL="${QX_KANBAN_URL%/}/api/webhooks/github"
 if [ -z "$QX_SLUG" ] || ! printf '%s' "$QX_SLUG" | grep -q '/'; then
   echo "webhook: no GitHub origin remote — skipped (cards will not auto-move to pr_ready here)"
 elif ! command -v gh >/dev/null 2>&1; then
-  echo "webhook: gh CLI unavailable — skipped. Re-run /quetrex:init once gh is installed."
+  echo "webhook: gh CLI unavailable — skipped. Re-run /quetrex-setup:init once gh is installed."
 else
   QX_HOOK_ID="$(gh api "repos/$QX_SLUG/hooks" --jq '.[] | select(.config.url=="'"$QX_HOOK_URL"'") | .id' 2>/dev/null | head -1)"
   if [ -n "$QX_HOOK_ID" ]; then
@@ -853,7 +887,7 @@ else
       '{"names":["GITHUB_WEBHOOK_SECRET"]}' 2>/dev/null | jq -r '.GITHUB_WEBHOOK_SECRET // empty')"
     if [ -z "$QX_WH_SECRET" ]; then
       echo "webhook: no GITHUB_WEBHOOK_SECRET in project $QX_PROJECT_CODE's vault — skipped."
-      echo "         Add it at $QX_KANBAN_URL/keys, then re-run /quetrex:init to register."
+      echo "         Add it at $QX_KANBAN_URL/keys, then re-run /quetrex-setup:init to register."
     else
       QX_HOOK_OUT="$(jq -cn --arg u "$QX_HOOK_URL" --arg s "$QX_WH_SECRET" \
         '{name:"web",active:true,events:["pull_request"],config:{url:$u,content_type:"json",secret:$s,insecure_ssl:"0"}}' \
@@ -1070,9 +1104,9 @@ git -C "$REPO_ROOT" checkout -b "$BRANCH" 2>/dev/null || git -C "$REPO_ROOT" che
 # that exits 0, so a re-run over an already-adopted repo still succeeds.
 stage_required() {  # stage_required <repo-relative-path>
   git -C "$REPO_ROOT" add -- "$1" && return 0
-  echo "FATAL: /quetrex:init could not stage the required arming artifact '$1'." >&2
+  echo "FATAL: /quetrex-setup:init could not stage the required arming artifact '$1'." >&2
   echo "  The usual cause is a .gitignore rule that covers it (e.g. a blanket '.quetrex/*')." >&2
-  echo "  Add a negation for it ('!$1'), or drop the rule, then re-run /quetrex:init." >&2
+  echo "  Add a negation for it ('!$1'), or drop the rule, then re-run /quetrex-setup:init." >&2
   echo "  NOT continuing: an unstaged arming artifact means this repo has NO gates," >&2
   echo "  and an unattended cloud build would stall at 'gh pr create' waiting for a human." >&2
   return 1
@@ -1180,7 +1214,7 @@ Summarize for the user:
   committed.
 - **Engine pin** — the `enabledPlugins` written (`quetrex@quetrex: true` and the concrete
   `quetrex-factory@quetrex: <version>` pin), or *"already current"*; if the marketplace was
-  unreachable, the note to run `/quetrex:update` once online to write the concrete factory pin.
+  unreachable, the note to run `/quetrex-setup:update` once online to write the concrete factory pin.
 - **MCP broker** — what step 4h did to `.mcp.json`: removed the dead `quetrex-kanban`
   registration (and whether the emptied file was deleted), or nothing to remediate. If it
   removed one, say plainly that this repo had a broker pointing at an endpoint that was never
@@ -1198,7 +1232,7 @@ Summarize for the user:
 
 ## Error-handling rules
 
-- Reuse the helper's messaging verbatim: `401 → Run /quetrex:login`,
+- Reuse the helper's messaging verbatim: `401 → Run /quetrex-setup:login`,
   `403/404 → No access — contact your administrator`. The **only** override is the
   create-project 403, where you print the admin-specific hint instead.
 - Never print the bearer token. Build all JSON with `node` / `JSON.stringify`.

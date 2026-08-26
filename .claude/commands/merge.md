@@ -83,7 +83,7 @@ printf '%s' "$TASK" | grep -qE '^[A-Za-z][A-Za-z0-9]*-[0-9]+(\.[0-9]+)?$' || {
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
 BIND="$REPO_ROOT/.quetrex/project.json"
-[ -f "$BIND" ] || { echo "This repo is not linked to a Quetrex project — run /quetrex:init." >&2; exit 1; }
+[ -f "$BIND" ] || { echo "This repo is not linked to a Quetrex project — run /quetrex-setup:init." >&2; exit 1; }
 BRANCH_PREFIX="$(quetrex-api json-get "$BIND" branchPrefix 2>/dev/null || echo "claude/")"
 [ -n "$BRANCH_PREFIX" ] || BRANCH_PREFIX="claude/"
 SLUG="$(git -C "$REPO_ROOT" remote get-url origin | sed -E 's#.*[:/]([^/]+/[^/]+?)(\.git)?$#\1#')"

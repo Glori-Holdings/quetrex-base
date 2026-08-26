@@ -78,8 +78,8 @@ is_silent() { [ -z "$1" ]; }
 # =============================================================================
 F1="$(new_fixture)"; arm "$F1"
 OUT="$(run_vg "$VERIFY_GATE" "$F1")"
-if is_block "$OUT" && printf '%s' "$OUT" | grep -q 'has no verify chain' && printf '%s' "$OUT" | grep -q '/quetrex:init'; then
-  ok "AC1: armed repo with no resolvable verify chain BLOCKS, naming .quetrex/project.json, 'no verify chain', and /quetrex:init"
+if is_block "$OUT" && printf '%s' "$OUT" | grep -q 'has no verify chain' && printf '%s' "$OUT" | grep -q '/quetrex-setup:init'; then
+  ok "AC1: armed repo with no resolvable verify chain BLOCKS, naming .quetrex/project.json, 'no verify chain', and /quetrex-setup:init"
 else
   notok "AC1: expected a labelled block for an armed repo with no chain, got [$OUT]"
 fi

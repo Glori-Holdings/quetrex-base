@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 #
-# quetrex-arm — deterministic cloud-arming for /quetrex:init.
+# quetrex-arm — deterministic cloud-arming for /quetrex-setup:init.
 #
 # WHY A bin/ EXECUTABLE. In plugin slash-command bash, ${CLAUDE_PLUGIN_ROOT} is
 # UNSET, so a command cannot source a lib by plugin path — but the plugin's
@@ -9,13 +9,20 @@
 # tool existed, the cloud-arming writes lived as inline node prose inside
 # .claude/commands/init.md (steps 4h/4i) and, because a slash command's
 # markdown prose is not guaranteed to execute verbatim, those writes did not
-# reliably land — a repo could finish /quetrex:init with empty enabledPlugins,
-# no .mcp.json, and no extraKnownMarketplaces. Moving the logic into a real
-# executable makes arming deterministic: it either runs and exits 0, or it
-# fails loudly.
+# reliably land — a repo could finish /quetrex-setup:init with empty
+# enabledPlugins, no .mcp.json, and no extraKnownMarketplaces. Moving the
+# logic into a real executable makes arming deterministic: it either runs and
+# exits 0, or it fails loudly.
 #
 # usage:
-#   quetrex-arm <repo-root> <kanban-url>
+#   quetrex-arm <repo-root> <kanban-url> [extra-plugin-name...]
+#
+# <extra-plugin-name...> is the detected stack pack (quetrex-nextjs,
+# quetrex-python, quetrex-rust, quetrex-swift — see init.md step 4h's
+# detection), each enabled at project scope alongside the three fixed keys
+# below. Zero, one, or more may be given; an unrecognised or absent pack is
+# simply omitted — this tool never validates the name against a real
+# marketplace entry, it only writes the boolean.
 #
 # Idempotently and non-destructively writes, into <repo-root>:
 #
@@ -26,8 +33,9 @@
 #     statusLine = {"type":"command",
 #                   "command":"bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/statusline-command.sh\""}
 #       WHY ARMING OWNS THIS. Nothing is version-pinned anywhere, so config
-#       carries no engine version at all — /quetrex:update and /quetrex:doctor
-#       both tell the operator the running version "lives in the status bar".
+#       carries no engine version at all — /quetrex-setup:update and
+#       /quetrex:doctor both tell the operator the running version "lives in
+#       the status bar".
 #       A Claude Code plugin CANNOT register a statusLine, so if arming does
 #       not write it into the TARGET repo, the one place the product points at
 #       is blank in every armed repo and a teammate stranded on an old engine
@@ -44,13 +52,23 @@
 #       overwritten. If the shipped script cannot be located, NO statusLine is
 #       registered — never a registration pointing at nothing.
 #
-#     enabledPlugins["quetrex@quetrex"]        = true
+#     enabledPlugins["quetrex@quetrex"]         = true
 #     enabledPlugins["quetrex-factory@quetrex"] = true
+#     enabledPlugins["quetrex-setup@quetrex"]   = true
+#     enabledPlugins["<extra-plugin-name>@quetrex"] = true   (one per stack pack arg)
 #       NO VERSION PINS. A pinned (array or string) value makes the plugin count
 #       as DISABLED for dependency resolution, which stopped the whole quetrex
 #       command layer from loading in every armed repo. Booleans only; the engine
-#       tracks the marketplace via autoUpdate. Any legacy pin found is rewritten
-#       to true.
+#       tracks the marketplace via autoUpdate. A legacy pin found on ANY key
+#       matching the quetrex-family shape (quetrex[-<name>]@quetrex) is
+#       rewritten to true — not just the two originally-named keys — so a
+#       stale pin on quetrex-setup or a stack pack is repaired exactly like
+#       one on quetrex or quetrex-factory always was.
+#       quetrex-setup is enabled here too (not just machine-wide) because a
+#       cloud routine and a teammate's fresh clone are provisioned from the
+#       REPO's own .claude/settings.json — neither has quetrex-setup enabled
+#       any other way — and both need quetrex-api / quetrex-env-derive on
+#       PATH (.claude/lib/cloud-build-routine.md names them explicitly).
 #     extraKnownMarketplaces.quetrex =
 #       {"source":{"source":"github","repo":"Glori-Holdings/quetrex-plugins"},
 #        "autoUpdate":true}
@@ -66,12 +84,13 @@
 #     http MCP broker at <kanban-url>/api/mcp. That endpoint was never built —
 #     the kanban has no /api/mcp route, and the URL answers with the dash's
 #     Next.js 404 HTML page. Claude Code therefore tried to connect a broker
-#     that could never handshake, so EVERY repo /quetrex:init had ever armed
-#     opened with a failing MCP server. Arming now purges that registration
-#     instead of writing it, which makes re-running /quetrex:init the
-#     remediation path for an already-armed repo. Nothing is lost: the broker
-#     never worked. When the endpoint is actually built, re-introduce the write
-#     ONLY after the live URL answers an MCP `initialize`.
+#     that could never handshake, so EVERY repo /quetrex-setup:init had ever
+#     armed opened with a failing MCP server. Arming now purges that
+#     registration instead of writing it, which makes re-running
+#     /quetrex-setup:init the remediation path for an already-armed repo.
+#     Nothing is lost: the broker never worked. When the endpoint is actually
+#     built, re-introduce the write ONLY after the live URL answers an MCP
+#     `initialize`.
 #
 # Every write is a merge: existing keys/servers/plugins the caller did not ask
 # about are preserved byte-for-byte in position. Re-running with the same
@@ -95,10 +114,11 @@ QXARM_STATUSLINE_CMD='bash "${CLAUDE_PROJECT_DIR:-.}/.claude/statusline-command.
 
 _qxarm_usage() {
   cat >&2 <<'EOF'
-usage: quetrex-arm <repo-root> <kanban-url>
+usage: quetrex-arm <repo-root> <kanban-url> [extra-plugin-name...]
 
 Idempotently, non-destructively arms <repo-root> for cloud execution:
-  - .claude/settings.json: enabledPlugins pin (quetrex + quetrex-factory),
+  - .claude/settings.json: enabledPlugins pin (quetrex + quetrex-factory +
+    quetrex-setup + any extra-plugin-name given, e.g. a detected stack pack),
     extraKnownMarketplaces.quetrex, and the statusLine registration
   - .claude/statusline-command.sh: the status-bar renderer that surfaces the
     running engine version (a plugin cannot register a statusLine itself)
@@ -124,11 +144,12 @@ _qxarm_resolve_factory_version() {
 }
 
 # _qxarm_statusline_src
-#   Absolute path to the status-bar renderer this engine ships. bin/ and
-#   .claude/ are siblings under the plugin root, so resolve it RELATIVE TO
-#   THIS FILE — exactly how bin/quetrex-cleanup finds its own engine lib —
-#   because ${CLAUDE_PLUGIN_ROOT} is unset in the slash-command bash that
-#   calls this tool. Prints nothing when the location cannot be resolved.
+#   Absolute path to the status-bar renderer this engine ships. bin/ and the
+#   renderer are siblings under the plugin root (quetrex-setup's flat layout —
+#   it ships no .claude/ tree of its own), so resolve it RELATIVE TO THIS FILE
+#   — exactly how bin/quetrex-cleanup finds its own engine lib — because
+#   ${CLAUDE_PLUGIN_ROOT} is unset in the slash-command bash that calls this
+#   tool. Prints nothing when the location cannot be resolved.
 _qxarm_statusline_src() {
   if [ -n "${QX_ARM_STATUSLINE_SRC:-}" ]; then
     printf '%s' "$QX_ARM_STATUSLINE_SRC"
@@ -137,7 +158,7 @@ _qxarm_statusline_src() {
   local self_dir
   self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || return 0
   [ -n "$self_dir" ] || return 0
-  printf '%s' "$self_dir/.claude/statusline-command.sh"
+  printf '%s' "$self_dir/statusline-command.sh"
 }
 
 # _qxarm_install_statusline <repo-root>
@@ -175,22 +196,73 @@ _qxarm_install_statusline() {
   return 0
 }
 
-# _qxarm_write_settings <file> <statusline-command-or-empty>
+# _qxarm_write_settings <file> <statusline-command-or-empty> [extra-plugin-name...]
 #   Merge the enabledPlugins pin, the extraKnownMarketplaces entry and (when a
 #   command string is given) the statusLine registration into <file>.
 #   Never clobbers any other key. Prints a per-concern change report.
 _qxarm_write_settings() {
+  local file="$1" slcmd="${2:-}"
+  local extra=("${@:3}")
+  # REV-GLOBAL-1: /usr/bin/env bash is 3.2 on macOS (bin/quetrex-cloud-prep
+  # documents this verbatim), where "${extra[@]}" under `set -u` (line 106)
+  # is an "unbound variable" error when extra is EMPTY — the common case,
+  # since most repos detect no stack pack. The guard idiom below
+  # (${ARR[@]+"${ARR[@]}"}) is already used at protected-files-guard.sh,
+  # qx-armed.sh and quetrex-bound-version-guard.sh; this was the one new site
+  # that skipped it, and it aborted the whole write with a raw interpreter
+  # error instead of arming the repo.
   node -e '
     const fs = require("fs"), path = require("path");
-    const [file, slCmd] = process.argv.slice(1);
+    const [file, slCmd, ...extraNames] = process.argv.slice(1);
 
+    // SEC-GLOBAL-4: a file that EXISTS but fails to parse must be refused,
+    // not silently replaced. The header above promises "existing keys the
+    // caller did not ask about are preserved byte-for-byte" — starting over
+    // from {} on a parse error breaks that promise for exactly the settings
+    // a hand-edited (JSONC-with-comments, or just briefly broken) file is
+    // most likely to be carrying, such as permissions.deny. Only a MISSING
+    // file (ENOENT) gets the fresh-{} default; readFileSync throwing for any
+    // other reason (permissions, etc.) is treated the same as unparseable —
+    // refuse rather than guess.
     let o = {};
-    try { o = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+    let raw = null;
+    try {
+      raw = fs.readFileSync(file, "utf8");
+    } catch (e) {
+      if (e && e.code !== "ENOENT") {
+        console.error("settings.json: cannot read " + file + " (" + (e.code || e.message) + ") — refusing to write, left untouched.");
+        process.exit(1);
+      }
+    }
+    if (raw !== null) {
+      try {
+        o = JSON.parse(raw);
+      } catch (e) {
+        console.error("settings.json: " + file + " exists but is not valid JSON — refusing to overwrite it (that would silently drop every key it holds, including permissions.deny). Fix the JSON by hand, or delete the file to let arming create a fresh one.");
+        process.exit(1);
+      }
+    }
 
+    // SEC-GLOBAL-3: `o.enabledPlugins || {}` only replaces a FALSY value
+    // (undefined/null/""/0/false) — a non-object truthy value (a string, an
+    // array, a number) survives that line unchanged, and every write below
+    // is a property assignment through it. Assigning a property onto a
+    // primitive (e.g. the string "pwned") is a silent no-op in sloppy mode:
+    // pinsChanged ends up false, the run reports success, and the entire
+    // safety floor (deny-guard, secret-scan, enforce-branch, merge-gate,
+    // verify-gate — everything quetrex-factory@quetrex loads) never gets
+    // enabled while the operator is told arming succeeded. Fail loudly
+    // instead of guessing.
+    if (o.enabledPlugins !== undefined && o.enabledPlugins !== null &&
+        (typeof o.enabledPlugins !== "object" || Array.isArray(o.enabledPlugins))) {
+      const got = Array.isArray(o.enabledPlugins) ? "an array" : "a " + typeof o.enabledPlugins;
+      console.error("settings.json: enabledPlugins is " + got + ", not an object — refusing to arm (writing through it would silently enable nothing and still report success). Fix enabledPlugins in " + file + " by hand, or remove the key.");
+      process.exit(1);
+    }
     o.enabledPlugins = o.enabledPlugins || {};
     const beforePins = JSON.stringify(o.enabledPlugins);
-    // NO VERSION PINS. EVER. Both plugins are enabled with a plain boolean and
-    // track the marketplace automatically.
+    // NO VERSION PINS. EVER. Every quetrex-family plugin is enabled with a
+    // plain boolean and tracks the marketplace automatically.
     //
     // WHY, measured rather than argued: a version-pinned entry
     // (enabledPlugins["quetrex-factory@quetrex"] = ["1.2.1"]) makes the plugin
@@ -210,11 +282,20 @@ _qxarm_write_settings() {
     // shell string, and one would terminate it.)
     o.enabledPlugins["quetrex@quetrex"] = true;
     o.enabledPlugins["quetrex-factory@quetrex"] = true;
-    // Strip any legacy version pin left by an older engine: while it is present,
-    // the command layer does not load.
+    o.enabledPlugins["quetrex-setup@quetrex"] = true;
+    for (const name of extraNames) {
+      if (name) o.enabledPlugins[name + "@quetrex"] = true;
+    }
+    // Strip any legacy version pin left by an older engine on ANY quetrex-family
+    // key (quetrex@quetrex, quetrex-factory@quetrex, quetrex-setup@quetrex, or a
+    // stack pack like quetrex-nextjs@quetrex) — while ANY of them is present,
+    // the command layer does not load. Generalised past the two originally-named
+    // keys so a stale pin on quetrex-setup or a stack pack is repaired exactly
+    // like one on quetrex or quetrex-factory always was.
+    const QUETREX_FAMILY_KEY = /^quetrex(-[a-z0-9]+)?@quetrex$/;
     for (const k of Object.keys(o.enabledPlugins)) {
       if (Array.isArray(o.enabledPlugins[k]) || typeof o.enabledPlugins[k] === "string") {
-        if (k === "quetrex@quetrex" || k === "quetrex-factory@quetrex") {
+        if (QUETREX_FAMILY_KEY.test(k)) {
           o.enabledPlugins[k] = true;
         }
       }
@@ -268,14 +349,14 @@ _qxarm_write_settings() {
 
     const parts = [];
     if (pinsChanged) {
-      parts.push(
-        "enabledPlugins (quetrex@quetrex=true, quetrex-factory@quetrex=true — no version pins; the engine auto-updates)"
-      );
+      const names = ["quetrex@quetrex=true", "quetrex-factory@quetrex=true", "quetrex-setup@quetrex=true"]
+        .concat(extraNames.filter(Boolean).map(n => n + "@quetrex=true"));
+      parts.push("enabledPlugins (" + names.join(", ") + " — no version pins; the engine auto-updates)");
     }
     if (mktChanged) { parts.push("extraKnownMarketplaces.quetrex"); }
     if (slChanged) { parts.push("statusLine (the running engine version has no other home)"); }
     console.log("settings.json: wrote " + parts.join(", "));
-  ' "$1" "${2:-}"
+  ' "$file" "$slcmd" ${extra[@]+"${extra[@]}"}
 }
 
 # _qxarm_purge_dead_mcp <file>
@@ -332,6 +413,8 @@ _qxarm_purge_dead_mcp() {
 
 _qxarm_main() {
   local repo_root="${1:-}" kanban_url="${2:-}"
+  shift 2 2>/dev/null || true
+  local extra_names=("$@")   # zero or more detected stack-pack names
 
   if [ -z "$repo_root" ] || [ -z "$kanban_url" ]; then
     _qxarm_usage
@@ -355,10 +438,11 @@ _qxarm_main() {
   _qxarm_install_statusline "$repo_root"
   local sl_cmd=""
   [ "${QXARM_STATUSLINE_READY:-0}" = "1" ] && sl_cmd="$QXARM_STATUSLINE_CMD"
-  _qxarm_write_settings "$repo_root/.claude/settings.json" "$sl_cmd" || return 1
+  _qxarm_write_settings "$repo_root/.claude/settings.json" "$sl_cmd" ${extra_names[@]+"${extra_names[@]}"} || return 1
   # <kanban-url> is still required (see the -z check above) so the call
-  # signature every installed /quetrex:init uses keeps working, but the MCP
-  # step no longer builds a URL from it — it only purges the retired broker.
+  # signature every installed /quetrex-setup:init uses keeps working, but the
+  # MCP step no longer builds a URL from it — it only purges the retired
+  # broker.
   _qxarm_purge_dead_mcp "$repo_root/.mcp.json" || return 1
 
   return 0

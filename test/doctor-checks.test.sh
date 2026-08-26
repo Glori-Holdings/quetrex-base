@@ -10,7 +10,7 @@
 # quetrex-base has no extraKnownMarketplaces key there at all — the operator's
 # autoUpdate:true lives in ~/.claude/settings.json (a perfectly valid, common
 # setup) — so doctor printed a false "✗ Engine" and sent the operator to
-# /quetrex:init for nothing. The fix resolves the setting the way Claude Code
+# /quetrex-setup:init for nothing. The fix resolves the setting the way Claude Code
 # actually does: repo overrides global at the top-level key, but ABSENCE of
 # the key at the repo level falls back to global rather than being read as a
 # failure.
@@ -62,7 +62,7 @@
 # The build reached its terminal stage and STALLED, paging the operator on his
 # phone to approve `gh pr create` — a step that is supposed to be automatic.
 # The cause: Glori-Holdings/quetrex-demo's .claude/settings.json had no
-# `permissions` key at all. /quetrex:init step 4e computes exactly that union
+# `permissions` key at all. /quetrex-setup:init step 4e computes exactly that union
 # and init.md's own prose explains why the unattended pipeline hangs without
 # it, but the grant never landed and NOTHING anywhere reported that. Doctor
 # owns "is this repo actually armed", so it must be able to say so BEFORE a
@@ -70,7 +70,7 @@
 # notification at the end of a build.
 #   AC-D1 (the exact QDM-4 shape): settings.json with NO permissions key ->
 #          Check 8 prints ✗, names BOTH stranding grants, and offers
-#          /quetrex:init as the fix.
+#          /quetrex-setup:init as the fix.
 #   AC-D2 (green when armed): both Bash(git push:*) and Bash(gh pr:*) present
 #          -> ✓, no ✗ line.
 #   AC-D3 (partial grant is still broken): only Bash(git push:*) present ->
@@ -125,6 +125,7 @@ extract_section() {  # extract_section <heading-regex-literal>
 CHECK2_SCRIPT="$(extract_section '## Check 2')"
 CHECK3_SCRIPT="$(extract_section '## Check 3')"
 CHECK8_SCRIPT="$(extract_section '## Check 8')"
+CHECK10_SCRIPT="$(extract_section '## Check 10')"
 
 # Isolated PATH: bin/ (for quetrex-version) + node's own directory (both
 # Check 2 and Check 3 are node-assisted) + the base system dirs — but
@@ -148,6 +149,11 @@ if [ -z "$CHECK8_SCRIPT" ]; then
   fail "setup: could not extract Check 8's bash fence from $DOCTOR_MD — doctor has no pipeline-permissions check at all, so a repo whose settings.json lacks permissions.allow gets zero warning and its next cloud build stalls at 'gh pr create'"
 else
   pass "setup: extracted Check 8's bash fence from doctor.md"
+fi
+if [ -z "$CHECK10_SCRIPT" ]; then
+  fail "setup: could not extract Check 10's bash fence from $DOCTOR_MD — doctor has no user-scope plugin hygiene check at all"
+else
+  pass "setup: extracted Check 10's bash fence from doctor.md"
 fi
 
 # run_check2 <fixture-repo-root> <fixture-home> [shell]
@@ -173,6 +179,17 @@ run_check8() {
     HOME_SETTINGS="$WORK/empty-home/.claude/settings.json"; export HOME_SETTINGS
     PATH="$ISOLATED_PATH"; export PATH
     "$shell" -c "$CHECK8_SCRIPT"
+  )
+}
+
+# run_check10 <fixture-home> [shell]
+run_check10() {
+  local home="$1" shell="${2:-bash}"
+  (
+    HOME="$home"; export HOME
+    HOME_SETTINGS="$home/.claude/settings.json"; export HOME_SETTINGS
+    PATH="$ISOLATED_PATH"; export PATH
+    "$shell" -c "$CHECK10_SCRIPT"
   )
 }
 
@@ -454,8 +471,8 @@ if [ -n "$CHECK8_SCRIPT" ]; then
   if printf '%s' "$OUT_D1" | grep -q '✗' \
      && printf '%s' "$OUT_D1" | grep -qF 'Bash(git push:*)' \
      && printf '%s' "$OUT_D1" | grep -qF 'Bash(gh pr:*)' \
-     && printf '%s' "$OUT_D1" | grep -qF '/quetrex:init'; then
-    pass "AC-D1: a settings.json with NO permissions key is flagged ✗, naming both stranding grants and /quetrex:init as the fix"
+     && printf '%s' "$OUT_D1" | grep -qF '/quetrex-setup:init'; then
+    pass "AC-D1: a settings.json with NO permissions key is flagged ✗, naming both stranding grants and /quetrex-setup:init as the fix"
   else
     fail "AC-D1: a settings.json with NO permissions key was not properly flagged (out: [$OUT_D1]) — this is the QDM-4 repo state, and it must never be diagnosed as healthy"
   fi
@@ -488,15 +505,15 @@ if [ -n "$CHECK8_SCRIPT" ]; then
   D4_REPO="$WORK/d4-repo"
   mk_perm_repo "$D4_REPO" "NONE"
   OUT_D4="$(run_check8 "$D4_REPO" bash 2>&1)"
-  if printf '%s' "$OUT_D4" | grep -q '✗' && printf '%s' "$OUT_D4" | grep -qF '/quetrex:init'; then
-    pass "AC-D4: a repo with no .claude/settings.json at all is flagged ✗ with the /quetrex:init remediation, not crashed through and not silently passed"
+  if printf '%s' "$OUT_D4" | grep -q '✗' && printf '%s' "$OUT_D4" | grep -qF '/quetrex-setup:init'; then
+    pass "AC-D4: a repo with no .claude/settings.json at all is flagged ✗ with the /quetrex-setup:init remediation, not crashed through and not silently passed"
   else
     fail "AC-D4: a repo with no .claude/settings.json produced no actionable ✗ (out: [$OUT_D4])"
   fi
 
   # --- AC-D5: the fix line must not understate what running init commits ----
   # Check 8 diagnoses exactly two grants, but the remediation it prints sends
-  # the operator to /quetrex:init, whose step 4e unions TWELVE entries into the
+  # the operator to /quetrex-setup:init, whose step 4e unions TWELVE entries into the
   # repo's own committed settings — including Edit(/**), Bash(git commit:*),
   # Bash(jq:*) and Bash(mkdir:*). Describing that as "it only ever adds" and
   # nothing more understates the delta the operator is accepting on a check
@@ -508,9 +525,57 @@ if [ -n "$CHECK8_SCRIPT" ]; then
   if printf '%s' "$OUT_D1" | grep -qF 'Edit(/**)' \
      && printf '%s' "$OUT_D1" | grep -qF '4e' \
      && printf '%s' "$OUT_D1" | grep -qiE 'full|all|12|twelve'; then
-    pass "AC-D5: the Check 8 fix line discloses that /quetrex:init writes the FULL pipeline grant set (naming Edit(/**) and pointing at step 4e), not just the two grants it diagnosed"
+    pass "AC-D5: the Check 8 fix line discloses that /quetrex-setup:init writes the FULL pipeline grant set (naming Edit(/**) and pointing at step 4e), not just the two grants it diagnosed"
   else
-    fail "AC-D5: the Check 8 fix line understates /quetrex:init — it diagnoses two grants and then sends the operator to a step that commits twelve, including Edit(/**), Bash(git commit:*), Bash(jq:*) and Bash(mkdir:*). Out: [$OUT_D1]"
+    fail "AC-D5: the Check 8 fix line understates /quetrex-setup:init — it diagnoses two grants and then sends the operator to a step that commits twelve, including Edit(/**), Bash(git commit:*), Bash(jq:*) and Bash(mkdir:*). Out: [$OUT_D1]"
+  fi
+fi
+
+# =============================================================================
+# AC30 — Check 10: user-scope plugin hygiene (3 fixture cases).
+# =============================================================================
+if [ -n "$CHECK10_SCRIPT" ]; then
+  mk_home_settings() {  # mk_home_settings <dir> <enabledPlugins-json-body>
+    mkdir -p "$1/.claude"
+    cat > "$1/.claude/settings.json" <<EOF
+{ "enabledPlugins": $2 }
+EOF
+  }
+
+  # --- case 1: a quetrex plugin OTHER than quetrex-setup enabled at user
+  # scope -> reported ✗ naming it, with a fix telling the operator to remove
+  # it and let /quetrex-setup:init enable it per repo.
+  E1_HOME="$WORK/e1-home"
+  mk_home_settings "$E1_HOME" '{ "quetrex-setup@quetrex": true, "quetrex-factory@quetrex": true }'
+  OUT_E1="$(run_check10 "$E1_HOME" bash 2>&1)"
+  if printf '%s' "$OUT_E1" | grep -q '✗' \
+     && printf '%s' "$OUT_E1" | grep -qF 'quetrex-factory@quetrex' \
+     && printf '%s' "$OUT_E1" | grep -qiF '/quetrex-setup:init'; then
+    pass "AC30 case 1: quetrex-factory@quetrex enabled at user scope is flagged ✗, naming it and pointing at /quetrex-setup:init per repo"
+  else
+    fail "AC30 case 1: a non-setup quetrex plugin enabled at user scope was not properly flagged (out: [$OUT_E1])"
+  fi
+
+  # --- case 2: quetrex-setup NOT enabled at user scope -> ✗ with its own fix.
+  E2_HOME="$WORK/e2-home"
+  mk_home_settings "$E2_HOME" '{}'
+  OUT_E2="$(run_check10 "$E2_HOME" bash 2>&1)"
+  if printf '%s' "$OUT_E2" | grep -q '✗' \
+     && printf '%s' "$OUT_E2" | grep -qiF 'quetrex-setup' \
+     && printf '%s' "$OUT_E2" | grep -qiE 'not enabled|enable'; then
+    pass "AC30 case 2: quetrex-setup not enabled at user scope is flagged ✗ with its own remediation"
+  else
+    fail "AC30 case 2: quetrex-setup missing from user scope was not properly flagged (out: [$OUT_E2])"
+  fi
+
+  # --- case 3: the all-correct fixture -> ✓ and nothing else.
+  E3_HOME="$WORK/e3-home"
+  mk_home_settings "$E3_HOME" '{ "quetrex-setup@quetrex": true }'
+  OUT_E3="$(run_check10 "$E3_HOME" bash 2>&1)"
+  if printf '%s' "$OUT_E3" | grep -q '✓' && ! printf '%s' "$OUT_E3" | grep -q '✗'; then
+    pass "AC30 case 3: the all-correct fixture (only quetrex-setup enabled at user scope) reports ✓ and nothing else"
+  else
+    fail "AC30 case 3: the all-correct fixture did not report a clean ✓ (out: [$OUT_E3])"
   fi
 fi
 

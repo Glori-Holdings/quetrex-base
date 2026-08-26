@@ -66,7 +66,7 @@
 # registration surface is hooks/hooks.json (which does use ${CLAUDE_PLUGIN_ROOT},
 # correctly, and carries no statusLine key at all). CLAUDE_PLUGIN_ROOT is not
 # exported into a project-scoped statusLine, so using it here would expand to a
-# bare "/.claude/statusline-command.sh" and blank the status bar outright.
+# bare "/plugins/quetrex-setup/statusline-command.sh" and blank the status bar outright.
 # Every hook registration in this same settings.json already uses
 # ${CLAUDE_PROJECT_DIR}, so there is direct in-file precedent that it expands.
 #   AC9: statusLine.command contains ${CLAUDE_PROJECT_DIR} and does not
@@ -75,7 +75,7 @@
 set -uo pipefail
 
 TOOLROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT="$TOOLROOT/.claude/statusline-command.sh"
+SCRIPT="$TOOLROOT/plugins/quetrex-setup/statusline-command.sh"
 SETTINGS="$TOOLROOT/.claude/settings.json"
 
 if [ ! -f "$SCRIPT" ]; then
@@ -379,7 +379,7 @@ esac
 # -----------------------------------------------------------------------------
 # AC10 — the registered string must survive CLAUDE_PROJECT_DIR being UNSET.
 #
-# A bare "${CLAUDE_PROJECT_DIR}/..." expands to "/.claude/statusline-command.sh"
+# A bare "${CLAUDE_PROJECT_DIR}/..." expands to "/plugins/quetrex-setup/statusline-command.sh"
 # when the variable is absent and exits 127 with an error on stderr — an
 # erroring status line, which is the exact thing the LESSONS section of
 # .claude/CLAUDE.md forbids, because the operator reads it as a failed build.

@@ -44,7 +44,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-API_BIN="${QX_API_BIN:-$REPO_ROOT/bin/quetrex-api}"
+API_BIN="${QX_API_BIN:-$REPO_ROOT/plugins/quetrex-setup/bin/quetrex-api}"
 
 if [ ! -f "$API_BIN" ]; then
   echo "FAIL: quetrex-api not found at $API_BIN"

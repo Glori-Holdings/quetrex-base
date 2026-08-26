@@ -7,7 +7,7 @@
 # required, every remaining command was green, and a measurably red suite reached the
 # base branch with the gate satisfied.
 #
-# It needs no adversary: /quetrex:init regenerating a shorter chain silently de-gates
+# It needs no adversary: /quetrex-setup:init regenerating a shorter chain silently de-gates
 # the repo — the same silent-unarming class the audit found in init's swallowed git add.
 #
 # The fix makes the effective chain the UNION of base and head. These assertions pin
