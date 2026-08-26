@@ -1232,7 +1232,7 @@ Then call the tool with a body of this exact shape:
       "session_context": {
         "model": "claude-sonnet-5",
         "sources": [{ "git_repository": { "url": "<REPO_URL>" } }],
-        "allowed_tools": ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Task"]
+        "allowed_tools": ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Task", "SlashCommand"]
       },
       "events": [{
         "data": {
