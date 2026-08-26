@@ -309,9 +309,15 @@ API from here.
   `RemoteTrigger` body that wraps it — the CCR authenticates to GitHub with its own
   credentials, never one handed to it here.
 - `allowed_tools` on the `RemoteTrigger` body stays `["Bash", "Read", "Write", "Edit",
-  "Glob", "Grep", "Task"]` — the minimum this pipeline needs, `Task` included so the
-  session can dispatch the architect/developer/qa/reviewer stages as subagents. Do not
-  widen it further to grant broader shell or network access than the build requires.
+  "Glob", "Grep", "Task", "SlashCommand"]` — the minimum this pipeline needs, `Task`
+  included so the session can dispatch the architect/developer/qa/reviewer stages as
+  subagents, and `SlashCommand` so the reviewer can reach the native `/review` and
+  `/security-review` passes. MEASURED (QDM-6, 2026-08-26): without `SlashCommand` here the
+  reviewer's `tools:` frontmatter is intersected down to nothing that can run a slash
+  command, so the native security pass is structurally unreachable on EVERY cloud run.
+  That forced `nativeSecurityReview: "errored"` on a change whose every other gate was
+  green, and git-workflow refused it — no PR, on a task that was finished. Do not widen it
+  further to grant broader shell or network access than the build requires.
 - The spec branch (`{{SPEC_BRANCH}}`) carries only `.quetrex/plan/{{TASK}}.json` — the plan
   itself must never carry a credential; it is architecture and acceptance criteria, nothing
   the `security_surface` classifies as secret.
