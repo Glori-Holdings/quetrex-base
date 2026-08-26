@@ -378,42 +378,133 @@ status from the PR/branch it observes on GitHub.
 # an automatic RECOVERABLE re-fire on a prompt that refuses identically every time, before
 # ever surfacing the actual reason to a human. This function reads that reason directly off
 # the published state.json instead of guessing from ref presence alone.
-qx_probe_gate_refusal() {   # qx_probe_gate_refusal <TASK_ID> <BRANCH_PREFIX>
-  local task="$1" prefix="$2" ref reason
-  ref="$(git ls-remote --heads origin "${prefix}${task}-gates-*" 2>/dev/null \
-         | awk '{print $2}' | sed 's#^refs/heads/##' | sort | tail -n1)"
-  [ -n "$ref" ] || { echo "NONE — no gates branch published for $task"; return 1; }
-  git fetch -q origin "$ref" 2>/dev/null || { echo "NONE — could not fetch $ref"; return 1; }
-  reason="$(git show "origin/$ref:.quetrex/state.json" 2>/dev/null | node -e '
+qx_probe_gate_refusal() {   # qx_probe_gate_refusal <TASK_ID> <BRANCH_PREFIX> [EXPECTED_HEAD_SHA]
+  # SEC-2 (review finding on the first version of this function, fixed here):
+  # `ls-remote | sort | tail -n1` selected the LEXICOGRAPHICALLY GREATEST
+  # matching branch name — a criterion anyone with push access controls
+  # outright by naming a branch that sorts last. MEASURED: a second gates
+  # branch with a crafted name was selected over the real run's branch,
+  # letting its state.json content drive both the needs_human transition and
+  # the text posted to the kanban card. The fix mirrors /quetrex:merge's own
+  # selection rule (merge.md: "pick the branch whose committed
+  # .quetrex/gates-head IS this PR's head") — match on the AUTHORITATIVE run
+  # head sha, never on name/sort order:
+  #   - given an EXPECTED_HEAD_SHA (the caller gets this from the routine's
+  #     own run log via RemoteTrigger action:"get_run_log" — cloud-build-
+  #     routine.md's step 5b already requires the routine to say its full
+  #     gates branch name, sha suffix included, in its final message), select
+  #     the ONE candidate whose .quetrex/gates-head equals it exactly.
+  #   - with NO expected sha, selection is safe ONLY when there is exactly
+  #     ONE candidate branch — picking among several without an anchor is
+  #     the exact defect above. Two or more candidates and no expected sha
+  #     REFUSES to guess (NONE), naming how to disambiguate, rather than
+  #     silently choosing one.
+  local task="$1" prefix="$2" expected="${3:-}" refs ref reason ghead chosen="" n=0
+  refs="$(git ls-remote --heads origin "${prefix}${task}-gates-*" 2>/dev/null \
+          | awk '{print $2}' | sed 's#^refs/heads/##')"
+  [ -n "$refs" ] || { echo "NONE — no gates branch published for $task"; return 1; }
+
+  if [ -n "$expected" ]; then
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
+      git fetch -q origin "$ref" 2>/dev/null || continue
+      ghead="$(git show "origin/$ref:.quetrex/gates-head" 2>/dev/null | tr -d '[:space:]')"
+      if [ "$ghead" = "$expected" ]; then chosen="$ref"; n=$((n + 1)); fi
+    done <<< "$refs"
+    if [ "$n" -ne 1 ]; then
+      echo "NONE — $n gates branch(es) for $task have gates-head == $expected (need exactly 1); refusing to guess"
+      return 1
+    fi
+  else
+    n="$(printf '%s\n' "$refs" | grep -c .)"
+    if [ "$n" -ne 1 ]; then
+      echo "NONE — $n gates branches match $task and no expected head sha was given to disambiguate; confirm the authoritative one via RemoteTrigger action:\"get_run_log\" (the routine states its full gates branch name) and re-probe with it as the 3rd argument"
+      return 1
+    fi
+    chosen="$refs"
+    git fetch -q origin "$chosen" 2>/dev/null || { echo "NONE — could not fetch $chosen"; return 1; }
+  fi
+
+  # SEC-3 (review finding, fixed here): the original snippet wrote
+  # `o.git_workflow_reason` straight to stdout. A truthy NON-STRING value
+  # (an object, e.g. from a malformed or hostile state.json) threw inside the
+  # stdin `end` handler with stderr suppressed — silently producing NONE,
+  # which the caller then misreads as "not a refusal" and RECOVERABLE
+  # re-fires an already-refused build. Coerce to a string first (never let a
+  # non-string reach a bare write), default when empty, and bound the length
+  # (SEC-1's 800-char cap applies at this layer too, so nothing downstream
+  # ever sees an unbounded value even if the bash-layer truncation below is
+  # ever dropped).
+  reason="$(git show "origin/$chosen:.quetrex/state.json" 2>/dev/null | node -e '
     let s=""; process.stdin.on("data", d => s += d);
     process.stdin.on("end", () => {
       try {
         const o = JSON.parse(s);
-        if (o.git_workflow === "refused") process.stdout.write(o.git_workflow_reason || "no reason recorded");
+        if (o.git_workflow !== "refused") return;
+        let r = o.git_workflow_reason;
+        if (typeof r !== "string") {
+          try { r = JSON.stringify(r); } catch (e) { r = String(r); }
+        }
+        if (!r) r = "no reason recorded";
+        process.stdout.write(r.slice(0, 800));
       } catch (e) { /* malformed or missing state.json: not a recorded refusal */ }
     });
   ' 2>/dev/null)"
-  [ -n "$reason" ] || { echo "NONE — $ref does not record a git_workflow refusal"; return 1; }
-  echo "GATE_REFUSED $ref: $reason"
+  [ -n "$reason" ] || { echo "NONE — $chosen does not record a git_workflow refusal"; return 1; }
+  echo "GATE_REFUSED $chosen: $reason"
   return 0
 }
 # ── end quetrex:exec-block qx_probe_gate_refusal ──────────────────────────────
 
-QX_GATE_PROBE="$(qx_probe_gate_refusal "$TASK_ID" "$BRANCH_PREFIX")"
-if printf '%s' "$QX_GATE_PROBE" | grep -q '^GATE_REFUSED '; then
-  QX_GATE_REF="$(printf '%s' "$QX_GATE_PROBE" | sed -n 's/^GATE_REFUSED \([^:]*\):.*/\1/p')"
-  QX_GATE_REASON="$(printf '%s' "$QX_GATE_PROBE" | sed 's/^GATE_REFUSED [^:]*: //')"
-  # The transition a routine can never make itself. Do it once, here, and leave the
-  # evidence in place — /quetrex:task-rework reads the gates branch, so tearing it down
-  # here would destroy the one thing the human decision needs.
-  quetrex-api task-status "$TASK_ID" needs_human
-  quetrex-api task-comment "$TASK_ID" "Cloud build's git-workflow gate refused to open a PR: $QX_GATE_REASON
+# ── quetrex:exec-block qx_gate_refusal_handoff ────────────────────────────────
+# Executable, and executed: test/git-workflow-gate-refusal.test.sh drives this with a
+# mock `quetrex-api` on PATH that can fail either call on demand, asserting the exit
+# codes are checked and the reason is never lost.
+#
+# EXPECTED_HEAD_SHA: pass it when you have it (from RemoteTrigger action:"get_run_log"
+# on this task's dispatch.routineId — see qx_probe_gate_refusal's own comment for why an
+# unanchored, multi-candidate selection refuses instead of guessing). Leave empty when
+# there is only one candidate branch. Sets QX_LIVENESS as its result.
+qx_gate_refusal_handoff() {   # qx_gate_refusal_handoff <TASK_ID> <BRANCH_PREFIX> [EXPECTED_HEAD_SHA]
+  local task="$1" prefix="$2" expected="${3:-}" probe ref reason status_rc comment_rc
+  probe="$(qx_probe_gate_refusal "$task" "$prefix" "$expected")"
+  if printf '%s' "$probe" | grep -q '^GATE_REFUSED '; then
+    ref="$(printf '%s' "$probe" | sed -n 's/^GATE_REFUSED \([^:]*\):.*/\1/p')"
+    # SEC-1 (review finding, fixed here): git_workflow_reason travels unbounded from a
+    # remote branch into ONE argv passed to `quetrex-api task-comment`. MEASURED: a
+    # multi-MiB reason made task-status succeed and task-comment die with E2BIG, and the
+    # block ignored the exit code — the card landed in needs_human with NO reason
+    # attached and no error surfaced. Bound it here too (defense in depth alongside the
+    # node-layer slice in qx_probe_gate_refusal — merge-gate.sh's own ESCALATION
+    # handling uses the same `head -c 800` cap), and check BOTH calls' exit status: on
+    # failure, print the reason directly to this session's own report rather than
+    # silently claiming it reached the board.
+    reason="$(printf '%s' "$probe" | sed 's/^GATE_REFUSED [^:]*: //' | head -c 800)"
+    # The transition a routine can never make itself. Do it once, here, and leave the
+    # evidence in place — /quetrex:task-rework reads the gates branch, so tearing it
+    # down here would destroy the one thing the human decision needs.
+    if quetrex-api task-status "$task" needs_human; then
+      status_rc=0
+    else
+      status_rc=$?
+      echo "WARNING: quetrex-api task-status $task needs_human FAILED (rc=$status_rc) — the board still shows the prior status. Refusal reason (not yet posted anywhere): $reason"
+    fi
+    if quetrex-api task-comment "$task" "Cloud build's git-workflow gate refused to open a PR: $reason
 
-Gate evidence preserved on $QX_GATE_REF — do not delete it; /quetrex:task-rework $TASK_ID reads it."
-  QX_LIVENESS=gate_refused
-else
-  QX_LIVENESS=dead   # or running / gone, from the RemoteTrigger get response as above
-fi
+Gate evidence preserved on $ref — do not delete it; /quetrex:task-rework $task reads it."; then
+      comment_rc=0
+    else
+      comment_rc=$?
+      echo "WARNING: quetrex-api task-comment $task FAILED (rc=$comment_rc) — the reason did NOT land on the card. Reason: $reason (gates branch: $ref)"
+    fi
+    QX_LIVENESS=gate_refused
+  else
+    QX_LIVENESS=dead   # or running / gone, from the RemoteTrigger get response as above
+  fi
+}
+# ── end quetrex:exec-block qx_gate_refusal_handoff ────────────────────────────
+
+qx_gate_refusal_handoff "$TASK_ID" "$BRANCH_PREFIX" "${QX_EXPECTED_HEAD_SHA:-}"
 QX_VERDICT="$(qx_actionability "$STATUS" "$KIND" "$MODE" "$PAYLOAD" "$QX_LIVENESS")"; QX_RC=$?
 echo "$QX_VERDICT"
 ```

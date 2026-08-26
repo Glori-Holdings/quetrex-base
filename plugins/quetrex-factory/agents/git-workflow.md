@@ -51,15 +51,39 @@ The ledger is append-only JSONL: one object per command run `{ts, cmd, cwd, sha,
 LEDGER="$ROOT/.quetrex/verify-ledger.jsonl"
 [ -s "$LEDGER" ] || { echo "REFUSED: verify-ledger.jsonl missing/empty — QA never proved green."; }   # -> refuse
 
-# The last recorded command must have exited 0...
-LAST_EXIT="$(tail -n 1 "$LEDGER" | jq -r '.exit')"
-[ "$LAST_EXIT" = "0" ] || { echo "REFUSED: last verify command exited $LAST_EXIT (red ledger)."; }      # -> refuse
-
-# ...and there must be no red command inside the final chain run.
-# Read the tail block belonging to the most recent chain execution (all entries
-# sharing the latest run). If ANY has exit != 0 with no subsequent green re-run
-# of that same cmd, refuse. Practically: verify no non-zero exit appears after the
-# last time the FIRST chain command ran.
+# A bare "the LAST ledger line must be exit==0" check REFUSES on every real repo that
+# declares requiredEnv or runs verify-gate.sh's bounded-quick Stop chain — measured on
+# QDM-6's actual ledger, whose final lines are a genuine, terminal requiredEnv skip
+# ({skipped:true, skipReason:"requiredEnv", exit:null} — verify-gate.sh's own sanctioned
+# shape, the same one merge-gate.sh's GATE 3 already accepts) preceded by a boundedQuick
+# placeholder ({skipped:true, skipReason:"boundedQuick", exit:null} — "never proven, never
+# a pass", i.e. NOT evidence of anything, not a run at all). Checking the trailing line in
+# isolation reads either shape as a literal `null` exit and refuses a chain that is
+# genuinely green.
+#
+# So: for EVERY command in .quetrex/verify.json's declared chain, find its most recent
+# MEANINGFUL entry — skip PAST any boundedQuick placeholder (it carries no evidence either
+# way and must never launder a real failure OR erase a real pass) — and that entry must be
+# a genuine pass (exit == 0) or the sanctioned requiredEnv skip. A command absent from the
+# ledger, or whose latest meaningful entry is neither, is RED. This does not sha-pin (that
+# is §2a's job, after this stage's own commit moves HEAD).
+CHAIN_JSON="$(jq -c 'if (.verify|type)=="array" and (.verify|length)>0 then .verify else empty end' "$ROOT/.quetrex/verify.json" 2>/dev/null)"
+if [ -z "$CHAIN_JSON" ]; then
+  echo "REFUSED: .quetrex/verify.json declares no verify[] chain — cannot confirm what QA proved green."   # -> refuse
+else
+  RED="$(jq -sc --argjson chain "$CHAIN_JSON" '
+    . as $entries
+    | $chain
+    | map(. as $c
+        | ($entries | map(select(.cmd == $c and (.skipped != true or .skipReason == "requiredEnv"))) | last) as $last
+        | if ($last == null) then $c
+          elif ($last.exit == 0) then empty
+          elif ($last.skipped == true and $last.skipReason == "requiredEnv" and $last.exit == null) then empty
+          else $c
+          end)
+  ' "$LEDGER" 2>/dev/null)"
+  [ "$RED" = "[]" ] || { echo "REFUSED: the verify chain is not all green at its most recent meaningful run — red or never-run: ${RED:-<unparseable ledger>}"; }   # -> refuse
+fi
 ```
 
 If you cannot mechanically confirm the whole last chain run is green, REFUSE. A red ledger is an absolute bar — human approval itself cannot bypass it downstream, so you must not paper over it here.
@@ -69,8 +93,28 @@ If you cannot mechanically confirm the whole last chain run is green, REFUSE. A 
 ```bash
 SEC="$ROOT/.quetrex/security-findings.json"
 if [ -f "$SEC" ]; then
-  OPEN_CRIT="$(jq '[.[] | select((.severity|ascii_downcase=="critical") and (.status|ascii_downcase=="open"))] | length' "$SEC")"
-  [ "$OPEN_CRIT" = "0" ] || { echo "REFUSED: $OPEN_CRIT open Critical security finding(s)."; jq '[.[] | select((.severity|ascii_downcase=="critical") and (.status|ascii_downcase=="open"))]' "$SEC"; }  # -> refuse
+  # NORMALIZE FIRST. security-reviewer.md's canonical artifact is an OBJECT —
+  # {task, base, head_sha, reviewed_files, verdict, findings:[...]} — never a
+  # bare array. A jq filter that indexes the top level directly (`.[] |
+  # select(.severity...)`) works by accident on a legacy bare-array fixture
+  # and ERRORS on the real shape ("Cannot index string with string
+  # \"severity\""), which made this gate REFUSE on every genuine artifact
+  # before Gate 4 (the NSR route-2 check) was ever reached — measured on
+  # QDM-6's real artifacts (PR #125 review, SEC-4). Same normalization
+  # Gate 4 below and merge-gate.sh's sec_artifact_state() already apply —
+  # match it exactly so the three readers of this file cannot disagree.
+  SEC_FINDINGS_G3="$(jq -c 'if type == "object" then (.findings // []) else . end' "$SEC" 2>/dev/null)"
+  OPEN_CRIT="$(printf '%s' "$SEC_FINDINGS_G3" | jq '[ .[] | select((.severity // "" | ascii_downcase)=="critical" and (.status // "open" | ascii_downcase)=="open") ] | length' 2>/dev/null)"
+  case "$OPEN_CRIT" in
+    ''|*[!0-9]*)
+      echo "REFUSED: .quetrex/security-findings.json does not parse to a readable findings list (malformed or unrecognized shape) — cannot confirm 0 open Critical."   # -> refuse
+      ;;
+    0) : ;;
+    *)
+      echo "REFUSED: $OPEN_CRIT open Critical security finding(s)."
+      printf '%s' "$SEC_FINDINGS_G3" | jq '[ .[] | select((.severity // "" | ascii_downcase)=="critical" and (.status // "open" | ascii_downcase)=="open") ]'   # -> refuse
+      ;;
+  esac
 fi
 ```
 

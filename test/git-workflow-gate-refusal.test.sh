@@ -161,10 +161,24 @@ if [ -s "$WORK/probe.sh" ]; then
   # the SAME line as the block's closing `# ── end quetrex:exec-block ── ...`
   # comment and silently never runs (measured: rc=0, no output at all, not
   # even the NONE branch — the entire call was swallowed into the comment).
-  call_probe() {  # call_probe <task> <prefix>
+  call_probe() {  # call_probe <task> <prefix> [expected-head-sha]
     cp "$WORK/probe.sh" "$WORK/probe-call.sh"
-    printf '\nqx_probe_gate_refusal %q %q\n' "$1" "$2" >> "$WORK/probe-call.sh"
+    printf '\nqx_probe_gate_refusal %q %q %q\n' "$1" "$2" "${3:-}" >> "$WORK/probe-call.sh"
     ( cd "$CLONE" && bash "$WORK/probe-call.sh" )
+  }
+
+  # Like push_gates_branch but also writes .quetrex/gates-head — needed for the
+  # SEC-2 (head-sha-pinned selection) assertions below.
+  push_gates_branch_with_head() {  # push_gates_branch_with_head <branch> <state.json content> <gates-head>
+    local branch="$1" content="$2" ghead="$3"
+    git -C "$CLONE" checkout -q -b "$branch" trunk
+    mkdir -p "$CLONE/.quetrex"
+    printf '%s' "$content" > "$CLONE/.quetrex/state.json"
+    printf '%s\n' "$ghead" > "$CLONE/.quetrex/gates-head"
+    git -C "$CLONE" add -f .quetrex/state.json .quetrex/gates-head
+    git -C "$CLONE" commit -q -m "chore(gates): $branch"
+    git -C "$CLONE" push -q origin "$branch"
+    git -C "$CLONE" checkout -q trunk
   }
 
   TASK="QDM-6"
@@ -200,6 +214,59 @@ if [ -s "$WORK/probe.sh" ]; then
   else
     notok "PART 2: a task with NO gates branch was falsely reported as a refusal (rc=$RC): $OUT"
   fi
+
+  # =============================================================================
+  # PART 4 (SEC-2, review finding on the first version of qx_probe_gate_refusal):
+  # `ls-remote | sort | tail -n1` let ANY branch matching the glob win by naming itself
+  # to sort last — MEASURED: a crafted decoy branch beat the real run's branch. The fix
+  # requires exactly one candidate (safe with no anchor) OR an exact gates-head match
+  # (safe with an anchor); two-or-more with no anchor now refuses to guess.
+  # =============================================================================
+  TASK4="QDM-9"
+  REAL_GHEAD="1111111111111111111111111111111111111111"
+  DECOY_GHEAD="2222222222222222222222222222222222222222"
+  # The decoy's branch NAME is engineered to sort lexicographically LAST — the exact
+  # property the old `sort | tail -n1` selection trusted.
+  push_gates_branch_with_head "${PREFIX}${TASK4}-gates-1111111" \
+    '{"task":"QDM-9","git_workflow":"refused","git_workflow_reason":"the REAL refusal"}' "$REAL_GHEAD"
+  push_gates_branch_with_head "${PREFIX}${TASK4}-gates-zzzzzzz" \
+    '{"task":"QDM-9","git_workflow":"refused","git_workflow_reason":"a DECOY branch forged by anyone with push access"}' "$DECOY_GHEAD"
+
+  # No expected sha to anchor on, and now TWO candidates exist -> must refuse to guess.
+  OUT="$(call_probe "$TASK4" "$PREFIX")"
+  RC=$?
+  if [ "$RC" -ne 0 ] && ! printf '%s' "$OUT" | grep -q '^GATE_REFUSED'; then
+    ok "PART 4 (SEC-2): two candidate gates branches with no expected head sha -> refuses to guess (NONE), never silently picks the lexicographically-last one"
+  else
+    notok "PART 4 (SEC-2): with two candidates and no anchor, the probe still picked one (rc=$RC): $OUT — the lexicographic-sort defect is not fixed"
+  fi
+
+  # With the REAL gates-head as the expected sha, the REAL branch must be selected —
+  # never the decoy, even though the decoy's name sorts after it.
+  OUT="$(call_probe "$TASK4" "$PREFIX" "$REAL_GHEAD")"
+  RC=$?
+  if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'the REAL refusal' && ! printf '%s' "$OUT" | grep -q 'DECOY'; then
+    ok "PART 4 (SEC-2): given the real gates-head as an anchor, the REAL branch is selected — the decoy (which sorts last) is never chosen"
+  else
+    notok "PART 4 (SEC-2): given the real gates-head, the wrong branch was selected or none was (rc=$RC): $OUT"
+  fi
+
+  # =============================================================================
+  # PART 5 (SEC-3, review finding): a truthy NON-STRING git_workflow_reason (e.g. a
+  # hostile or malformed state.json) must not throw inside the node snippet and turn
+  # into a silent NONE (which the caller would misread as "not a refusal" and
+  # RECOVERABLE re-fire an already-refused build).
+  # =============================================================================
+  TASK5="QDM-10"
+  push_gates_branch "${PREFIX}${TASK5}-gates-badreason" \
+    '{"task":"QDM-10","git_workflow":"refused","git_workflow_reason":{"gate":"NSR","detail":"nested object, not a string"}}'
+  OUT="$(call_probe "$TASK5" "$PREFIX")"
+  RC=$?
+  if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q '^GATE_REFUSED ' && printf '%s' "$OUT" | grep -q 'NSR'; then
+    ok "PART 5 (SEC-3): a non-string git_workflow_reason (object) does not crash the probe — it is coerced and reported as GATE_REFUSED, never silently NONE"
+  else
+    notok "PART 5 (SEC-3): a non-string git_workflow_reason produced (rc=$RC): $OUT — expected a coerced GATE_REFUSED, not a silent NONE/crash"
+  fi
 fi
 
 if [ -s "$WORK/act.sh" ]; then
@@ -229,6 +296,103 @@ if [ -s "$WORK/act.sh" ]; then
   else
     ok "PART 2: qx_actionability(gate_refused) never says RECOVERABLE"
   fi
+fi
+
+# =============================================================================
+# PART 6 (SEC-1, review finding): qx_gate_refusal_handoff must bound the reason to 800
+# chars before use, and must check BOTH quetrex-api calls' exit status — on failure it
+# must print the reason inline rather than silently claiming it reached the board.
+#
+# MEASURED (pre-fix): a multi-MiB git_workflow_reason made `quetrex-api task-status`
+# succeed and `quetrex-api task-comment` die with E2BIG (argv too long), and the block
+# ignored the exit code entirely — the card landed in needs_human with NO reason
+# attached anywhere and no error surfaced to the operator.
+# =============================================================================
+extract_block qx_gate_refusal_handoff "$TASKBUILD" > "$WORK/handoff.sh"
+extract_block qx_probe_gate_refusal "$TASKBUILD" > "$WORK/handoff-probe.sh"
+if [ -s "$WORK/handoff.sh" ] && grep -q '^qx_gate_refusal_handoff()' "$WORK/handoff.sh"; then
+  ok "SETUP: extracted qx_gate_refusal_handoff from task-build.md"
+
+  # A mock quetrex-api that logs every invocation's argv lengths and can be told (via
+  # env vars) to fail either subcommand — this proves the CALLER's exit-code handling,
+  # not just that some call happened.
+  MOCKBIN="$WORK/mockbin"
+  mkdir -p "$MOCKBIN"
+  cat > "$MOCKBIN/quetrex-api" <<'MOCKAPI'
+#!/usr/bin/env bash
+LOG="${QX_MOCK_API_LOG:?QX_MOCK_API_LOG must be set}"
+sub="$1"; shift
+if [ "$sub" = "task-status" ]; then
+  printf 'task-status %s %s\n' "$1" "$2" >> "$LOG"
+  [ "${QX_MOCK_STATUS_FAIL:-0}" = "1" ] && exit 1
+  exit 0
+fi
+if [ "$sub" = "task-comment" ]; then
+  # Record the BYTE LENGTH of the comment body arg, not its content, so a truncation
+  # regression is caught mechanically rather than by eyeballing a long string.
+  printf 'task-comment %s bodylen=%d\n' "$1" "${#2}" >> "$LOG"
+  [ "${QX_MOCK_COMMENT_FAIL:-0}" = "1" ] && exit 1
+  exit 0
+fi
+echo "mock quetrex-api: unhandled subcommand: $sub $*" >&2
+exit 1
+MOCKAPI
+  chmod +x "$MOCKBIN/quetrex-api"
+
+  # Push a fresh gates branch with a reason LONGER than 800 chars (a synthetic
+  # multi-KB value stands in for the measured multi-MiB one — 800+ is all that
+  # matters for the truncation assertion).
+  TASK6="QDM-11"
+  LONG_REASON="$(printf 'x%.0s' $(seq 1 2000))"
+  push_gates_branch "${PREFIX}${TASK6}-gates-longreason" \
+    "$(printf '{"task":"QDM-11","git_workflow":"refused","git_workflow_reason":"%s"}' "$LONG_REASON")"
+
+  # run_handoff <task> <status_fail 0|1> <comment_fail 0|1>
+  # Prints, on stdout: whatever qx_gate_refusal_handoff itself echoed (its WARNING
+  # lines, if any), THEN a sentinel line, THEN the mock's own call log — so a single
+  # capture can assert on both "what the function said" and "what it actually sent".
+  run_handoff() {
+    local log; log="$(mktemp "$WORK/mocklog.XXXXXX")"
+    ( cd "$CLONE" \
+      && PATH="$MOCKBIN:$PATH" QX_MOCK_API_LOG="$log" \
+         QX_MOCK_STATUS_FAIL="$2" QX_MOCK_COMMENT_FAIL="$3" \
+         bash -c "$(cat "$WORK/handoff-probe.sh")"$'\n'"$(cat "$WORK/handoff.sh")"$'\n'"qx_gate_refusal_handoff $1 $PREFIX" 2>&1 )
+    echo "---MOCK-LOG---"
+    cat "$log"
+  }
+
+  # --- both calls succeed: the comment body must be <= 800 bytes even though the
+  #     underlying reason was 2000 --------------------------------------------------
+  OUT="$(run_handoff "$TASK6" 0 0)"
+  BODYLEN="$(printf '%s' "$OUT" | sed -n 's/.*bodylen=\([0-9]*\).*/\1/p' | head -n1)"
+  # The comment body is the 800-char-capped reason PLUS a small fixed wrapper (the
+  # "Cloud build's..."/"Gate evidence preserved on..." prose) — so the bound to check
+  # is well under what an UNtruncated 2000-char reason plus that same wrapper would
+  # produce (~2170), not the reason length alone.
+  if [ -n "$BODYLEN" ] && [ "$BODYLEN" -gt 0 ] && [ "$BODYLEN" -le 1100 ]; then
+    ok "PART 6 (SEC-1): a 2000-char git_workflow_reason is truncated before task-comment (body length $BODYLEN, well under the ~2170 an untruncated 2000-char reason plus wrapper would produce)"
+  else
+    notok "PART 6 (SEC-1): the comment body was not bounded — bodylen='$BODYLEN' (expected non-empty and <= ~1100). Output: $OUT"
+  fi
+
+  # --- task-status succeeds, task-comment FAILS: the failure must be surfaced with
+  #     the reason printed inline, not silently swallowed ------------------------
+  OUT="$(run_handoff "$TASK6" 0 1)"
+  if printf '%s' "$OUT" | grep -q 'WARNING.*task-comment.*FAILED' && printf '%s' "$OUT" | grep -q 'Reason:'; then
+    ok "PART 6 (SEC-1): a failing quetrex-api task-comment is surfaced as a WARNING with the reason printed inline, not silently claimed as delivered"
+  else
+    notok "PART 6 (SEC-1): a failing task-comment call was NOT surfaced — the exit code is still being ignored. Output: $OUT"
+  fi
+
+  # --- task-status ITSELF fails: must also be surfaced, not just task-comment's ----
+  OUT="$(run_handoff "$TASK6" 1 0)"
+  if printf '%s' "$OUT" | grep -q 'WARNING.*task-status.*FAILED'; then
+    ok "PART 6 (SEC-1): a failing quetrex-api task-status is ALSO surfaced (not just task-comment's)"
+  else
+    notok "PART 6 (SEC-1): a failing task-status call was not surfaced. Output: $OUT"
+  fi
+else
+  notok "SETUP: task-build.md has no executable qx_gate_refusal_handoff block — PART 6 cannot run"
 fi
 
 # --- FAIL-FIRST: the pre-fix task-build.md has no qx_probe_gate_refusal or gate_refused
