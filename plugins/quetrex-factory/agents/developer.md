@@ -64,7 +64,7 @@ If the `verify-gate` hook blocks your SubagentStop while you are in this state, 
    - **`acceptance[]`** — Given/When/Then criteria with a numeric `measure`. Every criterion that falls to your workstream must end up covered by a test.
    - **`security_surface[]`** — the trust boundaries your code touches (auth, tenant scoping, input validation). You must satisfy these in code, not defer them.
    - **`verify[]`** — advisory; the authoritative chain is `.quetrex/verify.json` (next item).
-2. **`$ROOT/.quetrex/verify.json`** — the single source of truth for the verify chain (`.verify[]` ordered commands, `.coverage` threshold, `.format` command). This is the exact chain the `verify-gate` hook runs against you. Run it yourself before you stop.
+2. **`$ROOT/.quetrex/verify.json`** — the single source of truth for the verify chain (`.verify[]` ordered commands, `.coverage` threshold, `.format` command). This is the exact chain the `verify-gate` hook runs against you. Run it yourself before you stop. Run each command in the foreground with an explicit long timeout (`timeout: 900000` on the Bash tool) and wait for it — never let a tool timeout kill a chain command and never re-launch one that was cut off; report the run you observed.
 3. **Project `.claude/CLAUDE.md`** — stack, conventions, type-safety rules, and the Verification section. Follow its patterns exactly; match the code that already exists over any general habit.
 4. **The files you own and their direct dependencies** — read them fully before writing a line. Match existing structure, naming, error handling, and test style.
 
