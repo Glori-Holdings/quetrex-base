@@ -203,6 +203,14 @@ _qxarm_install_statusline() {
 _qxarm_write_settings() {
   local file="$1" slcmd="${2:-}"
   local extra=("${@:3}")
+  # REV-GLOBAL-1: /usr/bin/env bash is 3.2 on macOS (bin/quetrex-cloud-prep
+  # documents this verbatim), where "${extra[@]}" under `set -u` (line 106)
+  # is an "unbound variable" error when extra is EMPTY — the common case,
+  # since most repos detect no stack pack. The guard idiom below
+  # (${ARR[@]+"${ARR[@]}"}) is already used at protected-files-guard.sh,
+  # qx-armed.sh and quetrex-bound-version-guard.sh; this was the one new site
+  # that skipped it, and it aborted the whole write with a raw interpreter
+  # error instead of arming the repo.
   node -e '
     const fs = require("fs"), path = require("path");
     const [file, slCmd, ...extraNames] = process.argv.slice(1);
@@ -348,7 +356,7 @@ _qxarm_write_settings() {
     if (mktChanged) { parts.push("extraKnownMarketplaces.quetrex"); }
     if (slChanged) { parts.push("statusLine (the running engine version has no other home)"); }
     console.log("settings.json: wrote " + parts.join(", "));
-  ' "$file" "$slcmd" "${extra[@]}"
+  ' "$file" "$slcmd" ${extra[@]+"${extra[@]}"}
 }
 
 # _qxarm_purge_dead_mcp <file>
@@ -430,7 +438,7 @@ _qxarm_main() {
   _qxarm_install_statusline "$repo_root"
   local sl_cmd=""
   [ "${QXARM_STATUSLINE_READY:-0}" = "1" ] && sl_cmd="$QXARM_STATUSLINE_CMD"
-  _qxarm_write_settings "$repo_root/.claude/settings.json" "$sl_cmd" "${extra_names[@]}" || return 1
+  _qxarm_write_settings "$repo_root/.claude/settings.json" "$sl_cmd" ${extra_names[@]+"${extra_names[@]}"} || return 1
   # <kanban-url> is still required (see the -z check above) so the call
   # signature every installed /quetrex-setup:init uses keeps working, but the
   # MCP step no longer builds a URL from it — it only purges the retired

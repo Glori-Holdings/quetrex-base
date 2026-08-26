@@ -547,10 +547,73 @@ else
   printf '{"enabledPlugins":null}' > "$REPO8D/.claude/settings.json"
   OUT8D="$(run_arm "$REPO8D" 2>&1)"; RC8D=$?
   QPIN8D="$(json_get "$REPO8D/.claude/settings.json" 'enabledPlugins.quetrex@quetrex')"
-  if [ "$RC8D" -eq 0 ] && [ "$QPIN8D" = "true" ]; then
+if [ "$RC8D" -eq 0 ] && [ "$QPIN8D" = "true" ]; then
     pass "SEC-GLOBAL-3: a null enabledPlugins still arms normally (the pre-existing || {} case is unaffected)"
   else
     fail "SEC-GLOBAL-3: a null enabledPlugins must still arm normally (got rc=$RC8D, qpin=$QPIN8D, output: $OUT8D)"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 9. REV-GLOBAL-1 FAIL-FIRST — quetrex-arm must not abort under bash 3.2
+#    (the shebang-resolved /bin/bash on a stock Mac) when NO stack pack is
+#    detected. `local extra=("${@:3}")` / `local extra_names=("$@")` are
+#    EMPTY arrays in that case, and "${extra[@]}" / "${extra_names[@]}"
+#    under `set -u` is an "unbound variable" error on bash 3.2 (bash 4+
+#    treats an empty array expansion as fine — which is exactly why the
+#    default `bash test/quetrex-arm.test.sh` invocation, using whatever
+#    `bash` resolves to in PATH, could not see this). Both assertions drive
+#    an EXPLICIT /bin/bash, first against the exact pre-fix baseline
+#    (git show 562e025:...) to prove the abort was real, then against the
+#    shipped tool to prove it now writes settings.json cleanly.
+# ---------------------------------------------------------------------------
+if [ ! -x /bin/bash ]; then
+  echo "SKIP: REV-GLOBAL-1 — /bin/bash not present on this machine, cannot drive the exact interpreter the finding depends on"
+else
+  SEC_REV1_FULL="562e0256b6a90ddff60142a3b677577c401b40e2"
+  if ! git -C "$REPO_ROOT" cat-file -e 562e025^{commit} 2>/dev/null; then
+    git -C "$REPO_ROOT" fetch --quiet --depth=1 origin "$SEC_REV1_FULL" 2>/dev/null || true
+  fi
+  if ! git -C "$REPO_ROOT" cat-file -e 562e025^{commit} 2>/dev/null; then
+    fail "REV-GLOBAL-1 FAIL-FIRST: baseline commit 562e025 is not reachable in this checkout even after a depth-1 fetch of $SEC_REV1_FULL — cannot prove the fix, refusing to report a pass having compared against nothing"
+  else
+    BASELINE_ARM_REV1="$WORK/baseline-quetrex-arm-rev1"
+    git -C "$REPO_ROOT" show 562e025:plugins/quetrex-setup/bin/quetrex-arm > "$BASELINE_ARM_REV1"
+
+    REPO10_BASE="$WORK/repo10-base"
+    mkdir -p "$REPO10_BASE"
+    # No stack-pack arg at all — the no-pack path (any repo that is not
+    # Next.js/Python/Rust/Swift), reproduced with the exact call shape
+    # init.md uses when step 4h detects nothing.
+    OUT10_BASE="$(/bin/bash "$BASELINE_ARM_REV1" "$REPO10_BASE" "$KANBAN_URL" 2>&1)"; RC10_BASE=$?
+    if [ "$RC10_BASE" -ne 0 ] && printf '%s' "$OUT10_BASE" | grep -qi 'unbound variable' && [ ! -f "$REPO10_BASE/.claude/settings.json" ]; then
+      pass "REV-GLOBAL-1 FAIL-FIRST: the pre-fix baseline (562e025) DOES abort with 'unbound variable' under /bin/bash on a no-pack fixture, and settings.json is never written — the bug is real, not hypothetical"
+    else
+      fail "REV-GLOBAL-1 FAIL-FIRST: expected the pre-fix baseline to abort with 'unbound variable' under /bin/bash and write no settings.json (it demonstrably did when this test was authored); got rc=$RC10_BASE, settings.json exists=$([ -f "$REPO10_BASE/.claude/settings.json" ] && echo yes || echo no), output: $OUT10_BASE — the fail-first proof is broken, not the fix"
+    fi
+
+    REPO10="$WORK/repo10"
+    mkdir -p "$REPO10"
+    OUT10="$(/bin/bash "$ARM" "$REPO10" "$KANBAN_URL" 2>&1)"; RC10=$?
+    QPIN10="$(json_get "$REPO10/.claude/settings.json" 'enabledPlugins.quetrex@quetrex')"
+    if [ "$RC10" -eq 0 ] && [ "$QPIN10" = "true" ] && ! printf '%s' "$OUT10" | grep -qi 'unbound variable'; then
+      pass "REV-GLOBAL-1: the shipped tool arms cleanly under /bin/bash on a no-pack fixture — no 'unbound variable', enabledPlugins written"
+    else
+      fail "REV-GLOBAL-1: the shipped tool must arm cleanly under /bin/bash with no stack pack (got rc=$RC10, qpin=$QPIN10, output: $OUT10)"
+    fi
+
+    # The WITH-a-stack-pack path must also stay clean under bash 3.2 (this
+    # path already worked pre-fix per the review's control case; guard
+    # against a regression from the fix itself).
+    REPO10C="$WORK/repo10c"
+    mkdir -p "$REPO10C"
+    OUT10C="$(/bin/bash "$ARM" "$REPO10C" "$KANBAN_URL" quetrex-nextjs 2>&1)"; RC10C=$?
+    NPIN10C="$(json_get "$REPO10C/.claude/settings.json" 'enabledPlugins.quetrex-nextjs@quetrex')"
+    if [ "$RC10C" -eq 0 ] && [ "$NPIN10C" = "true" ]; then
+      pass "REV-GLOBAL-1: the shipped tool still arms cleanly under /bin/bash WITH a stack pack (no regression from the empty-array guard)"
+    else
+      fail "REV-GLOBAL-1: the shipped tool must still arm cleanly under /bin/bash with a stack pack (got rc=$RC10C, npin=$NPIN10C, output: $OUT10C)"
+    fi
   fi
 fi
 
