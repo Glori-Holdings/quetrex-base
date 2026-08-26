@@ -22,25 +22,30 @@
 # (any OTHER plugin, including quetrex-factory, discovered from inside a
 # quetrex process without ever executing anything found there).
 #
-# REGISTERED IN BOTH quetrex-setup AND quetrex-factory (HOOKFIX correction 1,
-# 2026-08-21, verified against https://code.claude.com/docs/en/hooks.md):
-# under managed-settings `allowManagedHooksOnly: true`, ONLY plugins FORCE-
-# ENABLED in managed settings' own enabledPlugins are exempt from the hook
-# lockdown — every OTHER hook, including every hook a merely-enabled (not
-# force-enabled) plugin registers, is silently blocked. An operator's managed
-# settings can force-enable quetrex-factory@quetrex without force-enabling
-# quetrex-setup@quetrex, and in that exact configuration EVERY hook
-# quetrex-setup registers — including a copy of this guard living only here —
-# would be dark. Shipping the guard in a SINGLE plugin therefore fails in
-# precisely the strictest, most locked-down configuration it exists to
-# protect. So it ships and registers as a SessionStart hook in BOTH plugin
-# roots. Do NOT "clean up" the apparent duplicate registration — that
-# reintroduces the hole. (The quetrex-factory-side registration lives in a
-# different repository, Glori-Holdings/quetrex-plugins, and is a cross-repo
-# follow-up outside this workstream's file ownership — see the HOOKFIX
-# developer report. This file previously shipped inside `quetrex`; it moved to
-# quetrex-setup with the setup-plugin split so it keeps firing in every repo,
-# armed or not — see GLOBAL's plan notes.)
+# SHOULD BE REGISTERED IN BOTH quetrex-setup AND quetrex-factory (HOOKFIX
+# correction 1, 2026-08-21, verified against
+# https://code.claude.com/docs/en/hooks.md) — BUT, AS OF SEC-GLOBAL-7
+# (2026-08-26), IT IS CURRENTLY REGISTERED IN quetrex-setup ONLY. This is a
+# real, open gap, not a documentation nit: under managed-settings
+# `allowManagedHooksOnly: true`, ONLY plugins FORCE-ENABLED in managed
+# settings' own enabledPlugins are exempt from the hook lockdown — every
+# OTHER hook, including every hook a merely-enabled (not force-enabled)
+# plugin registers, is silently blocked. An operator's managed settings can
+# force-enable quetrex-factory@quetrex without force-enabling
+# quetrex-setup@quetrex, and in that exact configuration this guard — which
+# lives only in quetrex-setup — goes dark. quetrex-factory's own
+# hooks.json (plugins/quetrex-factory/hooks/hooks.json, THIS repo) carries no
+# reference to this script today; it is advisory-only (always exits 0,
+# blocks nothing), so no enforcement floor is lost while this gap stands, but
+# it should still be closed. The quetrex-factory-side registration belongs
+# in a DIFFERENT repository, Glori-Holdings/quetrex-plugins, and is a
+# cross-repo follow-up outside this workstream's file ownership — see the
+# HOOKFIX developer report and .quetrex/security-findings.json (SEC-GLOBAL-7).
+# Do NOT "clean up" the single registration below on the assumption a second
+# one exists elsewhere in THIS repo — it does not, yet. (This file previously
+# shipped inside `quetrex`; it moved to quetrex-setup with the setup-plugin
+# split so it keeps firing in every repo, armed or not — see GLOBAL's plan
+# notes.)
 #
 # SESSION DEDUP. Because it can now run TWICE in one session (both plugins
 # enabled), it must not print twice for the same staleness. Keyed on the
