@@ -36,6 +36,8 @@ const files = [
   "hooks/hooks.json",
   "plugins/quetrex-factory/.claude-plugin/plugin.json",
   "plugins/quetrex-factory/hooks/hooks.json",
+  "plugins/quetrex-setup/.claude-plugin/plugin.json",
+  "plugins/quetrex-setup/hooks/hooks.json",
 ];
 let bad = 0;
 for (const f of files) {
