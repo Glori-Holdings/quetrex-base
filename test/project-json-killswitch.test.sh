@@ -94,13 +94,17 @@ fire_bash() {
   fi
 }
 
-# fire_write <hook> <tool> <file_path> [1 to unlock] -> emits the hook's stdout
+# fire_write <hook> <tool> <file_path> [unlock-value] -> emits the hook's
+# stdout. Used only against PROTECTED_GUARD (.claude/hooks/protected-files-
+# guard.sh) in this file -- SEC-6 (2026-08-26) scopes its unlock to the
+# exact basename being written, so <unlock-value> must now be that basename
+# (e.g. "project.json"), never a bare "1", to permit the write.
 fire_write() {
   local hook="$1" tool="$2" fp="$3" unlock="${4:-}"
   local payload
   payload="$(jq -cn --arg t "$tool" --arg p "$fp" --arg d "$FIXTURE" '{tool_name:$t,tool_input:{file_path:$p},cwd:$d}')"
-  if [ "$unlock" = "1" ]; then
-    printf '%s' "$payload" | env QUETREX_UNLOCK_FLOOR=1 bash "$hook" 2>&1
+  if [ -n "$unlock" ]; then
+    printf '%s' "$payload" | env QUETREX_UNLOCK_FLOOR="$unlock" bash "$hook" 2>&1
   else
     printf '%s' "$payload" | env -u QUETREX_UNLOCK_FLOOR bash "$hook" 2>&1
   fi
@@ -189,11 +193,18 @@ for shape in "$FIXTURE/.quetrex/project.json" ".quetrex/project.json"; do
       notok "AC3: protected-files-guard did NOT deny $tool of .quetrex/project.json (shape: $shape) [$OUT]"
     fi
 
-    OUT_UNLOCKED="$(fire_write "$PROTECTED_GUARD" "$tool" "$shape" "1")"
+    OUT_UNLOCKED="$(fire_write "$PROTECTED_GUARD" "$tool" "$shape" "project.json")"
     if is_allow "$OUT_UNLOCKED"; then
-      ok "AC4: protected-files-guard allows+records unlocked $tool of .quetrex/project.json (shape: $shape)"
+      ok "AC4: protected-files-guard allows+records unlocked (QUETREX_UNLOCK_FLOOR=project.json) $tool of .quetrex/project.json (shape: $shape)"
     else
       notok "AC4: protected-files-guard did NOT allow the unlocked $tool (shape: $shape) [$OUT_UNLOCKED]"
+    fi
+
+    OUT_BLANKET="$(fire_write "$PROTECTED_GUARD" "$tool" "$shape" "1")"
+    if is_deny "$OUT_BLANKET"; then
+      ok "AC4 (SEC-6): a blanket QUETREX_UNLOCK_FLOOR=1 no longer unlocks $tool of .quetrex/project.json (shape: $shape)"
+    else
+      notok "AC4 (SEC-6): expected a blanket =1 to be denied for $tool of .quetrex/project.json (shape: $shape) [$OUT_BLANKET]"
     fi
   done
 done

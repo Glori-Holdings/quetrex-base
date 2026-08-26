@@ -59,11 +59,11 @@ for v in 2.4.0 2.5.0 2.5.1 2.5.2 2.5.3; do
   done
 done
 
-fire() {  # fire <file_path> <cwd> [unlock]
+fire() {  # fire <file_path> <cwd> [unlock-value]
   local p="$1" d="$2" unlock="${3:-}" payload
   payload="$(jq -cn --arg p "$p" --arg d "$d" '{tool_name:"Write",tool_input:{file_path:$p},cwd:$d}')"
-  if [ "$unlock" = "1" ]; then
-    printf '%s' "$payload" | env QUETREX_UNLOCK_FLOOR=1 bash "$GUARD" 2>&1
+  if [ -n "$unlock" ]; then
+    printf '%s' "$payload" | env QUETREX_UNLOCK_FLOOR="$unlock" bash "$GUARD" 2>&1
   else
     printf '%s' "$payload" | env -u QUETREX_UNLOCK_FLOOR bash "$GUARD" 2>&1
   fi
@@ -96,13 +96,22 @@ else
 fi
 
 # =============================================================================
-# AC3 — QUETREX_UNLOCK_FLOOR=1 still permits it
+# AC3 — SEC-6 (2026-08-26): a blanket QUETREX_UNLOCK_FLOOR=1 no longer
+# permits it; the correctly-scoped basename does.
 # =============================================================================
-OUT="$(fire "$P2" "$UNARMED" "1")"
-if ! is_deny "$OUT"; then
-  ok "AC3: QUETREX_UNLOCK_FLOOR=1 permits a Write to the quetrex-plugin-own-cache shape"
+OUT_BLANKET="$(fire "$P2" "$UNARMED" "1")"
+if is_deny "$OUT_BLANKET"; then
+  ok "AC3: a blanket QUETREX_UNLOCK_FLOOR=1 no longer permits the write (SEC-6 fix)"
 else
-  notok "AC3: expected the unlock to permit [$P2], got [$OUT]"
+  notok "AC3: expected a blanket =1 to be denied post-SEC-6 [$P2], got [$OUT_BLANKET]"
+fi
+
+P2_BASENAME="$(basename "$P2")"
+OUT_SCOPED="$(fire "$P2" "$UNARMED" "$P2_BASENAME")"
+if ! is_deny "$OUT_SCOPED"; then
+  ok "AC3: QUETREX_UNLOCK_FLOOR=$P2_BASENAME (correctly scoped) permits the write"
+else
+  notok "AC3: expected the scoped unlock to permit [$P2] with QUETREX_UNLOCK_FLOOR=$P2_BASENAME, got [$OUT_SCOPED]"
 fi
 
 # =============================================================================

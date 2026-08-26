@@ -48,11 +48,11 @@ echo fixture > "$FIXTURE/README.md"
 arm()    { mkdir -p "$FIXTURE/.quetrex"; printf '{"branchPrefix":"claude/"}' > "$FIXTURE/.quetrex/project.json"; printf '{"verify":["true"]}' > "$FIXTURE/.quetrex/verify.json"; }
 disarm() { rm -rf "$FIXTURE/.quetrex"; }
 
-fire_write() {  # fire_write <tool> <file_path> [1 to unlock]
+fire_write() {  # fire_write <tool> <file_path> [unlock-value]
   local tool="$1" fp="$2" unlock="${3:-}" payload
   payload="$(jq -cn --arg t "$tool" --arg p "$fp" --arg d "$FIXTURE" '{tool_name:$t,tool_input:{file_path:$p},cwd:$d}')"
-  if [ "$unlock" = "1" ]; then
-    printf '%s' "$payload" | env QUETREX_UNLOCK_FLOOR=1 bash "$GUARD" 2>&1
+  if [ -n "$unlock" ]; then
+    printf '%s' "$payload" | env QUETREX_UNLOCK_FLOOR="$unlock" bash "$GUARD" 2>&1
   else
     printf '%s' "$payload" | env -u QUETREX_UNLOCK_FLOOR bash "$GUARD" 2>&1
   fi
@@ -75,11 +75,18 @@ for shape in "$FIXTURE/.quetrex/verify.json" ".quetrex/verify.json"; do
       notok "AC1: protected-files-guard did NOT deny $tool of .quetrex/verify.json (shape: $shape) [$OUT]"
     fi
 
-    OUT_UNLOCKED="$(fire_write "$tool" "$shape" "1")"
+    OUT_UNLOCKED="$(fire_write "$tool" "$shape" "verify.json")"
     if is_allow "$OUT_UNLOCKED"; then
-      ok "AC2: protected-files-guard allows+records unlocked $tool of .quetrex/verify.json (shape: $shape)"
+      ok "AC2: protected-files-guard allows+records unlocked (QUETREX_UNLOCK_FLOOR=verify.json) $tool of .quetrex/verify.json (shape: $shape)"
     else
       notok "AC2: protected-files-guard did NOT allow the unlocked $tool (shape: $shape) [$OUT_UNLOCKED]"
+    fi
+
+    OUT_BLANKET="$(fire_write "$tool" "$shape" "1")"
+    if is_deny "$OUT_BLANKET"; then
+      ok "AC2 (SEC-6): a blanket QUETREX_UNLOCK_FLOOR=1 no longer unlocks $tool of .quetrex/verify.json (shape: $shape)"
+    else
+      notok "AC2 (SEC-6): expected a blanket =1 to be denied for $tool of .quetrex/verify.json (shape: $shape) [$OUT_BLANKET]"
     fi
   done
 done

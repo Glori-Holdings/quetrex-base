@@ -154,16 +154,30 @@ done
   && ok "ONE-COPY AC14: $TP_TOTAL of $TP_TOTAL true-positive paths (repo-local + marketplace-clone + versioned cache + old floor) deny" \
   || notok "ONE-COPY AC14: expected $TP_TOTAL deny decisions among the true-positive set, got $TP_DENY"
 
+# SEC-6 (2026-08-26): the unlock now NAMES its target -- a bare
+# QUETREX_UNLOCK_FLOOR=1 no longer unlocks anything, and only the file's own
+# basename (or a list including it) does.
 TP_ALLOW=0
 for p in "${TP_PATHS[@]}"; do
+  target_name="$(basename "$p")"
   OUT="$(printf '%s' "$(jq -cn --arg p "$p" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
-    | QUETREX_UNLOCK_FLOOR=1 bash "$GUARD" 2>&1)"
+    | QUETREX_UNLOCK_FLOOR="$target_name" bash "$GUARD" 2>&1)"
   is_deny "$OUT" && echo "# ONE-COPY AC14 unlock miss (expected allow): [$p] -> [$OUT]"
   is_deny "$OUT" || TP_ALLOW=$((TP_ALLOW+1))
 done
 [ "$TP_ALLOW" -eq "$TP_TOTAL" ] \
-  && ok "ONE-COPY AC14: with QUETREX_UNLOCK_FLOOR=1, $TP_TOTAL of $TP_TOTAL true-positive paths are NOT denied (unlocked)" \
-  || notok "ONE-COPY AC14: expected 0 deny decisions with the unlock set, got $((TP_TOTAL-TP_ALLOW)) still denied"
+  && ok "ONE-COPY AC14: with the correctly-scoped QUETREX_UNLOCK_FLOOR=<basename>, $TP_TOTAL of $TP_TOTAL true-positive paths are NOT denied (unlocked)" \
+  || notok "ONE-COPY AC14: expected 0 deny decisions with the scoped unlock set, got $((TP_TOTAL-TP_ALLOW)) still denied"
+
+TP_BLANKET_DENY=0
+for p in "${TP_PATHS[@]}"; do
+  OUT="$(printf '%s' "$(jq -cn --arg p "$p" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+    | QUETREX_UNLOCK_FLOOR=1 bash "$GUARD" 2>&1)"
+  is_deny "$OUT" && TP_BLANKET_DENY=$((TP_BLANKET_DENY+1)) || echo "# ONE-COPY AC14 blanket-unlock miss (SEC-6, expected deny): [$p] -> [$OUT]"
+done
+[ "$TP_BLANKET_DENY" -eq "$TP_TOTAL" ] \
+  && ok "ONE-COPY AC14 (SEC-6): a blanket QUETREX_UNLOCK_FLOOR=1 denies all $TP_TOTAL true-positive paths (no longer unlocks anything)" \
+  || notok "ONE-COPY AC14 (SEC-6): expected $TP_TOTAL deny decisions with a blanket =1, got $TP_BLANKET_DENY"
 
 # --- C3 (review finding): the installed shapes (2 and 3 above) stay
 # protected even from an UNARMED session — they are machine-global, not a
@@ -386,8 +400,10 @@ OTHER17=$(jq -s --argjson known 4 '
   || notok "AC17: expected exactly 4 distinct commands in the ledger, got $OTHER17"
 
 # =============================================================================
-# CORRECTION 2 — the QUETREX_UNLOCK_FLOOR=1 unlock permits the write and
-# records it (never silent).
+# CORRECTION 2 — the QUETREX_UNLOCK_FLOOR unlock permits the write and
+# records it (never silent). SEC-6 (2026-08-26): the unlock now NAMES its
+# target — QUETREX_UNLOCK_FLOOR=verify-gate.sh (the exact basename) permits;
+# a bare QUETREX_UNLOCK_FLOOR=1 no longer does.
 # =============================================================================
 REPO_UNLOCK="$TMP/repo-unlock"
 mkdir -p "$REPO_UNLOCK/plugins/quetrex-factory/scripts" "$REPO_UNLOCK/.quetrex"
@@ -399,25 +415,100 @@ git -C "$REPO_UNLOCK" add -A; git -C "$REPO_UNLOCK" commit -q -m init
 
 OUT_UNLOCK="$(printf '%s' "$(jq -cn --arg p "$REPO_UNLOCK/plugins/quetrex-factory/scripts/verify-gate.sh" --arg cwd "$REPO_UNLOCK" \
   '{tool_name:"Write",tool_input:{file_path:$p},cwd:$cwd}')" \
-  | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR=1 bash "$GUARD" 2>&1)"
+  | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR=verify-gate.sh bash "$GUARD" 2>&1)"
 
 printf '%s' "$OUT_UNLOCK" | grep -q '"permissionDecision":"allow"' \
-  && ok "CORRECTION 2: QUETREX_UNLOCK_FLOOR=1 permits the write (permissionDecision:\"allow\")" \
-  || notok "CORRECTION 2: QUETREX_UNLOCK_FLOOR=1 did not permit the write [$OUT_UNLOCK]"
+  && ok "CORRECTION 2: QUETREX_UNLOCK_FLOOR=verify-gate.sh (scoped) permits the write (permissionDecision:\"allow\")" \
+  || notok "CORRECTION 2: QUETREX_UNLOCK_FLOOR=verify-gate.sh did not permit the write [$OUT_UNLOCK]"
 printf '%s' "$OUT_UNLOCK" | grep -q '"permissionDecision":"deny"' \
   && notok "CORRECTION 2: the unlocked write was still denied [$OUT_UNLOCK]" \
   || ok "CORRECTION 2: the unlocked write is not denied"
 [ -f "$REPO_UNLOCK/.quetrex/protected-files-unlock.log" ] \
   && ok "CORRECTION 2: the unlock is RECORDED in .quetrex/protected-files-unlock.log (never silent)" \
   || notok "CORRECTION 2: no unlock record was written"
+grep -q 'QUETREX_UNLOCK_FLOOR=verify-gate.sh' "$REPO_UNLOCK/.quetrex/protected-files-unlock.log" 2>/dev/null \
+  && ok "SEC-6: the unlock log line records the SCOPED value (QUETREX_UNLOCK_FLOOR=verify-gate.sh), not a literal =1" \
+  || notok "SEC-6: the unlock log line does not record the scoped value [$(cat "$REPO_UNLOCK/.quetrex/protected-files-unlock.log" 2>/dev/null)]"
 
 # --- unlock does NOT apply without the env var (default stays denied) ------
 OUT_STILL_DENIED="$(printf '%s' "$(jq -cn --arg p "$REPO_UNLOCK/plugins/quetrex-factory/scripts/verify-gate.sh" --arg cwd "$REPO_UNLOCK" \
   '{tool_name:"Write",tool_input:{file_path:$p},cwd:$cwd}')" \
   | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" bash "$GUARD" 2>&1)"
 is_deny "$OUT_STILL_DENIED" \
-  && ok "CORRECTION 2: without QUETREX_UNLOCK_FLOOR=1, the same write is denied by default" \
+  && ok "CORRECTION 2: without QUETREX_UNLOCK_FLOOR at all, the same write is denied by default" \
   || notok "CORRECTION 2: expected a deny without the unlock env var [$OUT_STILL_DENIED]"
+
+# --- SEC-6 (2026-08-26): a blanket QUETREX_UNLOCK_FLOOR=1 no longer permits
+# the write -- the ambient/settings.json blanket-unlock hole this fix closes.
+OUT_BLANKET="$(printf '%s' "$(jq -cn --arg p "$REPO_UNLOCK/plugins/quetrex-factory/scripts/verify-gate.sh" --arg cwd "$REPO_UNLOCK" \
+  '{tool_name:"Write",tool_input:{file_path:$p},cwd:$cwd}')" \
+  | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR=1 bash "$GUARD" 2>&1)"
+is_deny "$OUT_BLANKET" \
+  && ok "SEC-6: a blanket QUETREX_UNLOCK_FLOOR=1 no longer unlocks the write (DENIED)" \
+  || notok "SEC-6: expected a blanket QUETREX_UNLOCK_FLOOR=1 to deny [$OUT_BLANKET]"
+printf '%s' "$OUT_BLANKET" | grep -q 'QUETREX_UNLOCK_FLOOR=verify-gate.sh' \
+  && ok "SEC-6: the blanket-deny message names the required scoped form (QUETREX_UNLOCK_FLOOR=verify-gate.sh)" \
+  || notok "SEC-6: the blanket-deny message does not name the required scoped basename [$OUT_BLANKET]"
+printf '%s' "$OUT_BLANKET" | grep -qi 'blanket' \
+  && ok "SEC-6: the blanket-deny message states plainly that an ambient/blanket value was present and no longer authorizes anything" \
+  || notok "SEC-6: the deny message does not mention the ambient/blanket value [$OUT_BLANKET]"
+
+# --- SEC-6: the basename of a DIFFERENT floor script does not leak across
+# targets -- naming enforce-branch.sh must not unlock a verify-gate.sh write.
+OUT_WRONG_TARGET="$(printf '%s' "$(jq -cn --arg p "$REPO_UNLOCK/plugins/quetrex-factory/scripts/verify-gate.sh" --arg cwd "$REPO_UNLOCK" \
+  '{tool_name:"Write",tool_input:{file_path:$p},cwd:$cwd}')" \
+  | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR=enforce-branch.sh bash "$GUARD" 2>&1)"
+is_deny "$OUT_WRONG_TARGET" \
+  && ok "SEC-6: QUETREX_UNLOCK_FLOOR naming a DIFFERENT floor script's basename does not unlock this write (no cross-target leak)" \
+  || notok "SEC-6: expected a deny when the unlock names a different target [$OUT_WRONG_TARGET]"
+
+# --- SEC-6: the colon/comma list form unlocks both named targets and still
+# denies a third, unnamed one.
+OUT_LIST_A="$(printf '%s' "$(jq -cn --arg p "$REPO_UNLOCK/plugins/quetrex-factory/scripts/verify-gate.sh" --arg cwd "$REPO_UNLOCK" \
+  '{tool_name:"Write",tool_input:{file_path:$p},cwd:$cwd}')" \
+  | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR="enforce-branch.sh:verify-gate.sh" bash "$GUARD" 2>&1)"
+OUT_LIST_B="$(printf '%s' "$(jq -cn --arg p "$REPO_UNLOCK/plugins/quetrex-factory/scripts/enforce-branch.sh" --arg cwd "$REPO_UNLOCK" \
+  '{tool_name:"Write",tool_input:{file_path:$p},cwd:$cwd}')" \
+  | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR="enforce-branch.sh,verify-gate.sh" bash "$GUARD" 2>&1)"
+OUT_LIST_C="$(printf '%s' "$(jq -cn --arg p "$REPO_UNLOCK/plugins/quetrex-factory/scripts/merge-gate.sh" --arg cwd "$REPO_UNLOCK" \
+  '{tool_name:"Write",tool_input:{file_path:$p},cwd:$cwd}')" \
+  | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR="enforce-branch.sh:verify-gate.sh" bash "$GUARD" 2>&1)"
+{ ! is_deny "$OUT_LIST_A"; } && { ! is_deny "$OUT_LIST_B"; } \
+  && ok "SEC-6: a colon/comma-separated list unlocks BOTH named targets (enforce-branch.sh, verify-gate.sh)" \
+  || notok "SEC-6: the list form did not unlock both named targets [$OUT_LIST_A] [$OUT_LIST_B]"
+is_deny "$OUT_LIST_C" \
+  && ok "SEC-6: the same list still denies a THIRD, unnamed target (merge-gate.sh)" \
+  || notok "SEC-6: expected the list form to still deny an unnamed target [$OUT_LIST_C]"
+
+# --- SEC-6: the Bash-path call site obeys the same rule.
+SEC6_BASH_TARGET="$REPO_UNLOCK/plugins/quetrex-factory/scripts/verify-gate.sh"
+SEC6_BASH_BLANKET="$(printf '%s' "$(jq -cn --arg c "cp /tmp/x $SEC6_BASH_TARGET" --arg cwd "$REPO_UNLOCK" \
+  '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}')" \
+  | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR=1 bash "$GUARD" 2>&1)"
+is_deny "$SEC6_BASH_BLANKET" \
+  && ok "SEC-6: the Bash-path call site also denies a blanket QUETREX_UNLOCK_FLOOR=1" \
+  || notok "SEC-6: expected the Bash vector to deny a blanket =1 [$SEC6_BASH_BLANKET]"
+SEC6_BASH_SCOPED="$(printf '%s' "$(jq -cn --arg c "cp /tmp/x $SEC6_BASH_TARGET" --arg cwd "$REPO_UNLOCK" \
+  '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}')" \
+  | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR=verify-gate.sh bash "$GUARD" 2>&1)"
+printf '%s' "$SEC6_BASH_SCOPED" | grep -q '"permissionDecision":"allow"' \
+  && ok "SEC-6: the Bash-path call site allows with the correctly-scoped basename" \
+  || notok "SEC-6: expected the Bash vector to allow with the scoped unlock [$SEC6_BASH_SCOPED]"
+
+# --- SEC-6 FAIL-FIRST: the pre-fix guard on main DID allow a blanket
+# QUETREX_UNLOCK_FLOOR=1 to unlock a floor-script write -- this is the exact
+# block this fix introduces.
+SEC6_BASELINE="$TMP/sec6-baseline-guard.sh"
+if git -C "$ROOT" show main:.claude/hooks/protected-files-guard.sh > "$SEC6_BASELINE" 2>/dev/null; then
+  SEC6_BASE_OUT="$(printf '%s' "$(jq -cn --arg p "$REPO_UNLOCK/plugins/quetrex-factory/scripts/verify-gate.sh" --arg cwd "$REPO_UNLOCK" \
+    '{tool_name:"Write",tool_input:{file_path:$p},cwd:$cwd}')" \
+    | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR=1 bash "$SEC6_BASELINE" 2>&1)"
+  printf '%s' "$SEC6_BASE_OUT" | grep -q '"permissionDecision":"allow"' \
+    && ok "SEC-6 FAIL-FIRST: the pre-fix guard (main) DID allow a blanket QUETREX_UNLOCK_FLOOR=1 -- proving the new block above is a genuine, deliberate fix" \
+    || notok "SEC-6 FAIL-FIRST: the pre-fix guard on main did not allow the blanket unlock either (out: [$SEC6_BASE_OUT]) -- cannot demonstrate the fix is real"
+else
+  notok "SEC-6 FAIL-FIRST: could not read .claude/hooks/protected-files-guard.sh at main -- refusing to report a pass having compared against nothing"
+fi
 
 # =============================================================================
 # SEC-7 / SEC-4 (security review, 2026-08-21): the write-detection must key
