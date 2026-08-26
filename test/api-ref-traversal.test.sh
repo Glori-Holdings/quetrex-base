@@ -12,7 +12,7 @@
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="${QX_API_BIN:-$ROOT/bin/quetrex-api}"
+BIN="${QX_API_BIN:-$ROOT/plugins/quetrex-setup/bin/quetrex-api}"
 LIB="$ROOT/.claude/lib/quetrex-api.sh"
 
 PASS=0; FAIL=0

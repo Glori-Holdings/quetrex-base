@@ -39,7 +39,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARCH="$REPO_ROOT/plugins/quetrex-factory/agents/architect.md"
 DEVPIPE="$REPO_ROOT/.claude/lib/dev-pipeline.md"
 TASKBUILD="$REPO_ROOT/.claude/commands/task-build.md"
-DERIVE_TOOL="$REPO_ROOT/bin/quetrex-env-derive"
+DERIVE_TOOL="$REPO_ROOT/plugins/quetrex-setup/bin/quetrex-env-derive"
 CLOUD_PREP="$REPO_ROOT/bin/quetrex-cloud-prep"
 
 FAIL=0
@@ -367,7 +367,7 @@ if [ -f "$DEVPIPE" ]; then
   if [ "$DP_TOOL_MENTIONS" -ge 1 ]; then
     pass "dev-pipeline.md names the shared derivation tool quetrex-env-derive"
   else
-    fail "dev-pipeline.md never names bin/quetrex-env-derive as the shared implementation both /quetrex:init and the dispatcher call"
+    fail "dev-pipeline.md never names bin/quetrex-env-derive as the shared implementation both /quetrex-setup:init and the dispatcher call"
   fi
 else
   fail "dev-pipeline.md not found at $DEVPIPE"

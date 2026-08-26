@@ -294,7 +294,7 @@ mk_repo "$S5"
 printf '%s\n' "$UNARMED_SETTINGS" > "$S5/.claude/settings.json"
 gitq "$S5" add .claude/settings.json .quetrex/project.json .quetrex/verify.json
 gitq "$S5" commit -qm "settings committed, but unarmed"
-# now arm it ON DISK ONLY — exactly what an uncommitted /quetrex:init leaves
+# now arm it ON DISK ONLY — exactly what an uncommitted /quetrex-setup:init leaves
 printf '%s\n' "$ARMED_SETTINGS" > "$S5/.claude/settings.json"
 
 OUT_S5="$(run_check8 "$S5" bash 2>&1)"

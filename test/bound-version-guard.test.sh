@@ -6,7 +6,7 @@
 # TWO plugin roots (HOOKFIX correction 1).
 #
 # EVERY ASSERTION DRIVES THE SHIPPED SCRIPT
-# .claude/hooks/quetrex-bound-version-guard.sh end to end via its real
+# plugins/quetrex-setup/scripts/quetrex-bound-version-guard.sh end to end via its real
 # SessionStart stdin payload, against a synthetic plugin-cache tree this file
 # builds itself (real .claude-plugin/plugin.json files, a real
 # installed_plugins.json fixture), with CLAUDE_PLUGIN_ROOT and PATH set to
@@ -39,7 +39,7 @@ set -uo pipefail
 # invocation, which overrides this.
 unset QUETREX_UNLOCK_FLOOR
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GUARD="${QX_BOUND_VERSION_GUARD_HOOK:-$ROOT/.claude/hooks/quetrex-bound-version-guard.sh}"
+GUARD="${QX_BOUND_VERSION_GUARD_HOOK:-$ROOT/plugins/quetrex-setup/scripts/quetrex-bound-version-guard.sh}"
 
 PASS=0; FAIL=0
 ok()    { PASS=$((PASS+1)); echo "ok - $1"; }
@@ -239,7 +239,7 @@ else
   ok "AC11 FAIL-FIRST: quetrex-bound-version-guard.sh does not exist at ff16905 (pre-#119 baseline) — this is new machinery, not a modification"
 fi
 
-OLD_CHECK="$ROOT/.claude/hooks/quetrex-update-check.sh"
+OLD_CHECK="$ROOT/plugins/quetrex-setup/scripts/quetrex-update-check.sh"
 if [ -f "$OLD_CHECK" ]; then
   OUT_OLD="$(jq -cn --arg s sess-ac8-baseline '{hook_event_name:"SessionStart",session_id:$s}' \
     | env CLAUDE_PLUGIN_ROOT="$QROOT8" PATH="$FROOT8/bin:/usr/bin:/bin" \

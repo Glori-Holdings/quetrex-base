@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# test/quetrex-arm.test.sh — behavioural test for bin/quetrex-arm, the
-# deterministic cloud-arming tool called by .claude/commands/init.md (steps
-# 4h/4i) in place of the buried, non-executing inline node prose it replaces.
+# test/quetrex-arm.test.sh — behavioural test for
+# plugins/quetrex-setup/bin/quetrex-arm, the deterministic cloud-arming tool
+# called by plugins/quetrex-setup/commands/init.md (steps 4h/4i) in place of
+# the buried, non-executing inline node prose it replaces.
 #
 # Run: bash test/quetrex-arm.test.sh
 #
 # Proves:
-#   1. Fresh repo: writes the enabledPlugins pin (concrete factory version,
-#      never `true`) and extraKnownMarketplaces.quetrex in the EXACT required
-#      shape — and writes NO .mcp.json at all.
+#   1. Fresh repo: writes enabledPlugins for quetrex, quetrex-factory AND
+#      quetrex-setup as the literal boolean `true` (NEVER a version pin) and
+#      extraKnownMarketplaces.quetrex in the EXACT required shape — and
+#      writes NO .mcp.json at all.
 #   2. Idempotent: a second run on the same repo makes NO changes (byte-
 #      identical settings.json, still no .mcp.json) and exits 0.
 #   3. Non-destructive: a pre-existing unrelated enabledPlugins entry and a
@@ -26,10 +28,10 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ARM="$REPO_ROOT/bin/quetrex-arm"
+ARM="$REPO_ROOT/plugins/quetrex-setup/bin/quetrex-arm"
 
 if [ ! -f "$ARM" ]; then
-  echo "FAIL: bin/quetrex-arm not found at $ARM"
+  echo "FAIL: quetrex-arm not found at $ARM"
   exit 1
 fi
 if ! command -v node >/dev/null 2>&1; then
@@ -77,18 +79,18 @@ json_get() {
 }
 
 # ---------------------------------------------------------------------------
-# 0. bin/quetrex-arm itself: executable, valid bash syntax.
+# 0. quetrex-arm itself: executable, valid bash syntax.
 # ---------------------------------------------------------------------------
 if [ -x "$ARM" ]; then
-  pass "bin/quetrex-arm is executable"
+  pass "quetrex-arm is executable"
 else
-  fail "bin/quetrex-arm must be executable (chmod +x)"
+  fail "quetrex-arm must be executable (chmod +x)"
 fi
 
 if bash -n "$ARM"; then
-  pass "bin/quetrex-arm passes bash -n syntax check"
+  pass "quetrex-arm passes bash -n syntax check"
 else
-  fail "bin/quetrex-arm has a bash syntax error"
+  fail "quetrex-arm has a bash syntax error"
 fi
 
 # ---------------------------------------------------------------------------
@@ -139,7 +141,7 @@ FPIN="$(json_get "$SETTINGS1" 'enabledPlugins.quetrex-factory@quetrex')"
 # `claude plugin list` across four checkouts: pin absent -> enabled; true ->
 # enabled; ["1.2.1"] (the exact installed version) -> FAILED TO LOAD; ["1.1.0"] ->
 # FAILED TO LOAD. Booleans only now; the engine auto-updates and the version is
-# surfaced by bin/quetrex-version in the status bar.
+# surfaced by quetrex-version in the status bar.
 if [ "$FPIN" = "true" ]; then
   pass "enabledPlugins['quetrex-factory@quetrex'] is exactly true (never a version pin)"
 else
@@ -150,6 +152,16 @@ case "$FPIN" in
   '['*|'"'*) fail "enabledPlugins['quetrex-factory@quetrex'] must not be an array or a string (got: $FPIN)" ;;
   *)         pass "enabledPlugins['quetrex-factory@quetrex'] is neither an array nor a version string" ;;
 esac
+
+# AC15/AC17: quetrex-setup is enabled at PROJECT scope too — a cloud routine
+# and a teammate's fresh clone are provisioned from the repo's own
+# .claude/settings.json and both need quetrex-api/quetrex-env-derive on PATH.
+SPIN="$(json_get "$SETTINGS1" 'enabledPlugins.quetrex-setup@quetrex')"
+if [ "$SPIN" = "true" ]; then
+  pass "enabledPlugins['quetrex-setup@quetrex'] === true"
+else
+  fail "enabledPlugins['quetrex-setup@quetrex'] should be true (got: $SPIN)"
+fi
 
 MKT="$(json_get "$SETTINGS1" 'extraKnownMarketplaces.quetrex.source')"
 EXPECT_MKT='{"source":"github","repo":"Glori-Holdings/quetrex-plugins"}'
@@ -273,7 +285,7 @@ fi
 #    carry a committed quetrex-kanban registration pointing at
 #    <kanban>/api/mcp, a route the kanban never had; Claude Code fails to
 #    connect it on every single session, in every clone, for every teammate.
-#    Re-running /quetrex:init (hence quetrex-arm) is the remediation path, so
+#    Re-running /quetrex-setup:init (hence quetrex-arm) is the remediation path, so
 #    the removal is asserted four ways: the whole-file delete, the
 #    preserve-other-servers case, the preserve-other-top-level-keys case, and
 #    the leave-a-real-url-alone case.
@@ -305,7 +317,7 @@ else
 fi
 
 if printf '%s' "$OUT4" | grep -qi 'removed the dead quetrex-kanban broker'; then
-  pass "removal is reported out loud, so /quetrex:init can tell the operator"
+  pass "removal is reported out loud, so /quetrex-setup:init can tell the operator"
 else
   fail "removal must be reported in the output (got: $OUT4)"
 fi
@@ -423,10 +435,11 @@ fi
 
 QPIN3="$(json_get "$REPO3/.claude/settings.json" 'enabledPlugins.quetrex@quetrex')"
 FPIN3="$(json_get "$REPO3/.claude/settings.json" 'enabledPlugins.quetrex-factory@quetrex')"
-if [ "$QPIN3" = "true" ] && [ "$FPIN3" = "true" ]; then
-  pass "arming offline still enables BOTH plugins with true"
+SPIN3="$(json_get "$REPO3/.claude/settings.json" 'enabledPlugins.quetrex-setup@quetrex')"
+if [ "$QPIN3" = "true" ] && [ "$FPIN3" = "true" ] && [ "$SPIN3" = "true" ]; then
+  pass "arming offline still enables ALL THREE plugins with true"
 else
-  fail "arming offline must enable both plugins with true (quetrex=$QPIN3, factory=$FPIN3)"
+  fail "arming offline must enable all three plugins with true (quetrex=$QPIN3, factory=$FPIN3, setup=$SPIN3)"
 fi
 
 if printf '%s' "$OFFLINE_OUT" | grep -qi 'unreachable\|deferred'; then

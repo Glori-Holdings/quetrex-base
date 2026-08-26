@@ -40,7 +40,7 @@
 set -uo pipefail
 
 TOOLROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT="$TOOLROOT/.claude/statusline-command.sh"
+SCRIPT="$TOOLROOT/plugins/quetrex-setup/statusline-command.sh"
 SETTINGS="$TOOLROOT/.claude/settings.json"
 
 if [ ! -f "$SCRIPT" ]; then
@@ -348,7 +348,7 @@ JSON
   esac
 
   # The path the registration resolves to must be the file this repo SHIPS.
-  RESOLVED="$(CLAUDE_PROJECT_DIR="$TOOLROOT" bash -c 'printf "%s" "${CLAUDE_PROJECT_DIR}/.claude/statusline-command.sh"')"
+  RESOLVED="$(CLAUDE_PROJECT_DIR="$TOOLROOT" bash -c 'printf "%s" "${CLAUDE_PROJECT_DIR}/plugins/quetrex-setup/statusline-command.sh"')"
   if [ -f "$RESOLVED" ]; then
     pass "ADV-7: the registration resolves to a file that exists in the shipped tree ($RESOLVED)"
   else

@@ -20,7 +20,7 @@
 #      both an absolute and a cwd-relative path shape.
 # AC4: AC3 -> ALLOW+RECORDED with QUETREX_UNLOCK_FLOOR=1.
 # AC5: creating .quetrex/project.json for the FIRST TIME in an UNARMED repo
-#      (the /quetrex:init shape) stays ALLOWED on both vectors — armed-only
+#      (the /quetrex-setup:init shape) stays ALLOWED on both vectors — armed-only
 #      gating protects init, not just the kill-switch fix.
 # AC6: an unrelated rm/Write in an ARMED repo is untouched (no false deny).
 # AC7: deny-guard's PRE-EXISTING catastrophic-command rules (force-push) and
@@ -164,7 +164,7 @@ fi
 
 # =============================================================================
 # AC5 (deny-guard side) — an UNARMED repo creating project.json for the
-# first time (the /quetrex:init shape, via a Bash redirect) stays allowed:
+# first time (the /quetrex-setup:init shape, via a Bash redirect) stays allowed:
 # "unarmed repo = no gates at all" is unaffected by this fix.
 # =============================================================================
 disarm

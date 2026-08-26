@@ -73,7 +73,7 @@ if qx_repo_armed "$U1"; then notok "AC1: expected unarmed for a repo with no .qu
 
 # AC2: working-tree file only (uncommitted) -> armed
 mkdir -p "$U1/.quetrex"; printf '{}' > "$U1/.quetrex/project.json"
-if qx_repo_armed "$U1"; then ok "AC2: an uncommitted working-tree project.json arms the repo (the /quetrex:init shape)"; else notok "AC2: expected armed for an uncommitted working-tree project.json"; fi
+if qx_repo_armed "$U1"; then ok "AC2: an uncommitted working-tree project.json arms the repo (the /quetrex-setup:init shape)"; else notok "AC2: expected armed for an uncommitted working-tree project.json"; fi
 
 # AC3: committed at HEAD, then working-tree file deleted -> STILL armed
 git -C "$U1" add .quetrex/project.json

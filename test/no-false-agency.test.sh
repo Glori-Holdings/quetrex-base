@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # no-false-agency.test.sh — never ask to do something you cannot do.
 #
-# THE FIELD INCIDENT. /quetrex:init asked "The Claude GitHub App is NOT installed. Run
+# THE FIELD INCIDENT. /quetrex-setup:init asked "The Claude GitHub App is NOT installed. Run
 # /install-github-app?" and offered "Yes — run /install-github-app". The operator answered yes.
 # Nothing happened, and nothing could: that is a native interactive command driving a GitHub
 # OAuth flow in the operator's own browser. The model cannot run or complete it.
@@ -22,6 +22,7 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CMDS="$ROOT/.claude/commands"
+SETUP_CMDS="$ROOT/plugins/quetrex-setup/commands"
 
 PASS=0; FAIL=0
 ok()    { PASS=$((PASS+1)); echo "ok - $1"; }
@@ -33,9 +34,9 @@ OPERATOR_ONLY='install-github-app
 login'
 
 # --- ASSERTION 1: never phrased as an action a command performs on approval ----
-# Mentioning /login is fine and necessary ("run /quetrex:login"). What is forbidden is
+# Mentioning /login is fine and necessary ("run /quetrex-setup:login"). What is forbidden is
 # presenting it as something THIS command will do once you say yes.
-for f in "$CMDS"/*.md; do
+for f in "$CMDS"/*.md "$SETUP_CMDS"/*.md; do
   [ -f "$f" ] || continue
   n="$(basename "$f")"
   while IFS= read -r cmd; do
@@ -59,7 +60,7 @@ done
 [ "$FAIL" -eq 0 ] && ok "ASSERTION 1: no shipped command offers to run an operator-only command"
 
 # --- ASSERTION 2: the GitHub App is gone, not merely reworded -----------------
-INIT="$CMDS/init.md"
+INIT="$SETUP_CMDS/init.md"
 if [ -f "$INIT" ]; then
   # The only permitted mention is the rationale inside the removed-section notice, which exists
   # to stop someone helpfully adding it back.

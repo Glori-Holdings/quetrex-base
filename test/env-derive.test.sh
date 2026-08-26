@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test/env-derive.test.sh — contract test for bin/quetrex-env-derive, the
+# test/env-derive.test.sh — contract test for plugins/quetrex-setup/bin/quetrex-env-derive, the
 # tool that turns a repo's own COMMITTED evidence (a tracked
 # .env.example/.env.sample plus a fallback-less env read in tracked source)
 # into a candidate NAME a human can confirm — and never, on its own, decides
@@ -50,10 +50,10 @@
 set -uo pipefail
 
 TOOLROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TOOL="$TOOLROOT/bin/quetrex-env-derive"
+TOOL="$TOOLROOT/plugins/quetrex-setup/bin/quetrex-env-derive"
 HOOK="${QX_VERIFY_GATE_HOOK:-$TOOLROOT/plugins/quetrex-factory/scripts/verify-gate.sh}"
 MERGE_HOOK="${QX_MERGE_GATE_HOOK:-$TOOLROOT/plugins/quetrex-factory/scripts/merge-gate.sh}"
-INIT_MD="$TOOLROOT/.claude/commands/init.md"
+INIT_MD="$TOOLROOT/plugins/quetrex-setup/commands/init.md"
 CLOUD_PREP="$TOOLROOT/bin/quetrex-cloud-prep"
 
 if [ ! -f "$TOOL" ]; then
@@ -136,9 +136,9 @@ ledger_line_count() {  # ledger_line_count <cwd> -> N total lines
 for banned in leafPathArgs resolveScope resolveMakeTarget inScope attributeToCommands QX_SCOPE_FILTER_ENABLED readMakefile verify-json; do
   n="$(grep -c "$banned" "$TOOL")"
   if [ "$n" = "0" ]; then
-    pass "AC20: '$banned' does not appear anywhere in bin/quetrex-env-derive (0 occurrences)"
+    pass "AC20: '$banned' does not appear anywhere in plugins/quetrex-setup/bin/quetrex-env-derive (0 occurrences)"
   else
-    fail "AC20: '$banned' appears $n time(s) in bin/quetrex-env-derive — the attribution engine must be deleted outright"
+    fail "AC20: '$banned' appears $n time(s) in plugins/quetrex-setup/bin/quetrex-env-derive — the attribution engine must be deleted outright"
   fi
 done
 
@@ -439,7 +439,7 @@ LEAK21="$(grep -cE 'ac21-(a|e)-value-should-never-leak' "$F21/.quetrex/verify.js
 
 for fixname in A_URL B_URL C_URL D_URL; do
   n="$(grep -c "$fixname" "$TOOL")"
-  [ "$n" = "0" ] && pass "AC21 INVARIANTS: fixture name $fixname is not hardcoded in bin/quetrex-env-derive" \
+  [ "$n" = "0" ] && pass "AC21 INVARIANTS: fixture name $fixname is not hardcoded in plugins/quetrex-setup/bin/quetrex-env-derive" \
     || fail "AC21 INVARIANTS: fixture name $fixname appears $n time(s) in the tool"
 done
 
@@ -562,7 +562,7 @@ fi
 
 HEADCOLON22="$(grep -c 'HEAD:' "$TOOL")"
 if [ "$HEADCOLON22" -ge 2 ]; then
-  pass "AC22: bin/quetrex-env-derive contains >= 2 occurrences of the literal 'HEAD:' ($HEADCOLON22)"
+  pass "AC22: plugins/quetrex-setup/bin/quetrex-env-derive contains >= 2 occurrences of the literal 'HEAD:' ($HEADCOLON22)"
 else
   fail "AC22: expected >= 2 occurrences of 'HEAD:' in the tool, got $HEADCOLON22"
 fi
