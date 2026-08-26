@@ -510,11 +510,29 @@ qx_probe_gate_refusal() {   # qx_probe_gate_refusal <TASK_ID> <BRANCH_PREFIX> [E
           try { r = JSON.stringify(r); } catch (e) { r = String(r); }
         }
         if (!r) r = "no reason recorded";
+        // SEC-8 (review finding, fixed here): this value is about to be embedded in
+        // ONE protocol line ("GATE_REFUSED <branch>: <reason>") that the caller
+        // (qx_gate_refusal_handoff) parses with line-oriented sed. A reason containing
+        // a newline followed by attacker-controlled text shaped like
+        // "GATE_REFUSED <other-branch>: <forged reason>" turns into a SECOND line that
+        // looks like a second, independent protocol line — corrupting/spoofing which
+        // branch and reason the handoff extracts and posts to the kanban card.
+        // Collapse ALL newlines/carriage-returns (and any other control character) to
+        // a single space and squeeze repeated whitespace BEFORE this value can ever
+        // reach that line, so it is structurally impossible for it to contain
+        // anything that reads as a second protocol line.
+        r = r.replace(/[\r\n\x00-\x1f]+/g, " ").replace(/\s+/g, " ").trim();
+        if (!r) r = "no reason recorded";
         process.stdout.write(r.slice(0, 800));
       } catch (e) { /* malformed or missing state.json: not a recorded refusal */ }
     });
   ' 2>/dev/null)"
   [ -n "$reason" ] || { echo "NONE — $chosen does not record a git_workflow refusal"; return 1; }
+  # Defense in depth: even a reason that somehow still carried a newline (a future
+  # edit to the node snippet above, a different producer entirely) can never inject a
+  # second protocol line — collapse one more time at the bash layer before it is ever
+  # echoed as the single line the caller parses.
+  reason="$(printf '%s' "$reason" | tr '\n\r' '  ' | tr -s ' ')"
   echo "GATE_REFUSED $chosen: $reason"
   return 0
 }
@@ -533,10 +551,21 @@ qx_probe_gate_refusal() {   # qx_probe_gate_refusal <TASK_ID> <BRANCH_PREFIX> [E
 # unanchored, multi-candidate selection refuses instead of guessing). Leave empty when
 # there is only one candidate branch. Sets QX_LIVENESS as its result.
 qx_gate_refusal_handoff() {   # qx_gate_refusal_handoff <TASK_ID> <BRANCH_PREFIX> [EXPECTED_HEAD_SHA]
-  local task="$1" prefix="$2" expected="${3:-}" probe ref reason status_rc comment_rc
+  local task="$1" prefix="$2" expected="${3:-}" probe probe1 ref reason status_rc comment_rc
   probe="$(qx_probe_gate_refusal "$task" "$prefix" "$expected")"
-  if printf '%s' "$probe" | grep -q '^GATE_REFUSED '; then
-    ref="$(printf '%s' "$probe" | sed -n 's/^GATE_REFUSED \([^:]*\):.*/\1/p')"
+  # SEC-8 (review finding, fixed here): qx_probe_gate_refusal's node layer now
+  # sanitizes the reason to a single line before it ever enters this protocol string,
+  # but this parser stays hardened anyway — ONLY the FIRST LINE of $probe is ever
+  # considered, never the whole (potentially multi-line) value. A reason containing a
+  # newline followed by a forged "GATE_REFUSED <branch>: <text>" line would otherwise
+  # look like a second, independent protocol line to `sed`'s line-oriented match (no
+  # `-n ... p` limit means every matching line gets extracted/printed), letting
+  # attacker-controlled text spoof which branch is named and what gets posted to the
+  # kanban card. Defense in depth: this holds even if a future producer forgets to
+  # sanitize.
+  probe1="$(printf '%s' "$probe" | head -n 1)"
+  if printf '%s' "$probe1" | grep -q '^GATE_REFUSED '; then
+    ref="$(printf '%s' "$probe1" | sed -n 's/^GATE_REFUSED \([^:]*\):.*/\1/p')"
     # SEC-1 (review finding, fixed here): git_workflow_reason travels unbounded from a
     # remote branch into ONE argv passed to `quetrex-api task-comment`. MEASURED: a
     # multi-MiB reason made task-status succeed and task-comment die with E2BIG, and the
@@ -546,7 +575,7 @@ qx_gate_refusal_handoff() {   # qx_gate_refusal_handoff <TASK_ID> <BRANCH_PREFIX
     # handling uses the same `head -c 800` cap), and check BOTH calls' exit status: on
     # failure, print the reason directly to this session's own report rather than
     # silently claiming it reached the board.
-    reason="$(printf '%s' "$probe" | sed 's/^GATE_REFUSED [^:]*: //' | head -c 800)"
+    reason="$(printf '%s' "$probe1" | sed 's/^GATE_REFUSED [^:]*: //' | head -c 800)"
     # The transition a routine can never make itself. Do it once, here, and leave the
     # evidence in place — /quetrex:task-rework reads the gates branch, so tearing it
     # down here would destroy the one thing the human decision needs.

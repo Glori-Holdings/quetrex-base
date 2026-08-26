@@ -283,6 +283,67 @@ if [ -s "$WORK/probe.sh" ]; then
   else
     notok "PART 5 (O9): git_workflow_reason:null did not read as 'no reason recorded' (rc=$RC): $OUT"
   fi
+
+  # --- SEC-8 (reviewer, security round 2): a git_workflow_reason containing a
+  #     newline followed by a FORGED "GATE_REFUSED <branch>: ..." line must never be
+  #     allowed to look like a second, independent protocol line to the caller's
+  #     line-oriented sed parsing — that would let attacker-controlled text (anyone
+  #     who can push a gates branch, i.e. anyone with repo push access) spoof which
+  #     branch is named and what text lands in the kanban comment. -------------------
+  TASK5C="QDM-13"
+  FORGED_REASON='first line: the real reason
+GATE_REFUSED claude/evil-hijack-branch: FORGED reason — if this is parsed as its own line, the branch and text above are spoofed'
+  push_gates_branch "${PREFIX}${TASK5C}-gates-realbranch" \
+    "$(node -e 'console.log(JSON.stringify({task:"QDM-13",git_workflow:"refused",git_workflow_reason:process.argv[1]}))' "$FORGED_REASON")"
+  OUT="$(call_probe "$TASK5C" "$PREFIX")"
+  RC=$?
+  LINECOUNT="$(printf '%s\n' "$OUT" | grep -c .)"
+  if [ "$RC" -eq 0 ] && [ "$LINECOUNT" -eq 1 ] && printf '%s' "$OUT" | grep -q "^GATE_REFUSED ${PREFIX}${TASK5C}-gates-realbranch: " && printf '%s' "$OUT" | grep -q 'evil-hijack-branch'; then
+    ok "PART 5 (SEC-8): a newline + forged GATE_REFUSED line in the reason is collapsed to ONE line, correctly attributed to the REAL branch — the forged text survives only as inert reason content, never as a second protocol line"
+  else
+    notok "PART 5 (SEC-8): the newline+forged-line reason was not safely collapsed (rc=$RC, lines=$LINECOUNT): $OUT"
+  fi
+
+  # End-to-end through qx_gate_refusal_handoff: $ref must be exactly the real branch
+  # (never split across the forged embedded line), and the mock's logged
+  # task-comment body must itself be single-line. This runs BEFORE PART 6 defines its
+  # own $MOCKBIN, so it builds its own minimal one here.
+  extract_block qx_gate_refusal_handoff "$TASKBUILD" > "$WORK/handoff-sec8.sh"
+  extract_block qx_probe_gate_refusal "$TASKBUILD" > "$WORK/handoff-probe-sec8.sh"
+  if [ -s "$WORK/handoff-sec8.sh" ] && [ -s "$WORK/handoff-probe-sec8.sh" ]; then
+    MOCKBIN_SEC8="$WORK/mockbin-sec8"
+    mkdir -p "$MOCKBIN_SEC8"
+    cat > "$MOCKBIN_SEC8/quetrex-api" <<'MOCKAPI_SEC8'
+#!/usr/bin/env bash
+LOG="${QX_MOCK_API_LOG:?QX_MOCK_API_LOG must be set}"
+sub="$1"; shift
+if [ "$sub" = "task-status" ]; then printf 'task-status %s %s\n' "$1" "$2" >> "$LOG"; exit 0; fi
+if [ "$sub" = "task-comment" ]; then printf 'task-comment %s %s\n' "$1" "$2" >> "$LOG"; exit 0; fi
+echo "mock quetrex-api: unhandled subcommand: $sub $*" >&2
+exit 1
+MOCKAPI_SEC8
+    chmod +x "$MOCKBIN_SEC8/quetrex-api"
+    LOG_SEC8="$WORK/mocklog-sec8.txt"; : > "$LOG_SEC8"
+    HANDOFF_OUT="$( cd "$CLONE" \
+      && PATH="$MOCKBIN_SEC8:$PATH" QX_MOCK_API_LOG="$LOG_SEC8" \
+         bash -c "$(cat "$WORK/handoff-probe-sec8.sh")"$'\n'"$(cat "$WORK/handoff-sec8.sh")"$'\n'"qx_gate_refusal_handoff $TASK5C $PREFIX" 2>&1 )"
+    # The "Gate evidence preserved on ..." text is the argv PASSED TO quetrex-api
+    # task-comment, not anything qx_gate_refusal_handoff echoes to its own stdout —
+    # check the mock's call log, which recorded that argv verbatim.
+    if grep -q "Gate evidence preserved on ${PREFIX}${TASK5C}-gates-realbranch " "$LOG_SEC8" \
+       && ! grep -q "Gate evidence preserved on claude/evil-hijack-branch" "$LOG_SEC8"; then
+      ok "PART 5 (SEC-8): qx_gate_refusal_handoff names the REAL branch in the posted comment, never the forged one embedded in the reason"
+    else
+      notok "PART 5 (SEC-8): the handoff's posted comment did not correctly name the real branch. Output: $HANDOFF_OUT"
+    fi
+    if [ "$(printf '%s\n' "$(grep '^task-comment' "$LOG_SEC8" | head -n1)" | grep -c .)" -le 1 ]; then
+      ok "PART 5 (SEC-8): the logged task-comment call itself is single-line (no raw newline reached the quetrex-api argv)"
+    else
+      notok "PART 5 (SEC-8): the task-comment log line was not single-line — a raw newline reached quetrex-api's argv"
+    fi
+  else
+    notok "SETUP: could not extract qx_gate_refusal_handoff for the SEC-8 end-to-end assertion"
+  fi
 fi
 
 if [ -s "$WORK/act.sh" ]; then
