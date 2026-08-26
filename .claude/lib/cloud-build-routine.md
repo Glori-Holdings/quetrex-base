@@ -174,6 +174,31 @@ own agent file, with its own inputs, its own gate, and its own artifact under .q
     CODE or the SPEC needs a human decision; `transport_failure` means the RUN needs to be
     re-fired. Conflating the two sends a human down the wrong path.
 
+### 4b. If git-workflow REFUSED, this is a clean stop — publish evidence, do not open a PR
+
+git-workflow.md's own contract writes `.quetrex/state.json` with `git_workflow: "refused"` and
+`git_workflow_reason` the instant any gate is red, and reports REFUSED to you instead of
+opening a PR. Check for that before attempting step 5:
+
+    node -e 'let s={};try{s=JSON.parse(require("fs").readFileSync(".quetrex/state.json","utf8"))}catch(e){}process.exit(s.git_workflow==="refused"?0:1)' \
+      && echo "GIT_WORKFLOW_REFUSED=1"
+
+When `GIT_WORKFLOW_REFUSED=1`:
+
+- **Do not run step 5.** There is no PR to open — a red gate is a considered decision, not a
+  transport problem, and retrying it here would not change the artifact that caused it.
+- **Skip straight to step 5b and publish the gate evidence anyway.** The refusal reason and
+  every artifact that produced it are exactly what a human needs to see, and step 5b's own
+  rule ("if a gate is red, publish it red — a doctored artifact would make the whole gate
+  meaningless") already covers this: it is not an exception, it is the point.
+- **End your final report with the literal line** `GIT_WORKFLOW_REFUSED: <git_workflow_reason>`.
+  This is the one signal the local reconciliation (`/quetrex:task-build`'s
+  `qx_probe_gate_refusal`) uses to tell "the pipeline ran and correctly declined to ship"
+  apart from a transport death or a prompt-level refusal (rule 5 above).
+- **You never call the kanban API yourself to report this.** The routine is forbidden to
+  touch the board (see "Do NOT depend on cloud board-MCP" below) — the local half owns that
+  transition once it observes the published gates branch and this state.
+
 ### 5. Verify, push, open the PR — the terminus
 Run the full verify chain from `.quetrex/verify.json` and confirm every command exits 0.
 Push the unit branch and open a PR into {{BASE_BRANCH}}:
