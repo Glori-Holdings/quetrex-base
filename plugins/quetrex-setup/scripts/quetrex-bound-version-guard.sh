@@ -76,6 +76,25 @@
 
 set -uo pipefail
 
+# --- SEC-GLOBAL-2 hardening --------------------------------------------------
+# This guard now fires machine-wide (every SessionStart, armed repo or not —
+# see the WHY THIS EXISTS note above), and its PATH walk discovers a
+# .claude-plugin/plugin.json from ANY plugin that ships a bin/ on PATH, not
+# only quetrex's own. That file's .name and .version are therefore hostile
+# input from any such repo (direnv, .envrc, project settings env can all put
+# a hostile ./bin on PATH), yet they were printed verbatim in the STALE BIND
+# line. Both are validated to a plain, safe shape before resolve_plugin_json
+# ever returns them; an unsafe shape is folded into the SAME "cannot be
+# resolved -> skip this candidate, never guess harder" rule the fallback path
+# already documents below (never executed, never sourced — this is purely
+# about what reaches the final printf).
+valid_plugin_name() {  # <string> -> true (0) if safely shaped
+  [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]
+}
+valid_plugin_version() {  # <string> -> true (0) if safely shaped
+  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]{1,40})?$ ]]
+}
+
 # --- read hook input (best-effort; absence is fine) -------------------------
 INPUT=""
 if [ ! -t 0 ]; then INPUT=$(cat); fi
@@ -183,6 +202,14 @@ resolve_plugin_json() {
       [ -n "$name" ] && { RP_NAME="$name"; RP_VERSION="$ver"; }
     fi
   fi
+  # SEC-GLOBAL-2: clamp before returning. An unsafely-shaped name or version
+  # (from either the primary plugin.json read or the path-derived fallback)
+  # is cleared to empty here so the caller's
+  # `[ -n "$RP_NAME" ] && [ -n "$RP_VERSION" ] || continue` skips this
+  # candidate entirely — it is never printed and never fed to installed_version_for.
+  [ -n "$RP_NAME" ] && ! valid_plugin_name "$RP_NAME" && RP_NAME=""
+  [ -n "$RP_VERSION" ] && ! valid_plugin_version "$RP_VERSION" && RP_VERSION=""
+  return 0
 }
 
 version_lt() {  # version_lt <a> <b> -> 0 (true, a < b) if a sorts strictly before b
