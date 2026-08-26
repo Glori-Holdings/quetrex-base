@@ -432,6 +432,15 @@ fi
 # PARALLEL PARITY. run-all.sh now executes units N-wide by default (execute)
 # and classifies them sequentially afterward (classify) — this must produce
 # EXACTLY the same per-unit verdicts, counts, and exit code as
+# OVERFLOW CLAMP (review finding): an all-digit RUN_ALL_JOBS wider than int64
+# must clamp to the cap and complete, not hang with an empty semaphore.
+OVF_OUT="$(RUN_ALL_JOBS=99999999999999999999 timeout 60 bash "$RUNNER" "$DIR" 2>&1)"; OVF_CODE=$?
+if [ "$OVF_CODE" -ne 124 ] && printf '%s' "$OVF_OUT" | grep -q 'TEST SUMMARY' && ! printf '%s' "$OVF_OUT" | grep -q 'integer expected'; then
+  pass "OVERFLOW CLAMP: RUN_ALL_JOBS wider than int64 completes with a summary (exit $OVF_CODE, no integer-expected errors)"
+else
+  fail "OVERFLOW CLAMP: RUN_ALL_JOBS=99999999999999999999 hung or errored (exit $OVF_CODE)"
+fi
+
 # RUN_ALL_JOBS=1 (today's original one-at-a-time behavior) on the SAME mixed
 # pass/fail/vacuous/crash fixture ($DIR, built above). Per-unit elapsed
 # seconds legitimately differ between the two runs (a real wall-clock

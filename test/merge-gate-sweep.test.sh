@@ -150,6 +150,11 @@ if [ -z "$JOBS" ]; then
   fi
 fi
 case "$JOBS" in *[!0-9]*|'') JOBS=1 ;; esac
+# An all-digit value wider than int64 passes the case above but makes `[ -gt ]`
+# error instead of compare, so the cap never applies (review finding: the
+# semaphore was then filled with ZERO tokens and the run hung). Any value with
+# more than 2 digits is already over the cap — clamp on width first.
+[ "${#JOBS}" -gt 2 ] && JOBS=16
 [ "$JOBS" -lt 1 ] && JOBS=1
 [ "$JOBS" -gt 16 ] && JOBS=16
 
