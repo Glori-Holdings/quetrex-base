@@ -51,15 +51,61 @@ The ledger is append-only JSONL: one object per command run `{ts, cmd, cwd, sha,
 LEDGER="$ROOT/.quetrex/verify-ledger.jsonl"
 [ -s "$LEDGER" ] || { echo "REFUSED: verify-ledger.jsonl missing/empty — QA never proved green."; }   # -> refuse
 
-# The last recorded command must have exited 0...
-LAST_EXIT="$(tail -n 1 "$LEDGER" | jq -r '.exit')"
-[ "$LAST_EXIT" = "0" ] || { echo "REFUSED: last verify command exited $LAST_EXIT (red ledger)."; }      # -> refuse
-
-# ...and there must be no red command inside the final chain run.
-# Read the tail block belonging to the most recent chain execution (all entries
-# sharing the latest run). If ANY has exit != 0 with no subsequent green re-run
-# of that same cmd, refuse. Practically: verify no non-zero exit appears after the
-# last time the FIRST chain command ran.
+# A bare "the LAST ledger line must be exit==0" check REFUSES on every real repo that
+# declares requiredEnv or runs verify-gate.sh's bounded-quick Stop chain — measured on
+# QDM-6's actual ledger, whose final lines are a genuine, terminal requiredEnv skip
+# ({skipped:true, skipReason:"requiredEnv", exit:null} — verify-gate.sh's own sanctioned
+# shape, the same one merge-gate.sh's GATE 3 already accepts) preceded by a boundedQuick
+# placeholder ({skipped:true, skipReason:"boundedQuick", exit:null} — "never proven, never
+# a pass", i.e. NOT evidence of anything, not a run at all). Checking the trailing line in
+# isolation reads either shape as a literal `null` exit and refuses a chain that is
+# genuinely green.
+#
+# O7 (review finding): a first version of this fix found each command's most recent
+# MEANINGFUL entry (skipping boundedQuick) with NO regard for its `sha` at all, which is
+# LOOSER than merge-gate.sh's own GATE 3 arbitration on the exact same ledger in three
+# measured cases — a genuine failure followed by a requiredEnv skip at the SAME sha
+# (the skip must never rescue it — merge-gate's documented dominance rule), a genuine
+# pass recorded only at an OLD sha with nothing at all at HEAD (unproven AT HEAD, not
+# green), and a genuine failure at an old sha plus an unrelated requiredEnv skip at HEAD
+# (the skip does not clear a real failure elsewhere in this command's history). This gate
+# is the artifact GATE — it must never be looser than the hook that re-gates the same
+# ledger at the merge boundary, even though §2a below re-executes the chain fresh
+# immediately afterward as defense in depth.
+#
+# So: for EVERY command in .quetrex/verify.json's declared chain (never a boundedQuick
+# placeholder — it carries no evidence either way and must never launder a real failure OR
+# erase a real pass):
+#   1. There must be a meaningful entry AT HEAD. None at all -> RED (never proven at HEAD,
+#      whatever an older sha says).
+#   2. If that entry AT HEAD is a genuine run, its own exit decides it directly (0 = green,
+#      anything else = red) — a later genuine re-run at the SAME sha always supersedes an
+#      earlier one, exactly like merge-gate.sh.
+#   3. If that entry AT HEAD is the sanctioned requiredEnv skip, it is trusted ONLY when
+#      the most recent GENUINE (non-skip) run of this command ANYWHERE in the ledger — at
+#      any sha — was itself a pass, or there has never been a genuine run at all. A skip at
+#      HEAD never rescues a real failure recorded elsewhere for this same command.
+HEAD_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+CHAIN_JSON="$(jq -c 'if (.verify|type)=="array" and (.verify|length)>0 then .verify else empty end' "$ROOT/.quetrex/verify.json" 2>/dev/null)"
+if [ -z "$CHAIN_JSON" ]; then
+  echo "REFUSED: .quetrex/verify.json declares no verify[] chain — cannot confirm what QA proved green."   # -> refuse
+else
+  RED="$(jq -sc --argjson chain "$CHAIN_JSON" --arg head "$HEAD_SHA" '
+    . as $entries
+    | $chain
+    | map(. as $c
+        | ($entries | map(select(.cmd == $c and (.skipped != true or .skipReason == "requiredEnv")))) as $meaningful
+        | ($meaningful | map(select(.sha == $head)) | last) as $at_head
+        | ($meaningful | map(select(.skipped != true)) | last) as $last_genuine
+        | if ($at_head == null) then $c
+          elif ($at_head.skipped == true) then
+            (if ($last_genuine == null or $last_genuine.exit == 0) then empty else $c end)
+          elif ($at_head.exit == 0) then empty
+          else $c
+          end)
+  ' "$LEDGER" 2>/dev/null)"
+  [ "$RED" = "[]" ] || { echo "REFUSED: the verify chain is not all green at HEAD — red or never-proven-at-HEAD: ${RED:-<unparseable ledger>}"; }   # -> refuse
+fi
 ```
 
 If you cannot mechanically confirm the whole last chain run is green, REFUSE. A red ledger is an absolute bar — human approval itself cannot bypass it downstream, so you must not paper over it here.
@@ -69,8 +115,28 @@ If you cannot mechanically confirm the whole last chain run is green, REFUSE. A 
 ```bash
 SEC="$ROOT/.quetrex/security-findings.json"
 if [ -f "$SEC" ]; then
-  OPEN_CRIT="$(jq '[.[] | select((.severity|ascii_downcase=="critical") and (.status|ascii_downcase=="open"))] | length' "$SEC")"
-  [ "$OPEN_CRIT" = "0" ] || { echo "REFUSED: $OPEN_CRIT open Critical security finding(s)."; jq '[.[] | select((.severity|ascii_downcase=="critical") and (.status|ascii_downcase=="open"))]' "$SEC"; }  # -> refuse
+  # NORMALIZE FIRST. security-reviewer.md's canonical artifact is an OBJECT —
+  # {task, base, head_sha, reviewed_files, verdict, findings:[...]} — never a
+  # bare array. A jq filter that indexes the top level directly (`.[] |
+  # select(.severity...)`) works by accident on a legacy bare-array fixture
+  # and ERRORS on the real shape ("Cannot index string with string
+  # \"severity\""), which made this gate REFUSE on every genuine artifact
+  # before Gate 4 (the NSR route-2 check) was ever reached — measured on
+  # QDM-6's real artifacts (PR #125 review, SEC-4). Same normalization
+  # Gate 4 below and merge-gate.sh's sec_artifact_state() already apply —
+  # match it exactly so the three readers of this file cannot disagree.
+  SEC_FINDINGS_G3="$(jq -c 'if type == "object" then (.findings // []) else . end' "$SEC" 2>/dev/null)"
+  OPEN_CRIT="$(printf '%s' "$SEC_FINDINGS_G3" | jq '[ .[] | select((.severity // "" | ascii_downcase)=="critical" and (.status // "open" | ascii_downcase)=="open") ] | length' 2>/dev/null)"
+  case "$OPEN_CRIT" in
+    ''|*[!0-9]*)
+      echo "REFUSED: .quetrex/security-findings.json does not parse to a readable findings list (malformed or unrecognized shape) — cannot confirm 0 open Critical."   # -> refuse
+      ;;
+    0) : ;;
+    *)
+      echo "REFUSED: $OPEN_CRIT open Critical security finding(s)."
+      printf '%s' "$SEC_FINDINGS_G3" | jq '[ .[] | select((.severity // "" | ascii_downcase)=="critical" and (.status // "open" | ascii_downcase)=="open") ]'   # -> refuse
+      ;;
+  esac
 fi
 ```
 
@@ -115,15 +181,38 @@ esac
   echo "REFUSED (STALE VERDICT): verdict is for ${RV_SHA:0:12} but HEAD is ${HEAD_SHA:0:12}."
   echo "Commits landed after review. Re-run the review-gate at HEAD; do NOT re-point the verdict."; }        # -> refuse
 
-# The independent security pass must actually have run — same check the merge gate makes.
+# The independent security pass must have run EITHER natively OR via the
+# security-reviewer agent — same GATE 2b logic merge-gate.sh enforces
+# (plugins/quetrex-factory/scripts/merge-gate.sh's sec_artifact_state()).
+# `errored`/`not_run`/`not_available_in_env` is common and expected: SlashCommand
+# is frequently absent from the reviewer's runtime tool set, which makes the
+# native /security-review structurally unreachable through no fault of the
+# change (reviewer.md's independence_ok route 1 note). Requiring `clean`/`issues`
+# here unconditionally made every cloud build unshippable (QDM-6, measured
+# 2026-08-26: HEAD c26bc72, qa PASS, verdict AUTO_MERGE pinned to HEAD, security
+# findings PASS — refused anyway because nativeSecurityReview was "errored").
+# So a non-native value passes ONLY when the independent security-reviewer
+# artifact affirmatively proves THIS commit clean; otherwise it still refuses.
 NSR="$(jq -r '.inputs.nativeSecurityReview // empty' "$RV" 2>/dev/null)"
 case "$NSR" in
   clean|issues) : ;;
-  *) echo "REFUSED: verdict records nativeSecurityReview='${NSR:-<missing>}' — the independent security pass did not run to completion, so AUTO_MERGE rests on nothing. Re-run the review-gate." ;;   # -> refuse
+  *)
+    SEC_OK=0
+    if [ -f "$SEC" ]; then
+      SEC_FINDINGS="$(jq -c 'if type == "object" then (.findings // []) else . end' "$SEC" 2>/dev/null)"
+      SEC_SHA="$(jq -r 'if type == "object" then (.head_sha // .sha // empty) else empty end' "$SEC" 2>/dev/null)"
+      if [ -n "$SEC_FINDINGS" ] && [ "$SEC_FINDINGS" != "null" ] && [ -n "$SEC_SHA" ] && [ "$SEC_SHA" = "$HEAD_SHA" ]; then
+        SEC_CRIT="$(printf '%s' "$SEC_FINDINGS" | jq '[ .[] | select((.severity // "" | ascii_downcase) == "critical" and (.status // "open" | ascii_downcase) == "open") ] | length' 2>/dev/null)"
+        case "$SEC_CRIT" in ''|*[!0-9]*) SEC_CRIT=-1 ;; esac
+        [ "$SEC_CRIT" = "0" ] && SEC_OK=1
+      fi
+    fi
+    [ "$SEC_OK" = "1" ] || echo "REFUSED: verdict records nativeSecurityReview='${NSR:-<missing>}' and .quetrex/security-findings.json does not independently prove HEAD ($HEAD_SHA) clean — it must exist, parse, be pinned to this exact commit (.head_sha or .sha), and record 0 open Critical findings. Run the security-reviewer against HEAD, or re-run the review-gate."   # -> refuse
+    ;;
 esac
 ```
 
-Only when Gates 1–4 ALL pass do you proceed. State this explicitly in your report: "Artifact gate GREEN: no ESCALATION, ledger last-run all exit 0, 0 open Critical findings, review verdict AUTO_MERGE pinned to `<sha>`, nativeSecurityReview `<clean|issues>`."
+Only when Gates 1–4 ALL pass do you proceed. State this explicitly in your report: "Artifact gate GREEN: no ESCALATION, ledger last-run all exit 0, 0 open Critical findings, review verdict AUTO_MERGE pinned to `<sha>`, nativeSecurityReview `<clean|issues|errored+independent-findings-clean>`."
 
 ## 2. Confirm the tree is already committed — the normal path adds NO commit
 
@@ -261,7 +350,7 @@ gh pr create --base main --head "$BRANCH" \
 
 ## Gate evidence (read from .quetrex/, not asserted)
 - verify-ledger.jsonl — last chain run all exit 0, every command pinned to <sha>
-- review-verdict.json — AUTO_MERGE, sha <sha> == HEAD, nativeSecurityReview <clean|issues>
+- review-verdict.json — AUTO_MERGE, sha <sha> == HEAD, nativeSecurityReview <clean|issues|errored-with-independent-findings-clean>
 - qa-report.json — verdict PASS, sha <sha>, <N> declared coverage gap(s), 0 on a security surface
 - security-findings.json — 0 open Critical (or: not required per plan)
 - ESCALATION — absent
@@ -293,7 +382,7 @@ Then report to the orchestrator: `REFUSED — <exact failing gate and value>`. N
 
 - You NEVER merge, and never enable auto-merge — your terminus is an open PR, and the merge that follows is allowed by `merge-gate.sh` reading artifacts, not by you.
 - You decide from artifacts on disk, never from chat claims by the orchestrator or prior agents. Missing/malformed artifact = not passed.
-- A red verify ledger, an open Critical finding, a verdict that is not `AUTO_MERGE`, a verdict whose `.sha` is not HEAD, a `nativeSecurityReview` that is not `clean`/`issues`, or a present ESCALATION each individually forces REFUSED — no overrides, no exceptions, no combining "it's probably fine."
+- A red verify ledger, an open Critical finding, a verdict that is not `AUTO_MERGE`, a verdict whose `.sha` is not HEAD, a `nativeSecurityReview` that is not `clean`/`issues` AND lacks a `security-findings.json` independently pinned to HEAD with 0 open Critical, or a present ESCALATION each individually forces REFUSED — no overrides, no exceptions, no combining "it's probably fine."
 - **You never stage with `-A` or `.`, and you never commit `.quetrex/*`.** Explicit paths only. A blanket stage sweeps runtime control artifacts into history and moves HEAD past the reviewed commit — it breaks the merge, silently, at the last possible moment.
 - **You never edit `review-verdict.json`** — not its `.sha`, not anything. Only the review-gate writes a verdict, and only for a commit it read.
 - You never bypass a hook block (`--no-verify`, editing hooks, force-push to protected branches are all forbidden).
