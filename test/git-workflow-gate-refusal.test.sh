@@ -267,6 +267,22 @@ if [ -s "$WORK/probe.sh" ]; then
   else
     notok "PART 5 (SEC-3): a non-string git_workflow_reason produced (rc=$RC): $OUT — expected a coerced GATE_REFUSED, not a silent NONE/crash"
   fi
+
+  # --- O9 (reviewer, cosmetic): git_workflow_reason: null must read as MISSING, the
+  #     same "no reason recorded" default an absent/empty reason gets — not the
+  #     literal string "null" (JSON.stringify(null) is a truthy non-empty string,
+  #     which slipped past the SEC-3 coercion's `if (!r)` guard). The refusal is
+  #     still correctly DETECTED either way; only the reason text was wrong. -------
+  TASK5B="QDM-10b"
+  push_gates_branch "${PREFIX}${TASK5B}-gates-nullreason" \
+    '{"task":"QDM-10b","git_workflow":"refused","git_workflow_reason":null}'
+  OUT="$(call_probe "$TASK5B" "$PREFIX")"
+  RC=$?
+  if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q '^GATE_REFUSED .*no reason recorded' && ! printf '%s' "$OUT" | grep -qE ': null$|: null '; then
+    ok "PART 5 (O9): git_workflow_reason:null reads as 'no reason recorded', never the literal string 'null'"
+  else
+    notok "PART 5 (O9): git_workflow_reason:null did not read as 'no reason recorded' (rc=$RC): $OUT"
+  fi
 fi
 
 if [ -s "$WORK/act.sh" ]; then
@@ -436,12 +452,25 @@ fi
 if command -v gh >/dev/null 2>&1 && [ -s "$WORK/probe.sh" ]; then
   MOCKBIN_GH="$WORK/mockbin-gh"
   mkdir -p "$MOCKBIN_GH"
+  # Distinguishes `--state open` from any other --state value, and LOGS the exact
+  # invocation, so R5's "must query --state open, never --state all" claim is proven
+  # mechanically rather than assumed from the count alone.
   cat > "$MOCKBIN_GH/gh" <<'MOCKGH'
 #!/usr/bin/env bash
-# Understands exactly the one invocation shape qx_probe_gate_refusal makes:
-#   gh pr list --head <branch> --state all --json number --jq length
+LOG="${QX_MOCK_GH_LOG:-/dev/null}"
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
-  printf '%s\n' "${QX_MOCK_GH_PR_COUNT:-0}"
+  echo "$*" >> "$LOG"
+  state=""
+  prev=""
+  for a in "$@"; do
+    [ "$prev" = "--state" ] && state="$a"
+    prev="$a"
+  done
+  if [ "$state" = "open" ]; then
+    printf '%s\n' "${QX_MOCK_GH_PR_COUNT_OPEN:-0}"
+  else
+    printf '%s\n' "${QX_MOCK_GH_PR_COUNT_OTHER:-0}"
+  fi
   exit 0
 fi
 echo "mock gh: unhandled: $*" >&2
@@ -456,31 +485,81 @@ MOCKGH
   push_gates_branch "${PREFIX}${TASK8}-gates-stale" \
     '{"task":"QDM-12","git_workflow":"refused","git_workflow_reason":"stale refusal from an earlier attempt, superseded by a later successful rework"}'
 
-  call_probe_with_gh() {  # call_probe_with_gh <task> <prefix> <pr-count>
+  call_probe_with_gh() {  # call_probe_with_gh <task> <prefix> <open-count> [other-count] [expected-sha]
+    local log rc
+    log="$(mktemp "$WORK/ghlog.XXXXXX")"
     cp "$WORK/probe.sh" "$WORK/probe-call-gh.sh"
-    printf '\nqx_probe_gate_refusal %q %q\n' "$1" "$2" >> "$WORK/probe-call-gh.sh"
-    ( cd "$CLONE" && PATH="$MOCKBIN_GH:$PATH" QX_MOCK_GH_PR_COUNT="$3" bash "$WORK/probe-call-gh.sh" )
+    printf '\nqx_probe_gate_refusal %q %q %q\n' "$1" "$2" "${5:-}" >> "$WORK/probe-call-gh.sh"
+    ( cd "$CLONE" && PATH="$MOCKBIN_GH:$PATH" QX_MOCK_GH_LOG="$log" \
+        QX_MOCK_GH_PR_COUNT_OPEN="$3" QX_MOCK_GH_PR_COUNT_OTHER="${4:-0}" \
+        bash "$WORK/probe-call-gh.sh" )
+    rc=$?
+    echo "---GHLOG---"; cat "$log"
+    return "$rc"
   }
 
   OUT="$(call_probe_with_gh "$TASK8" "$PREFIX" 1)"
   RC=$?
-  if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q '^NONE' && printf '%s' "$OUT" | grep -qi 'PR exists'; then
-    ok "PART 8 (R2): a PR already exists for the unit branch -> the probe short-circuits to NONE and never even looks at the stale refused gates branch"
+  if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q '^NONE' && printf '%s' "$OUT" | grep -qi 'open PR exists'; then
+    ok "PART 8 (R2): an OPEN PR exists for the unit branch -> the probe short-circuits to NONE and never even looks at the stale refused gates branch"
   else
-    notok "PART 8 (R2): with an existing PR, the probe should short-circuit to NONE naming the PR — got (rc=$RC): $OUT"
+    notok "PART 8 (R2): with an open PR, the probe should short-circuit to NONE naming it — got (rc=$RC): $OUT"
+  fi
+  if printf '%s' "$OUT" | grep -q -- '--state open'; then
+    ok "PART 8 (R5): the gh query used is --state open (never --state all)"
+  else
+    notok "PART 8 (R5): the gh query did not use --state open. Log: $OUT"
   fi
 
-  # Control: no PR (mock reports 0) -> falls through to the normal gates-branch probe,
-  # which DOES find the (only, real-for-this-test) stale refusal.
+  # Control: no open PR (mock reports 0) -> falls through to the normal gates-branch
+  # probe, which DOES find the (only, real-for-this-test) stale refusal.
   OUT="$(call_probe_with_gh "$TASK8" "$PREFIX" 0)"
   RC=$?
   if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q '^GATE_REFUSED '; then
-    ok "PART 8 (R2): with NO PR, the probe still falls through to the normal gates-branch logic (regression guard — the short-circuit must not swallow genuine refusals)"
+    ok "PART 8 (R2): with NO open PR, the probe still falls through to the normal gates-branch logic (regression guard — the short-circuit must not swallow genuine refusals)"
   else
-    notok "PART 8 (R2): with no PR, the probe should still find the gates-branch refusal normally — got (rc=$RC): $OUT"
+    notok "PART 8 (R2): with no open PR, the probe should still find the gates-branch refusal normally — got (rc=$RC): $OUT"
+  fi
+
+  # =============================================================================
+  # R5 (reviewer, medium — this check's OWN review finding): the first version used
+  # `--state all`, so a MERGED/CLOSED PR from an earlier attempt at the same unit
+  # branch name permanently masked every LATER genuine refusal. MEASURED against real
+  # GitHub: `gh pr list --head claude/one-copy-perf --state all` -> 1 (merged, branch
+  # long deleted), `--state open` -> 0.
+  # =============================================================================
+  # A PR exists but is MERGED/CLOSED (open count 0, "other"/all count 1) -> must NOT
+  # short-circuit; the fresh refusal on the stale gates branch must still be found.
+  OUT="$(call_probe_with_gh "$TASK8" "$PREFIX" 0 1)"
+  RC=$?
+  if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q '^GATE_REFUSED '; then
+    ok "PART 8 (R5): a MERGED/CLOSED PR from an earlier attempt does NOT mask a fresh genuine refusal (the exact regression R5 was raised about)"
+  else
+    notok "PART 8 (R5): a merged/closed PR masked a fresh refusal — got (rc=$RC): $OUT"
+  fi
+
+  # With an EXPECTED_HEAD_SHA supplied, the PR check must be skipped ENTIRELY — the
+  # gates-head anchor is already the stronger evidence. Prove it by having the mock
+  # report an OPEN PR (which would otherwise short-circuit) while ALSO supplying an
+  # anchor that resolves to the one real refusal: the anchored answer must win, and
+  # the mock's log must show gh was never even invoked.
+  push_gates_branch_with_head "${PREFIX}${TASK8}b-gates-anchored" \
+    '{"task":"QDM-12b","git_workflow":"refused","git_workflow_reason":"anchored refusal, must be found even though gh reports an open PR"}' \
+    "3333333333333333333333333333333333333333"
+  OUT="$(call_probe_with_gh "${TASK8}b" "$PREFIX" 1 0 "3333333333333333333333333333333333333333")"
+  RC=$?
+  if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q '^GATE_REFUSED ' && printf '%s' "$OUT" | grep -q 'anchored refusal'; then
+    ok "PART 8 (R5): with an EXPECTED_HEAD_SHA anchor, the PR-existence short-circuit is skipped entirely — the anchored gates-head match wins even though gh reports an open PR"
+  else
+    notok "PART 8 (R5): an anchored call should skip the PR check and use the gates-head match — got (rc=$RC): $OUT"
+  fi
+  if printf '%s' "$OUT" | grep -q '\-\-state'; then
+    notok "PART 8 (R5): gh was invoked even though EXPECTED_HEAD_SHA was supplied — the PR check must be skipped entirely when anchored. Log: $OUT"
+  else
+    ok "PART 8 (R5): gh is never called at all when EXPECTED_HEAD_SHA is supplied"
   fi
 else
-  echo "SKIP: PART 8 (R2) needs gh and a working probe.sh extraction"
+  echo "SKIP: PART 8 (R2/R5) needs gh and a working probe.sh extraction"
 fi
 
 # --- FAIL-FIRST: the pre-fix task-build.md has no qx_probe_gate_refusal or gate_refused

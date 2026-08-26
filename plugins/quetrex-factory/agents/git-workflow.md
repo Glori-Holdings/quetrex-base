@@ -61,28 +61,50 @@ LEDGER="$ROOT/.quetrex/verify-ledger.jsonl"
 # isolation reads either shape as a literal `null` exit and refuses a chain that is
 # genuinely green.
 #
-# So: for EVERY command in .quetrex/verify.json's declared chain, find its most recent
-# MEANINGFUL entry — skip PAST any boundedQuick placeholder (it carries no evidence either
-# way and must never launder a real failure OR erase a real pass) — and that entry must be
-# a genuine pass (exit == 0) or the sanctioned requiredEnv skip. A command absent from the
-# ledger, or whose latest meaningful entry is neither, is RED. This does not sha-pin (that
-# is §2a's job, after this stage's own commit moves HEAD).
+# O7 (review finding): a first version of this fix found each command's most recent
+# MEANINGFUL entry (skipping boundedQuick) with NO regard for its `sha` at all, which is
+# LOOSER than merge-gate.sh's own GATE 3 arbitration on the exact same ledger in three
+# measured cases — a genuine failure followed by a requiredEnv skip at the SAME sha
+# (the skip must never rescue it — merge-gate's documented dominance rule), a genuine
+# pass recorded only at an OLD sha with nothing at all at HEAD (unproven AT HEAD, not
+# green), and a genuine failure at an old sha plus an unrelated requiredEnv skip at HEAD
+# (the skip does not clear a real failure elsewhere in this command's history). This gate
+# is the artifact GATE — it must never be looser than the hook that re-gates the same
+# ledger at the merge boundary, even though §2a below re-executes the chain fresh
+# immediately afterward as defense in depth.
+#
+# So: for EVERY command in .quetrex/verify.json's declared chain (never a boundedQuick
+# placeholder — it carries no evidence either way and must never launder a real failure OR
+# erase a real pass):
+#   1. There must be a meaningful entry AT HEAD. None at all -> RED (never proven at HEAD,
+#      whatever an older sha says).
+#   2. If that entry AT HEAD is a genuine run, its own exit decides it directly (0 = green,
+#      anything else = red) — a later genuine re-run at the SAME sha always supersedes an
+#      earlier one, exactly like merge-gate.sh.
+#   3. If that entry AT HEAD is the sanctioned requiredEnv skip, it is trusted ONLY when
+#      the most recent GENUINE (non-skip) run of this command ANYWHERE in the ledger — at
+#      any sha — was itself a pass, or there has never been a genuine run at all. A skip at
+#      HEAD never rescues a real failure recorded elsewhere for this same command.
+HEAD_SHA="$(git -C "$ROOT" rev-parse HEAD)"
 CHAIN_JSON="$(jq -c 'if (.verify|type)=="array" and (.verify|length)>0 then .verify else empty end' "$ROOT/.quetrex/verify.json" 2>/dev/null)"
 if [ -z "$CHAIN_JSON" ]; then
   echo "REFUSED: .quetrex/verify.json declares no verify[] chain — cannot confirm what QA proved green."   # -> refuse
 else
-  RED="$(jq -sc --argjson chain "$CHAIN_JSON" '
+  RED="$(jq -sc --argjson chain "$CHAIN_JSON" --arg head "$HEAD_SHA" '
     . as $entries
     | $chain
     | map(. as $c
-        | ($entries | map(select(.cmd == $c and (.skipped != true or .skipReason == "requiredEnv"))) | last) as $last
-        | if ($last == null) then $c
-          elif ($last.exit == 0) then empty
-          elif ($last.skipped == true and $last.skipReason == "requiredEnv" and $last.exit == null) then empty
+        | ($entries | map(select(.cmd == $c and (.skipped != true or .skipReason == "requiredEnv")))) as $meaningful
+        | ($meaningful | map(select(.sha == $head)) | last) as $at_head
+        | ($meaningful | map(select(.skipped != true)) | last) as $last_genuine
+        | if ($at_head == null) then $c
+          elif ($at_head.skipped == true) then
+            (if ($last_genuine == null or $last_genuine.exit == 0) then empty else $c end)
+          elif ($at_head.exit == 0) then empty
           else $c
           end)
   ' "$LEDGER" 2>/dev/null)"
-  [ "$RED" = "[]" ] || { echo "REFUSED: the verify chain is not all green at its most recent meaningful run — red or never-run: ${RED:-<unparseable ledger>}"; }   # -> refuse
+  [ "$RED" = "[]" ] || { echo "REFUSED: the verify chain is not all green at HEAD — red or never-proven-at-HEAD: ${RED:-<unparseable ledger>}"; }   # -> refuse
 fi
 ```
 

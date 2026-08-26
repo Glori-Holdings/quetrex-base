@@ -274,6 +274,49 @@ else
 fi
 cp "$FIXTURE/.quetrex/security-findings.json.bak" "$FIXTURE/.quetrex/security-findings.json"
 
+# =============================================================================
+# ASSERTIONS 5-7 (O7, review finding): Gate 2 must never be LOOSER than
+# merge-gate.sh's own GATE 3 arbitration on the identical ledger. Three cases the
+# reviewer measured Gate 2 disagreeing with merge-gate.sh on (Gate 2 GREEN, hook
+# DENY) before this fix — all three must now REFUSE, matching the hook.
+# =============================================================================
+OLD_SHA_O7="0ld0ld0ld0ld0ld0ld0ld0ld0ld0ld0ld0ld0ld0"
+
+# 5 — a genuine failure followed by a requiredEnv skip at the SAME (HEAD) sha: the
+#     skip must never rescue a real failure recorded at its own commit.
+printf '{"ts":"2026-08-26T09:10:00Z","cmd":"npm run test","cwd":"/x","sha":"%s","exit":1,"tail":"FAILED"}\n' "$HEAD_SHA_FIXTURE" > "$FIXTURE/.quetrex/verify-ledger.jsonl"
+printf '{"ts":"2026-08-26T09:10:01Z","cmd":"npm run test","cwd":"/x","sha":"%s","exit":null,"skipped":true,"skipReason":"requiredEnv","missingEnv":"X"}\n' "$HEAD_SHA_FIXTURE" >> "$FIXTURE/.quetrex/verify-ledger.jsonl"
+OUT="$(run_gates "$NEW_GATES")"
+if printf '%s' "$OUT" | grep -q 'REFUSED'; then
+  ok "ASSERTION 5 (O7 case 1): a genuine failure followed by a requiredEnv skip at the SAME sha still REFUSES — the skip does not rescue a same-commit failure, matching merge-gate.sh's dominance rule"
+else
+  notok "ASSERTION 5 (O7 case 1): a requiredEnv skip at the same sha as a genuine failure was allowed through — Gate 2 is looser than merge-gate.sh. Output: $OUT"
+fi
+
+# 6 — a genuine PASS recorded only at an OLD sha, with NOTHING at all recorded at
+#     HEAD: unproven AT HEAD is not green, regardless of history.
+printf '{"ts":"2026-08-26T09:10:00Z","cmd":"npm run test","cwd":"/x","sha":"%s","exit":0,"tail":"ok"}\n' "$OLD_SHA_O7" > "$FIXTURE/.quetrex/verify-ledger.jsonl"
+OUT="$(run_gates "$NEW_GATES")"
+if printf '%s' "$OUT" | grep -q 'REFUSED'; then
+  ok "ASSERTION 6 (O7 case 2): a genuine pass recorded ONLY at an old sha, nothing at HEAD, REFUSES — unproven at HEAD is not green"
+else
+  notok "ASSERTION 6 (O7 case 2): a pass recorded only at an old, non-HEAD sha was accepted as green — Gate 2 does not require proof at HEAD. Output: $OUT"
+fi
+
+# 7 — a genuine failure at an OLD sha plus an UNRELATED requiredEnv skip at HEAD:
+#     the skip does not clear a real failure recorded elsewhere in this command's
+#     history.
+printf '{"ts":"2026-08-26T09:10:00Z","cmd":"npm run test","cwd":"/x","sha":"%s","exit":1,"tail":"FAILED"}\n' "$OLD_SHA_O7" > "$FIXTURE/.quetrex/verify-ledger.jsonl"
+printf '{"ts":"2026-08-26T09:10:01Z","cmd":"npm run test","cwd":"/x","sha":"%s","exit":null,"skipped":true,"skipReason":"requiredEnv","missingEnv":"X"}\n' "$HEAD_SHA_FIXTURE" >> "$FIXTURE/.quetrex/verify-ledger.jsonl"
+OUT="$(run_gates "$NEW_GATES")"
+if printf '%s' "$OUT" | grep -q 'REFUSED'; then
+  ok "ASSERTION 7 (O7 case 3): a genuine failure at an OLD sha plus an unrelated requiredEnv skip at HEAD still REFUSES — the skip does not launder a real failure recorded elsewhere in this command's history"
+else
+  notok "ASSERTION 7 (O7 case 3): an old failure plus a HEAD skip was accepted as green — Gate 2 is looser than merge-gate.sh. Output: $OUT"
+fi
+
+cp "$FIXTURE/.quetrex/verify-ledger.jsonl.bak" "$FIXTURE/.quetrex/verify-ledger.jsonl"
+
 echo
 echo "git-workflow-qdm6-fixture.test.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

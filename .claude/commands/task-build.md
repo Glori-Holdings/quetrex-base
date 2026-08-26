@@ -429,16 +429,30 @@ qx_probe_gate_refusal() {   # qx_probe_gate_refusal <TASK_ID> <BRANCH_PREFIX> [E
   # R2 (reviewer, high): after a rework, an OLDER refused run's gates branch can
   # coexist with a NEWER run that actually succeeded and opened a PR — sorting or even
   # sha-anchoring among gates branches alone can still land on the stale refused one.
-  # An open (or ever-opened) PR for the unit branch is definitive proof this task did
-  # NOT end in a refusal: git-workflow's own hard rule is that it never pushes or opens
-  # a PR after refusing (§4 "Never open a PR after a refusal"). So check that FIRST and
-  # skip the gates-branch probe entirely when a PR exists — there is nothing to
-  # reconcile as a refusal, whatever a leftover gates branch from an earlier, since-
-  # superseded attempt might say.
+  # An OPEN PR for the unit branch is strong evidence this task did NOT end in a
+  # refusal: git-workflow's own hard rule is that it never pushes or opens a PR after
+  # refusing (§4 "Never open a PR after a refusal"). So check that FIRST and skip the
+  # gates-branch probe entirely when one exists.
+  #
+  # R5 (reviewer, medium — this check's OWN review finding): the first version used
+  # `--state all`, so a MERGED or CLOSED PR from an EARLIER attempt at the same unit
+  # branch name permanently masked every LATER genuine refusal on that task — the
+  # exact failure mode this whole function exists to remove, reintroduced here.
+  # MEASURED against real GitHub (`gh pr list --head claude/one-copy-perf --state all`
+  # -> 1, PR #124, merged, remote branch long deleted; `--state open` -> 0). Two fixes,
+  # both required:
+  #   1. `--state open` only — a merged/closed PR can never mask a later refusal again.
+  #   2. Skip this check ENTIRELY when an EXPECTED_HEAD_SHA was supplied. The
+  #      gates-head anchor is already the stronger, more specific evidence (it names
+  #      the exact run, not just "some PR exists for this branch name"), and relying
+  #      on PR existence at all is still imperfect even with `--state open`: an OLDER
+  #      run's PR can still be sitting open on the same branch name while a NEWER,
+  #      anchored run genuinely refused. An anchored call trusts the anchor, not this
+  #      heuristic.
   local task="$1" prefix="$2" expected="${3:-}" refs ref reason ghead chosen="" n=0
-  if command -v gh >/dev/null 2>&1; then
-    if gh pr list --head "${prefix}${task}" --state all --json number --jq 'length' 2>/dev/null | grep -qv '^0$'; then
-      echo "NONE — a PR exists for ${prefix}${task}; this was not a refusal (git-workflow never opens a PR after refusing)"
+  if [ -z "$expected" ] && command -v gh >/dev/null 2>&1; then
+    if gh pr list --head "${prefix}${task}" --state open --json number --jq 'length' 2>/dev/null | grep -qv '^0$'; then
+      echo "NONE — an OPEN PR exists for ${prefix}${task}; this was not a refusal (git-workflow never opens a PR after refusing)"
       return 1
     fi
   fi
@@ -484,7 +498,15 @@ qx_probe_gate_refusal() {   # qx_probe_gate_refusal <TASK_ID> <BRANCH_PREFIX> [E
         const o = JSON.parse(s);
         if (o.git_workflow !== "refused") return;
         let r = o.git_workflow_reason;
-        if (typeof r !== "string") {
+        // O9 (reviewer, cosmetic): `null` must be treated as MISSING, not stringified.
+        // JSON.stringify(null) === "null" — a non-empty, truthy string — so without
+        // this check a literal `git_workflow_reason: null` printed the word "null"
+        // instead of the same "no reason recorded" default an absent/empty reason
+        // gets. The refusal is still correctly detected either way; only the reason
+        // text was wrong.
+        if (r === null || r === undefined) {
+          r = "no reason recorded";
+        } else if (typeof r !== "string") {
           try { r = JSON.stringify(r); } catch (e) { r = String(r); }
         }
         if (!r) r = "no reason recorded";
