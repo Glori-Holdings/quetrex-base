@@ -192,6 +192,42 @@ else
   ok "invalid UTF-8 produces a one-line refusal, not an interpreter traceback"
 fi
 
+# 4f. THE TARGET MUST BE A REGULAR FILE. The bootstrap that creates a missing
+#     config sits UPSTREAM of the JSON guards, so without a shape check a
+#     DIRECTORY gave a raw shell diagnostic instead of the labelled refusal, a
+#     FIFO blocked the script forever (a cloud boot that never finishes, and
+#     SIGTERM would not end it), and a DANGLING SYMLINK was followed -- silently
+#     creating whatever it pointed at and exiting 0 as if all was well.
+#     `timeout` is GNU coreutils; where absent, skip rather than risk hanging
+#     this suite on the very defect being tested.
+if command -v timeout >/dev/null 2>&1; then SHAPE_TO="timeout 10"
+elif command -v gtimeout >/dev/null 2>&1; then SHAPE_TO="gtimeout 10"
+else SHAPE_TO=""; fi
+if [ -n "$SHAPE_TO" ]; then
+  for SHAPE in dir fifo dangling; do
+    SH_HOME="$TMP/home-shape-$SHAPE"; mkdir -p "$SH_HOME"
+    case "$SHAPE" in
+      dir)      mkdir -p "$SH_HOME/.claude.json" ;;
+      fifo)     mkfifo "$SH_HOME/.claude.json" ;;
+      dangling) ln -s "$SH_HOME/no-such-target" "$SH_HOME/.claude.json" ;;
+    esac
+    SH_OUT="$( cd "$WS" && HOME="$SH_HOME" $SHAPE_TO bash "$SCRIPT" 2>&1 )"
+    SH_RC=$?
+    if [ "$SH_RC" -eq 124 ]; then
+      notok "~/.claude.json as a $SHAPE: the script HUNG (timed out) — a cloud boot would never finish"
+    elif [ "$SH_RC" -ne 0 ] && printf '%s' "$SH_OUT" | grep -q 'cloud-env-setup: FAILED:'; then
+      ok "~/.claude.json as a $SHAPE: refused with a labelled one-line failure"
+    else
+      notok "~/.claude.json as a $SHAPE: exited $SH_RC without a labelled refusal [$SH_OUT]"
+    fi
+    if [ "$SHAPE" = dangling ] && [ -e "$SH_HOME/no-such-target" ]; then
+      notok "a dangling symlink was followed — the script created its target"
+    fi
+  done
+else
+  echo "SKIP: neither timeout nor gtimeout available; not running the FIFO shape test unguarded"
+fi
+
 # 4e. A workspace path containing a COLON must still be trusted. The spellings
 #     were once colon-JOINED into one string and re-split with IFS=:, which
 #     shredded such a path into fragments -- the real directory was never

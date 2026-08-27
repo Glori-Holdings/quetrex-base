@@ -71,6 +71,18 @@ log "using $JSON_TOOL"
 json_merge() {  # json_merge <file> <jq-filter> <python-expr-on-'d'>
   local file="$1" filter="$2" pyexpr="$3" tmp
   mkdir -p "$(dirname "$file")" || die "cannot create $(dirname "$file")"
+  # REJECT ANYTHING THAT IS NOT A REGULAR FILE, before touching it. This
+  # bootstrap sits upstream of the JSON guards, so without a shape check:
+  # a DIRECTORY produced a raw shell diagnostic instead of the labelled
+  # refusal; a FIFO blocked the script FOREVER (a boot that never finishes,
+  # unkillable by SIGTERM); and a DANGLING SYMLINK was followed, silently
+  # creating whatever it pointed at and exiting 0 as if all was well.
+  if [ -L "$file" ] && [ ! -e "$file" ]; then
+    die "$file is a dangling symlink -- refusing to create whatever it points at"
+  fi
+  if [ -e "$file" ] && [ ! -f "$file" ]; then
+    die "$file is not a regular file (directory, FIFO, device or socket) -- refusing to read or rewrite it"
+  fi
   # A NEW file here may hold credentials (~/.claude.json carries oauthAccount),
   # so create it private rather than at whatever the ambient umask allows.
   [ -f "$file" ] || ( umask 077; printf '{}\n' > "$file" )
