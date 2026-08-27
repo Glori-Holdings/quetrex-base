@@ -65,10 +65,22 @@ log "using $JSON_TOOL"
 json_merge() {  # json_merge <file> <jq-filter> <python-expr-on-'d'>
   local file="$1" filter="$2" pyexpr="$3" tmp
   mkdir -p "$(dirname "$file")" || die "cannot create $(dirname "$file")"
-  [ -f "$file" ] || printf '{}\n' > "$file"
+  # A NEW file here may hold credentials (~/.claude.json carries oauthAccount),
+  # so create it private rather than at whatever the ambient umask allows.
+  [ -f "$file" ] || ( umask 077; printf '{}\n' > "$file" )
   tmp="$file.cloud-env-setup.$$"
+  # PRESERVE THE ORIGINAL MODE. Writing jq output to a fresh temp and mv-ing it
+  # over the target replaces the file with one created at the ambient umask --
+  # measured downgrading ~/.claude.json from 0600 to 0644, world-readable, with
+  # the operator's oauthAccount inside. Seeding the temp with `cp -p` gives it
+  # the original's mode; the redirect truncates its CONTENT but leaves that mode
+  # intact, and mv carries it back. Found by security review.
+  # `cp -p` is the clean way to inherit the mode; if cp is unavailable, fall
+  # back to a PRIVATE temp (0600) rather than the ambient umask -- erring
+  # tighter than the original is safe, erring looser is the bug being fixed.
+  cp -p "$file" "$tmp" 2>/dev/null || ( umask 077; : > "$tmp" ) || { rm -f "$tmp"; die "cannot stage a replacement for $file"; }
   if [ "$JSON_TOOL" = jq ]; then
-    jq "$filter" "$file" > "$tmp" || { rm -f "$tmp"; die "jq failed on $file"; }
+    jq --arg ws "$WORKSPACE" "$filter" "$file" > "$tmp" || { rm -f "$tmp"; die "jq failed on $file"; }
   else
     WS="$WORKSPACE" python3 -c '
 import json, os, sys
@@ -93,7 +105,7 @@ IFS=: read -r -a _ws_list <<< "$WORKSPACE_PATHS"
 for WORKSPACE in "${_ws_list[@]}"; do
   [ -n "$WORKSPACE" ] || continue
   json_merge "$CLAUDE_JSON" \
-    ".projects = ((.projects // {}) | .[\"$WORKSPACE\"] = ((.[\"$WORKSPACE\"] // {}) | .hasTrustDialogAccepted = true))" \
+    '.projects = ((.projects // {}) | .[$ws] = ((.[$ws] // {}) | .hasTrustDialogAccepted = true))' \
     'd.setdefault("projects", {}).setdefault(ws, {})["hasTrustDialogAccepted"] = True'
   log "trusted workspace $WORKSPACE"
 done
@@ -108,7 +120,7 @@ log "set BASH_DEFAULT_TIMEOUT_MS=900000 BASH_MAX_TIMEOUT_MS=1800000 in $SETTINGS
 # 3. Prove both landed. A setup script that "ran" but configured nothing is the
 #    failure mode this whole file exists to end, so read the files back.
 verify() {  # verify <file> <jq-test> <python-test>
-  if [ "$JSON_TOOL" = jq ]; then jq -e "$2" "$1" >/dev/null 2>&1
+  if [ "$JSON_TOOL" = jq ]; then jq -e --arg ws "$WORKSPACE" "$2" "$1" >/dev/null 2>&1
   else WS="$WORKSPACE" python3 -c '
 import json, os, sys
 d = json.load(open(sys.argv[1])); ws = os.environ["WS"]
@@ -118,7 +130,7 @@ sys.exit(0 if eval(sys.argv[2]) else 1)
 _saved_ws="$WORKSPACE"
 for WORKSPACE in "${_ws_list[@]}"; do
   [ -n "$WORKSPACE" ] || continue
-  verify "$CLAUDE_JSON" ".projects[\"$WORKSPACE\"].hasTrustDialogAccepted == true" \
+  verify "$CLAUDE_JSON" '.projects[$ws].hasTrustDialogAccepted == true' \
     'd.get("projects", {}).get(ws, {}).get("hasTrustDialogAccepted") is True' \
     || die "workspace trust did not persist for $WORKSPACE in $CLAUDE_JSON"
 done

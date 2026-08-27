@@ -34,7 +34,7 @@ run_case() {
     # has NO jq on it, only the coreutils the script needs plus python3.
     local shim="$TMP/shim-$1"; mkdir -p "$shim"
     local b
-    for b in bash sh git mkdir mv rm dirname python3 cat sed grep printf; do
+    for b in bash sh git mkdir mv rm cp dirname python3 cat sed grep printf; do
       local p; p="$(command -v "$b" 2>/dev/null)"; [ -n "$p" ] && ln -sf "$p" "$shim/$b"
     done
     pathspec="$shim"
@@ -93,6 +93,31 @@ else
   notok "the script CLOBBERED pre-existing ~/.claude.json content"
 fi
 assert_configured "merge case" "$TMP/home-merge"
+
+# 4b. MODE PRESERVATION: ~/.claude.json carries the operator's oauthAccount.
+#     Rewriting it via "jq > tmp; mv" replaced a 0600 file with one created at
+#     the ambient umask -- measured 0644, world-readable, credentials inside.
+mkdir -p "$TMP/home-mode/.claude"
+printf '{"projects":{},"oauthAccount":{"emailAddress":"fixture@example.com"}}\n' > "$TMP/home-mode/.claude.json"
+chmod 600 "$TMP/home-mode/.claude.json"
+printf '{"env":{}}\n' > "$TMP/home-mode/.claude/settings.json"
+chmod 600 "$TMP/home-mode/.claude/settings.json"
+run_case mode "$TMP/home-mode" >/dev/null 2>&1
+MODE_J="$(ls -l "$TMP/home-mode/.claude.json" | cut -c1-10)"
+MODE_S="$(ls -l "$TMP/home-mode/.claude/settings.json" | cut -c1-10)"
+case "$MODE_J" in
+  -rw-------) ok "~/.claude.json keeps its 0600 mode (oauthAccount stays private)" ;;
+  *) notok "~/.claude.json mode changed to '$MODE_J' — a credential file was made group/world-readable" ;;
+esac
+case "$MODE_S" in
+  -rw-------) ok "~/.claude/settings.json keeps its 0600 mode" ;;
+  *) notok "~/.claude/settings.json mode changed to '$MODE_S'" ;;
+esac
+if grep -q 'fixture@example.com' "$TMP/home-mode/.claude.json"; then
+  ok "existing oauthAccount content survives the rewrite"
+else
+  notok "the rewrite dropped oauthAccount from ~/.claude.json"
+fi
 
 # 5. It must NOT install plugins — pinning an install here is what went stale.
 if grep -qE '^[^#]*claude plugin (install|marketplace)' "$SCRIPT"; then

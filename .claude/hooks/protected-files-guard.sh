@@ -370,8 +370,20 @@ is_unlocked() {
   local target="${1:-}" val="${QUETREX_UNLOCK_FLOOR:-}" item
   [ -n "$target" ] || return 1
   [ -n "$val" ] || return 1
-  local IFS=':,'
-  for item in $val; do
+  # SPLIT WITHOUT GLOBBING. An unquoted `for item in $val` under a `:,` IFS
+  # also performs PATHNAME EXPANSION, so QUETREX_UNLOCK_FLOOR=* expanded
+  # against the hook's cwd and matched any file sitting there -- a single `*`
+  # re-created exactly the blanket grant this scoping exists to kill, keyed on
+  # filenames an agent can create for itself (a bare ./merge-gate.sh is not a
+  # protected path, so nothing stops it writing one). That directly violated
+  # this mechanism's own promise, printed in the deny message below: "never a
+  # marker file in the repo, which an agent could create for itself." Found by
+  # security review of the commit that introduced this scoping; `read -ra` does
+  # not glob, and is what deny-guard.sh already uses -- the two guards must
+  # split this value identically.
+  local -a items=()
+  IFS=':,' read -ra items <<< "$val"
+  for item in "${items[@]}"; do
     [ "$item" = "$target" ] && return 0
   done
   return 1

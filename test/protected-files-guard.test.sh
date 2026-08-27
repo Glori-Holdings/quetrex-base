@@ -495,6 +495,40 @@ printf '%s' "$SEC6_BASH_SCOPED" | grep -q '"permissionDecision":"allow"' \
   && ok "SEC-6: the Bash-path call site allows with the correctly-scoped basename" \
   || notok "SEC-6: expected the Bash vector to allow with the scoped unlock [$SEC6_BASH_SCOPED]"
 
+# --- SEC-6b: THE UNLOCK VALUE MUST NOT GLOB. The first version of this scoping
+# split the value with an unquoted `for item in $val`, which also performs
+# PATHNAME EXPANSION -- so QUETREX_UNLOCK_FLOOR=* expanded against the hook's
+# cwd and matched whatever files happened to sit there. A single `*` therefore
+# re-created the blanket grant this whole mechanism exists to kill, keyed on
+# filenames an AGENT CAN CREATE (a bare ./merge-gate.sh is not a protected
+# path), which is exactly what the deny message promises can never happen:
+# "never a marker file in the repo, which an agent could create for itself."
+# Found by security review of the commit that introduced the scoping.
+SEC6B_DIR="$TMP/sec6b-glob-cwd"
+mkdir -p "$SEC6B_DIR"
+# The decoys an agent would plant to make a glob match.
+: > "$SEC6B_DIR/merge-gate.sh"
+: > "$SEC6B_DIR/verify-gate.sh"
+SEC6B_PAYLOAD="$(jq -cn --arg p "$REPO_UNLOCK/plugins/quetrex-factory/scripts/merge-gate.sh" --arg cwd "$REPO_UNLOCK" \
+  '{tool_name:"Write",tool_input:{file_path:$p},cwd:$cwd}')"
+for SEC6B_VAL in '*' '*.sh' 'merge-gate.*' '?erge-gate.sh' '[m]erge-gate.sh'; do
+  # Run the hook FROM the decoy directory: globbing, if any, expands there.
+  SEC6B_OUT="$(cd "$SEC6B_DIR" && printf '%s' "$SEC6B_PAYLOAD" \
+    | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR="$SEC6B_VAL" bash "$GUARD" 2>&1)"
+  if printf '%s' "$SEC6B_OUT" | grep -q '"permissionDecision":"allow"'; then
+    notok "SEC-6b: QUETREX_UNLOCK_FLOOR='$SEC6B_VAL' unlocked a floor write by GLOB-matching a file in cwd -- the blanket grant is back"
+  else
+    ok "SEC-6b: QUETREX_UNLOCK_FLOOR='$SEC6B_VAL' does not unlock (the value is not glob-expanded)"
+  fi
+done
+# The control: the same probe with the real basename still allows, so the
+# assertions above are not passing merely because everything denies.
+SEC6B_OK="$(cd "$SEC6B_DIR" && printf '%s' "$SEC6B_PAYLOAD" \
+  | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR=merge-gate.sh bash "$GUARD" 2>&1)"
+printf '%s' "$SEC6B_OK" | grep -q '"permissionDecision":"allow"' \
+  && ok "SEC-6b control: the exact basename still unlocks from the same cwd" \
+  || notok "SEC-6b control: the exact basename failed to unlock, so the glob assertions prove nothing [$SEC6B_OK]"
+
 # --- SEC-6 FAIL-FIRST: the pre-fix guard on main DID allow a blanket
 # QUETREX_UNLOCK_FLOOR=1 to unlock a floor-script write -- this is the exact
 # block this fix introduces.
