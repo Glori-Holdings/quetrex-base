@@ -14,7 +14,7 @@
 #     unaffected — it already exits earlier, before this fallback runs.
 #   deny-guard.sh — .quetrex/verify.json is now protected the SAME way as
 #     project.json (same SEC-ONECOPY-1 kill-switch check, same
-#     QUETREX_UNLOCK_FLOOR=1 unlock): rm/mv/cp-overwrite/redirect/git-rm/git
+#     scoped QUETREX_UNLOCK_FLOOR unlock): rm/mv/cp-overwrite/redirect/git-rm/git
 #     checkout targeting it in an armed repo is denied.
 #
 # AC1: ARMED + no verify.json + no CLAUDE.md fence -> BLOCK, labelled reason.
@@ -23,7 +23,8 @@
 # AC4: ARMED + no verify.json but a CLAUDE.md Verification fence -> no
 #      chain-missing block (resolve_from_claude_md still satisfies it).
 # AC5: deny-guard denies rm/redirect-overwrite of .quetrex/verify.json in an
-#      armed repo, and the same QUETREX_UNLOCK_FLOOR=1 unlock permits it.
+#      armed repo, and only a SCOPED QUETREX_UNLOCK_FLOOR=verify.json permits
+#      it -- a blanket "1" does not (SEC-6).
 # AC6: deny-guard's project.json protection (SEC-ONECOPY-1) is unregressed.
 # AC7: FAIL-FIRST (mechanical) against this task's own base sha (2ffde3a)
 #      for both halves.
@@ -61,11 +62,13 @@ run_vg() {  # run_vg <hook> <fixture> -> stdout, sets CODE
 }
 is_block() { printf '%s' "$1" | grep -q '"decision":"block"'; }
 
-fire_dg() {  # fire_dg <hook> <command> <cwd> [1 to unlock]
+fire_dg() {  # fire_dg <hook> <command> <cwd> [scoped unlock value]
   local hook="$1" cmd="$2" cwd="$3" unlock="${4:-}" payload
   payload="$(jq -cn --arg c "$cmd" --arg d "$cwd" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')"
-  if [ "$unlock" = "1" ]; then
-    printf '%s' "$payload" | env QUETREX_UNLOCK_FLOOR=1 bash "$hook" 2>&1
+  # Pass the value through LITERALLY -- hardcoding `=1` would turn any
+  # scoped-value assertion into a silent test of the unset path.
+  if [ -n "$unlock" ]; then
+    printf '%s' "$payload" | env QUETREX_UNLOCK_FLOOR="$unlock" bash "$hook" 2>&1
   else
     printf '%s' "$payload" | env -u QUETREX_UNLOCK_FLOOR bash "$hook" 2>&1
   fi
@@ -152,11 +155,28 @@ else
   notok "AC5: expected deny for a redirect overwrite of verify.json, got [$OUT]"
 fi
 
-OUT="$(fire_dg "$DENY_GUARD" "rm -f .quetrex/verify.json" "$F5" "1")"
+# The unlock must NAME the file it unlocks (SEC-6): a blanket "1" -- which an
+# ambient export or a settings.json env block supplies to every hook -- no
+# longer authorizes anything, and a value naming a different file must not leak.
+OUT="$(fire_dg "$DENY_GUARD" "rm -f .quetrex/verify.json" "$F5" "verify.json")"
 if is_silent "$OUT"; then
-  ok "AC5: QUETREX_UNLOCK_FLOOR=1 permits rm of .quetrex/verify.json"
+  ok "AC5: the SCOPED unlock QUETREX_UNLOCK_FLOOR=verify.json permits rm of .quetrex/verify.json"
 else
-  notok "AC5: expected the unlock to allow rm of verify.json, got [$OUT]"
+  notok "AC5: expected the scoped unlock to allow rm of verify.json, got [$OUT]"
+fi
+
+OUT="$(fire_dg "$DENY_GUARD" "rm -f .quetrex/verify.json" "$F5" "1")"
+if is_deny "$OUT"; then
+  ok "AC5: a blanket QUETREX_UNLOCK_FLOOR=1 does NOT permit rm of .quetrex/verify.json"
+else
+  notok "AC5: a blanket unlock still permitted rm of verify.json, got [$OUT]"
+fi
+
+OUT="$(fire_dg "$DENY_GUARD" "rm -f .quetrex/verify.json" "$F5" "project.json")"
+if is_deny "$OUT"; then
+  ok "AC5: an unlock naming a DIFFERENT file does not permit rm of verify.json"
+else
+  notok "AC5: a scoped unlock leaked across targets, got [$OUT]"
 fi
 
 # =============================================================================
