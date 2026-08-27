@@ -565,15 +565,22 @@ printf '%s' "$SEC4B_REAL" | grep -q '"permissionDecision":"allow"' \
 # QUETREX_UNLOCK_FLOOR=1 to unlock a floor-script write -- this is the exact
 # block this fix introduces.
 SEC6_BASELINE="$TMP/sec6-baseline-guard.sh"
-if git -C "$ROOT" show main:.claude/hooks/protected-files-guard.sh > "$SEC6_BASELINE" 2>/dev/null; then
+# BASELINE PINNED TO A FIXED SHA, NEVER `main`. A fail-first proof compares the
+# shipped file against the code as it was BEFORE the fix. Pointing that at the
+# moving `main` ref makes the assertion self-destruct the moment the fix merges:
+# `main` then IS the fixed file, "the old code allowed it" becomes false, and the
+# test goes red forever -- which is exactly what happened, turning main red right
+# after the merge while every pre-merge gate had been green. 58bd632 is the commit main
+# sat at before this fix landed, so the comparison stays meaningful for good.
+if git -C "$ROOT" show 58bd632:.claude/hooks/protected-files-guard.sh > "$SEC6_BASELINE" 2>/dev/null; then
   SEC6_BASE_OUT="$(printf '%s' "$(jq -cn --arg p "$REPO_UNLOCK/plugins/quetrex-factory/scripts/verify-gate.sh" --arg cwd "$REPO_UNLOCK" \
     '{tool_name:"Write",tool_input:{file_path:$p},cwd:$cwd}')" \
     | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR=1 bash "$SEC6_BASELINE" 2>&1)"
   printf '%s' "$SEC6_BASE_OUT" | grep -q '"permissionDecision":"allow"' \
-    && ok "SEC-6 FAIL-FIRST: the pre-fix guard (main) DID allow a blanket QUETREX_UNLOCK_FLOOR=1 -- proving the new block above is a genuine, deliberate fix" \
-    || notok "SEC-6 FAIL-FIRST: the pre-fix guard on main did not allow the blanket unlock either (out: [$SEC6_BASE_OUT]) -- cannot demonstrate the fix is real"
+    && ok "SEC-6 FAIL-FIRST: the pre-fix guard (58bd632) DID allow a blanket QUETREX_UNLOCK_FLOOR=1 -- proving the new block above is a genuine, deliberate fix" \
+    || notok "SEC-6 FAIL-FIRST: the pre-fix guard at 58bd632 did not allow the blanket unlock either (out: [$SEC6_BASE_OUT]) -- cannot demonstrate the fix is real"
 else
-  notok "SEC-6 FAIL-FIRST: could not read .claude/hooks/protected-files-guard.sh at main -- refusing to report a pass having compared against nothing"
+  notok "SEC-6 FAIL-FIRST: could not read .claude/hooks/protected-files-guard.sh at 58bd632 -- refusing to report a pass having compared against nothing"
 fi
 
 # =============================================================================

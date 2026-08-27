@@ -195,15 +195,22 @@ fi
 # blanket payload against main's deny-guard, which must ALLOW it. Without this
 # the whole change could be a no-op and every assertion above would still pass.
 MAIN_GUARD="$(mktemp "${TMPDIR:-/tmp}/deny-guard-main.XXXXXX")"
-if git -C "$REPO_ROOT" show main:plugins/quetrex-factory/scripts/deny-guard.sh > "$MAIN_GUARD" 2>/dev/null && [ -s "$MAIN_GUARD" ]; then
+# BASELINE PINNED TO A FIXED SHA, NEVER `main`. A fail-first proof compares the
+# shipped file against the code as it was BEFORE the fix. Pointing that at the
+# moving `main` ref makes the assertion self-destruct the moment the fix merges:
+# `main` then IS the fixed file, "the old code allowed it" becomes false, and the
+# test goes red forever -- which is exactly what happened, turning main red right
+# after the merge while every pre-merge gate had been green. 58bd632 is the commit main
+# sat at before this fix landed, so the comparison stays meaningful for good.
+if git -C "$REPO_ROOT" show 58bd632:plugins/quetrex-factory/scripts/deny-guard.sh > "$MAIN_GUARD" 2>/dev/null && [ -s "$MAIN_GUARD" ]; then
   OUT_MAIN="$(fire_bash "$MAIN_GUARD" "rm -f .quetrex/project.json" "1")"
   if is_silent "$OUT_MAIN"; then
-    ok "AC2d FAIL-FIRST: main's deny-guard DID allow a blanket QUETREX_UNLOCK_FLOOR=1 -- the new refusal is a real, deliberate change"
+    ok "AC2d FAIL-FIRST: the deny-guard at 58bd632 DID allow a blanket QUETREX_UNLOCK_FLOOR=1 -- the new refusal is a real, deliberate change"
   else
-    notok "AC2d FAIL-FIRST: main's guard already denied the blanket form, so AC2b proves nothing new [$OUT_MAIN]"
+    notok "AC2d FAIL-FIRST: the guard at 58bd632 already denied the blanket form, so AC2b proves nothing new [$OUT_MAIN]"
   fi
 else
-  notok "AC2d FAIL-FIRST: could not read main:plugins/quetrex-factory/scripts/deny-guard.sh to prove the block is new"
+  notok "AC2d FAIL-FIRST: could not read 58bd632:plugins/quetrex-factory/scripts/deny-guard.sh to prove the block is new"
 fi
 rm -f "$MAIN_GUARD"
 

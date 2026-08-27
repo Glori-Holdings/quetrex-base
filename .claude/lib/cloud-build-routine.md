@@ -71,40 +71,55 @@ You are a fresh Claude Code cloud session. You have just cloned {{REPO_URL}} wit
 prior conversational context. Do the following, in order, and stop only at one of the two
 termini in step 5.
 
-### 1. Confirm the engine is present — it was installed for you, do not install it
-The Quetrex engine is provisioned by this environment's setup script, before you started.
-Nothing here installs software. Confirm it landed:
+### 1. Install the engine THIS REPO DECLARES — from the clone you are sitting in
+A cloud session never trusts its workspace: there is no trust dialog and nobody to accept
+one, so Claude Code DISCARDS this repo's `.claude/settings.json` wholesale and its
+`enabledPlugins` are skipped as orphaned. The developer already declared the engine when
+they enabled Quetrex on this project and ran `/quetrex-setup:init`; cloud simply refuses to
+honour that declaration. So read the declaration off disk and act on it.
+
+This is NOT a build inventing its own toolchain. The COMMITTED repo is still the only
+source of truth for what gets installed — you install exactly what it names and nothing
+else, at latest, never pinned:
+
+    MP="$(jq -r '.extraKnownMarketplaces // {} | to_entries[] | .value.source.repo // empty' .claude/settings.json)"
+    PLUGINS="$(jq -r '.enabledPlugins // {} | to_entries[] | select(.value == true) | .key' .claude/settings.json)"
+
+Register every marketplace it names, then install each plugin in ITS OWN invocation —
+`claude plugin install a b` installs only the FIRST argument and silently drops the rest
+(measured; a build once ran on half an engine believing it had succeeded):
+
+    for m in $MP;      do claude plugin marketplace add "$m"; done
+    for p in $PLUGINS; do claude plugin install "$p"; done
+
+Never add a version to those names. A pinned `enabledPlugins` entry once made the entire
+`/quetrex:*` command layer fail to load.
+
+Then CONFIRM, because an install that exits 0 having done nothing is the failure that has
+cost the most here — it produces a session that looks normal and is not:
 
     claude plugin list
 
-You should see `quetrex@quetrex` and `quetrex-factory@quetrex`. Their agent definitions
-(architect.md, developer.md, qa.md, reviewer.md, security-reviewer.md, git-workflow.md) and
-`.claude/lib/dev-pipeline.md` are on disk under the plugin cache, and `quetrex-api`,
-`quetrex-cloud-prep`, `quetrex-env-derive` and `quetrex-plan-stamp` are on PATH.
+Every name in `$PLUGINS` must appear. For the Quetrex engine that means
+`quetrex@quetrex` and `quetrex-factory@quetrex`, whose agent definitions (architect.md,
+developer.md, qa.md, reviewer.md, security-reviewer.md, git-workflow.md) and
+`.claude/lib/dev-pipeline.md` then sit under the plugin cache, with `quetrex-api`,
+`quetrex-cloud-prep`, `quetrex-env-derive` and `quetrex-plan-stamp` on PATH.
 
-Then confirm the setup script left the rest of its configuration behind, because a
-stale or half-applied one is the failure that has cost the most here — it produces a
-session that looks normal and is not:
+If `.claude/settings.json` declares no plugins, or a declared plugin is still missing after
+its install, stop and report `transport_failure` (rule 5) naming the exact plugin — that is
+a repo that was never adopted with `/quetrex-setup:init`, or a marketplace that did not
+resolve. Do not improvise a substitute and do not proceed unarmed: without the engine there
+are no gates, and a build with no gates is worse than no build.
 
-    node -e 'const s=require(os.homedir()+"/.claude/settings.json");console.log(s.env&&s.env.BASH_DEFAULT_TIMEOUT_MS)' 2>/dev/null || \
-      grep -o "BASH_DEFAULT_TIMEOUT_MS[^,}]*" ~/.claude/settings.json
-
-`BASH_DEFAULT_TIMEOUT_MS` must be present and at least `900000`. Without it every verify
-command longer than two minutes — a real suite, build, or E2E — is killed mid-run and
-re-launched, so the same suite runs two or three times per stage and the build's wall
-clock triples for no added proof.
-
-If the plugins are NOT present, or that timeout is missing, stop and report
-`transport_failure` (rule 5) saying the environment's setup script is missing or stale:
-its Setup script field must contain exactly `bash scripts/cloud-env-setup.sh`, and that
-script — which lives in this repo, version-controlled — does the rest. **Do not install them yourself** — a build that provisions its
-own toolchain from an unattended prompt is exactly what this design removed, and an
-environment without the script is a configuration problem a human fixes once, not something
-to work around per run.
+Nothing here depends on this environment being configured by hand. There is no setup
+script to keep in sync, no per-developer web-console step, and no ambient
+`~/.claude/settings.json` to inherit — every long command in the verify chain carries its
+own explicit timeout, so a two-minute default cannot cut one short.
 
 `/quetrex:task-build` is NOT registered as a slash command here — plugin commands register
-at launch and this session's engine came from the setup script, so steps 3-4 drive the
-pipeline directly by reading the agent files off disk.
+at launch and the engine arrived after that, so steps 3-4 drive the pipeline directly by
+reading the agent files off disk.
 
 ### 2. Fetch the human-approved spec
 The spec was pushed to a disposable helper branch by the local half before you were fired.
