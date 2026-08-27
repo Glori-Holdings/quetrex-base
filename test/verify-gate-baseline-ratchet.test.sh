@@ -220,6 +220,31 @@ else
 fi
 
 # --------------------------------------------------------------------------
+# AC5 — THE FLOOR, and the anti-fail-open control. A DIRTY tree means the agent
+# authored something uncommitted; it owns the red, and no baseline exists to
+# excuse it (MODE=none).
+#
+# THIS CASE CAUGHT A REAL FAIL-OPEN IN THE FIX ITSELF. An early draft left
+# QXB_GREEN/QXB_PRE unbound on the MODE=none path. verify-gate.sh runs under
+# `set -u`, so the first reference killed the hook outright — and a dead hook
+# emits no block JSON, which the runtime reads as ALLOW. The guard meant to
+# fail closed failed open, and only this assertion showed it. Do not delete it.
+# --------------------------------------------------------------------------
+R5="$TMPROOT/ac5"; mk_repo "$R5" green
+printf 'echo "broken uncommitted"; exit 1\n' > "$R5/lint.sh"   # dirty, never committed
+OUT="$(run_hook "$R5")"
+if is_block "$OUT"; then
+  pass "AC5 (floor): a red chain with a DIRTY tree on the default branch still BLOCKS"
+else
+  fail "AC5 (floor): uncommitted work that breaks the chain was allowed — either MODE=none stopped failing closed, or the hook died before emitting its block (the set -u fail-open)"
+fi
+if [ -n "$OUT" ]; then
+  pass "AC5: the hook produced a decision rather than dying silently"
+else
+  fail "AC5: the hook emitted NOTHING — a dead hook reads as ALLOW; this is the set -u fail-open"
+fi
+
+# --------------------------------------------------------------------------
 # AC6 — a pre-existing red is not a green: it must not clear a prior
 # ESCALATION nor reset the self-heal counter.
 # --------------------------------------------------------------------------

@@ -60,13 +60,22 @@ qx_baseline_init() {
   QXB_FILE="$QXB_QDIR/verify-baseline.json"
   QXB_WT=""           # lazily created base worktree
   QXB_WT_TRIED=0
+  # A hook killed by the EXTERNAL Stop/SubagentStop timeout dies on an uncaught
+  # signal, and bash does not run an EXIT trap for that — so qx_baseline_cleanup
+  # never fires and a registered .git/worktrees/qx-baseline.* entry is left
+  # behind. That is most likely on exactly the long base runs this file adds, and
+  # it accumulates turn after turn, against the repo's "never leave a dangling
+  # worktree" rule. Prune leftovers here, at the start of every run: `git
+  # worktree prune` only removes entries whose directory is already gone, so it
+  # can never touch a live worktree of the operator's.
+  git -C "$1" worktree prune >/dev/null 2>&1
   # Initialised here, unconditionally, and NOT only on the paths that call
   # qxb__load_cache. verify-gate.sh runs under `set -u`: leaving these unbound
   # on the MODE=none path made the first qxb__has_line reference kill the hook
   # outright — and a dead hook emits no block JSON, which the runtime reads as
   # ALLOW. A fail-open, produced by the very guard meant to fail closed.
   # Measured by AC5 of test/verify-gate-baseline-ratchet.test.sh.
-  QXB_GREEN=""; QXB_PRE=""
+  QXB_GREEN=""; QXB_PRE=""; QXB_NOT_PRE=""
 
   # A repo with no resolvable HEAD has no base to measure against.
   case "$QXB_HEAD_SHA" in
@@ -91,6 +100,34 @@ qx_baseline_init() {
 
   cur_branch="$(git -C "$QXB_ROOT" branch --show-current 2>/dev/null)"
   mb="$(git -C "$QXB_ROOT" merge-base HEAD "$default_ref" 2>/dev/null)"
+
+  # EPIC CHILDREN BRANCH OFF AN INTEGRATION BRANCH, NOT off the default branch.
+  # /quetrex:task-build names an epic's integration branch `<prefix><EPIC>` and
+  # each child `<prefix><EPIC>.<n>`, so a child's merge-base with main is the
+  # integration branch's own root — far behind the actual base of this work. A
+  # red introduced by a SIBLING child and already merged into the integration
+  # branch would then measure as "already failing at base" and be excused.
+  #
+  # Strip one trailing `.<n>` and, if that branch exists, prefer its merge-base
+  # whenever it is a DESCENDANT of the default-branch one. Preferring the
+  # NEARER base is the conservative direction in every case: a nearer base can
+  # only ever excuse FEWER commands, never more. One extra ref lookup, no
+  # branch scanning.
+  case "$cur_branch" in
+    *.[0-9]|*.[0-9][0-9])
+      local parent_branch parent_ref parent_mb
+      parent_branch="${cur_branch%.*}"
+      for parent_ref in "refs/remotes/origin/$parent_branch" "refs/heads/$parent_branch"; do
+        git -C "$QXB_ROOT" rev-parse -q --verify "$parent_ref" >/dev/null 2>&1 || continue
+        parent_mb="$(git -C "$QXB_ROOT" merge-base HEAD "$parent_ref" 2>/dev/null)"
+        [ -n "$parent_mb" ] || continue
+        if [ -z "$mb" ] || git -C "$QXB_ROOT" merge-base --is-ancestor "$mb" "$parent_mb" 2>/dev/null; then
+          mb="$parent_mb"
+        fi
+        break
+      done
+      ;;
+  esac
 
   if [ -n "$mb" ] && [ "$mb" != "$QXB_HEAD_SHA" ]; then
     # Ordinary case: work on a branch that diverged from the default branch.
@@ -136,6 +173,13 @@ qxb__load_cache() {
   cached_base="$(jq -r '.base // ""' "$QXB_FILE" 2>/dev/null)"
   [ "$cached_base" = "$QXB_BASE_SHA" ] || return 0
   QXB_PRE="$(jq -r '(.preexisting // {}) | to_entries[] | select(.value == true) | .key' "$QXB_FILE" 2>/dev/null)"
+  # NEGATIVE verdicts are loaded too. Without this, a genuinely-broken command —
+  # i.e. every turn of the self-heal loop, the hot path — re-created a worktree
+  # and re-ran the failing command at base on EVERY Stop and SubagentStop, and
+  # that wall time comes out of the SAME budget the live chain is spending. It
+  # made a fail-closed TIME BUDGET EXHAUSTED block materially more likely on a
+  # real chain. One measurement per (base, command) is all the verdict needs.
+  QXB_NOT_PRE="$(jq -r '(.preexisting // {}) | to_entries[] | select(.value == false) | .key' "$QXB_FILE" 2>/dev/null)"
 }
 
 qxb__has_line() {  # qxb__has_line <haystack-newline-list> <needle>
@@ -150,15 +194,28 @@ qxb__save() {  # qxb__save <key: preexisting|greenSince> <cmd> [true|false]
   [ -f "$cur" ] || printf '{}' > "$cur" 2>/dev/null || return 0
   tmp="$(mktemp "${TMPDIR:-/tmp}/qxb.XXXXXX" 2>/dev/null)" || return 0
   if [ "$1" = "greenSince" ]; then
+    # THE BASE STAMP AND THE MAP MOVE TOGETHER. An earlier version set .base
+    # unconditionally here while leaving a `preexisting` map that had been
+    # measured against a DIFFERENT base. Sequence that produced a fail-open:
+    # branch off A where `npm run build` is red -> {base:A, preexisting:{build:true}};
+    # the branch merges main so the merge-base becomes B, where build is green;
+    # some other command exits 0 first and stamps .base=B while keeping
+    # build:true; on the NEXT stop qxb__load_cache sees cached_base == B, loads
+    # build as pre-existing, and excuses a build the agent actually broke —
+    # without ever measuring it at B. The map is only valid for the base it was
+    # measured against, so a base change DISCARDS it, exactly as the
+    # `preexisting` branch below already does. greenSince is the ratchet and
+    # survives regardless.
     jq --arg c "$2" --arg b "$QXB_BASE_SHA" \
-      '.base=$b | .greenSince=((.greenSince // []) + [$c] | unique)
+      'if (.base // "") == $b then . else {base:$b, greenSince:(.greenSince // [])} end
+       | .base=$b | .greenSince=((.greenSince // []) + [$c] | unique)
        | .preexisting=((.preexisting // {}) | del(.[$c]))' \
-      "$cur" > "$tmp" 2>/dev/null && cat "$tmp" > "$cur" 2>/dev/null
+      "$cur" > "$tmp" 2>/dev/null && mv -f "$tmp" "$cur" 2>/dev/null
   else
     jq --arg c "$2" --arg b "$QXB_BASE_SHA" --argjson v "${3:-true}" \
       'if (.base // "") == $b then . else {base:$b, greenSince:(.greenSince // [])} end
        | .preexisting=((.preexisting // {}) + {($c): $v})' \
-      "$cur" > "$tmp" 2>/dev/null && cat "$tmp" > "$cur" 2>/dev/null
+      "$cur" > "$tmp" 2>/dev/null && mv -f "$tmp" "$cur" 2>/dev/null
   fi
   rm -f "$tmp" 2>/dev/null
 }
@@ -229,8 +286,11 @@ qx_baseline_is_preexisting() {
 
   [ "$QXB_MODE" = "none" ] && return 1
 
-  # Cached verdict for this exact base.
+  # Cached verdicts for this exact base — positive AND negative. One
+  # measurement per (base, command); see qxb__load_cache for why the negative
+  # half matters on the self-heal hot path.
   qxb__has_line "$QXB_PRE" "$cmd" && return 0
+  qxb__has_line "$QXB_NOT_PRE" "$cmd" && return 1
 
   # Measure it: run the command at the base commit.
   local wt code
@@ -238,20 +298,45 @@ qx_baseline_is_preexisting() {
   wt="$QXB_WT"
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
 
-  local tmo=""
+  # THE BASE RUN IS ALWAYS BOUNDED, whatever is on PATH. verify-gate.sh's own
+  # run_with_cap ships a background-SIGKILL fallback precisely because "the
+  # chain must never be allowed to run unbounded regardless of what's on PATH";
+  # this run spends the SAME budget and needs the same guarantee. Without it, a
+  # chain command that hangs at base on a stock macOS box (no coreutils) hangs
+  # the Stop hook until the EXTERNAL hook timeout kills it — and a hook killed
+  # mid-run emits no block JSON, which the runtime reads as ALLOW.
+  local tmo="" started elapsed
   if command -v timeout >/dev/null 2>&1; then tmo="timeout"
   elif command -v gtimeout >/dev/null 2>&1; then tmo="gtimeout"; fi
+  started=$(date +%s)
   if [ -n "$tmo" ]; then
     ( cd "$wt" && "$tmo" -k 5 "${cap}s" bash -c "$cmd" ) >/dev/null 2>&1
     code=$?
   else
-    ( cd "$wt" && bash -c "$cmd" ) >/dev/null 2>&1
-    code=$?
+    ( cd "$wt" && bash -c "$cmd" ) >/dev/null 2>&1 &
+    local cpid=$!
+    ( sleep "$cap"; kill -9 "$cpid" 2>/dev/null ) >/dev/null 2>&1 &
+    local wpid=$!
+    wait "$cpid" 2>/dev/null; code=$?
+    kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+  fi
+  elapsed=$(( $(date +%s) - started ))
+
+  # A base run KILLED by the cap proves nothing either way — fail closed and
+  # let the caller treat the failure as genuine. Same SEC-2 shape verify-gate.sh
+  # uses: attribute 124/137 to OUR watchdog only when the measured elapsed time
+  # actually reached the cap, so a command that genuinely exits 124/137 fast is
+  # still read as the real failure it is.
+  if { [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; } && [ "$elapsed" -ge "$((cap > 2 ? cap - 2 : 0))" ]; then
+    return 1
   fi
 
-  # A base run that was itself KILLED by the cap proves nothing either way —
-  # fail closed and let the caller treat the failure as genuine.
-  if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+  # A failure to MEASURE is not a measurement. If the worktree vanished between
+  # the -d check and the run (a tmp reaper, a permissions change), `cd` fails
+  # and the subshell exits non-zero — which is neither 124 nor 137 and would
+  # otherwise be recorded as "already broken at base", the fail-open direction.
+  # Re-check the worktree before trusting a non-zero verdict.
+  if [ "$code" -ne 0 ] && { [ ! -d "$wt" ] || [ ! -r "$wt" ]; }; then
     return 1
   fi
 

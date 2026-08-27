@@ -113,7 +113,10 @@ done
 #   4. (hooks|scripts)/<name>.sh anywhere                        (pre-one-copy floor, restored)
 # and the QUETREX_UNLOCK_FLOOR=1 unlock must still permit every true positive.
 # =============================================================================
-FLOOR_NAMES="deny-guard secret-scan enforce-branch merge-gate verify-gate verify-gate-quick-chain"
+# qx-verify-baseline joined the floor 2026-08-27: verify-gate.sh SOURCES it and
+# it is what decides whether a red command is excused as pre-existing, so
+# editing it changes the gate as effectively as editing the gate itself.
+FLOOR_NAMES="deny-guard secret-scan enforce-branch merge-gate verify-gate verify-gate-quick-chain qx-verify-baseline"
 
 # --- false positives: paths that carry NONE of the four protected shapes ---
 FALSE_POSITIVE_PATHS=(

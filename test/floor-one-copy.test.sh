@@ -44,7 +44,7 @@ PASS=0; FAIL=0
 ok()    { PASS=$((PASS+1)); printf 'ok - %s\n' "$1"; }
 notok() { FAIL=$((FAIL+1)); printf 'NOT OK - %s\n' "$1"; }
 
-FLOOR_BASENAMES="deny-guard.sh secret-scan.sh enforce-branch.sh merge-gate.sh verify-gate.sh verify-gate-quick-chain.sh"
+FLOOR_BASENAMES="deny-guard.sh secret-scan.sh enforce-branch.sh merge-gate.sh verify-gate.sh verify-gate-quick-chain.sh qx-verify-baseline.sh"
 AGENT_BASENAMES="architect.md database-architect.md developer.md git-workflow.md qa.md quetrex-cleanup-auditor.md quetrex-cleanup-proposer.md reviewer.md security-reviewer.md"
 
 check_one_copy() {  # check_one_copy <basename> <required-dir-prefix> <kind-label>
