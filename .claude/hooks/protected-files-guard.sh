@@ -84,7 +84,12 @@
 # blocking channel the hook contract provides: exit 2 with the reason on
 # stderr. A missing jq must never degrade this guard to silence.
 #
-# PROTECTED SET (CORRECTED, C1 review finding, critical): the six floor
+# PROTECTED SET (CORRECTED, C1 review finding, critical). SEVEN basenames as of
+# 2026-08-27: qx-verify-baseline.sh joined the set for exactly the reason
+# verify-gate-quick-chain.sh did — verify-gate.sh SOURCES it, so editing it
+# changes the gate's behaviour as effectively as editing the gate itself, and
+# it is what decides whether a red command is excused as pre-existing.
+# The floor
 # basenames are SOURCED in exactly one place (plugins/quetrex-factory/
 # scripts/, the one-copy rule), but that is NOT the only path shape that
 # actually EXECUTES. The prior version of this comment claimed the
@@ -235,11 +240,12 @@ resolve_root() {
 
 # --- the protected set (moved above the ARMED-ONLY gate: C3 needs PROT_ALT
 # to build the installed-plugin hint BEFORE that gate can run) -------------
-# The six floor basenames, including verify-gate-quick-chain.sh (added
-# 2026-08-21): verify-gate.sh now SOURCES it, so editing it changes the gate's
+# The seven floor basenames, including verify-gate-quick-chain.sh (added
+# 2026-08-21) and qx-verify-baseline.sh (added 2026-08-27): verify-gate.sh
+# SOURCES both, so editing either changes the gate's
 # behavior exactly as effectively as editing verify-gate.sh itself would,
 # without ever touching the "protected" file by name.
-PROT_ALT='deny-guard|secret-scan|enforce-branch|merge-gate|verify-gate|verify-gate-quick-chain'
+PROT_ALT='deny-guard|secret-scan|enforce-branch|merge-gate|verify-gate|verify-gate-quick-chain|qx-verify-baseline'
 # Path-tail shape, matched anywhere in the text (a file_path value or a Bash
 # command/segment string) — see the PROTECTED SET comment above the vector
 # sections below for the three alternatives and why each exists.
@@ -707,7 +713,7 @@ qxva_gate() {
 # returns 1 if no protected basename is present.
 qx_protected_basename_in() {
   local text="$1" alt
-  for alt in verify-gate-quick-chain deny-guard secret-scan enforce-branch merge-gate verify-gate; do
+  for alt in verify-gate-quick-chain qx-verify-baseline deny-guard secret-scan enforce-branch merge-gate verify-gate; do
     if printf '%s' "$text" | grep -Eq "(^|[^A-Za-z0-9_.-])${alt}\\.sh([^A-Za-z0-9_.-]|\$)"; then
       printf '%s.sh' "$alt"
       return 0
