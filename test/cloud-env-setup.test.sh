@@ -119,6 +119,31 @@ else
   notok "the rewrite dropped oauthAccount from ~/.claude.json"
 fi
 
+# 4c. A cp that fails PART WAY can leave a temp it already created at the
+#     ambient umask, and the `||` fallback cannot tighten an existing file.
+#     Simulate exactly that with a cp shim and prove the result is still
+#     owner-only rather than world-readable.
+CPSHIM="$TMP/cpshim"; mkdir -p "$CPSHIM"
+cat > "$CPSHIM/cp" <<'CPEOF'
+#!/bin/sh
+# Create the destination wide-open, then fail -- the partial-failure shape.
+dest=""
+for a in "$@"; do dest="$a"; done
+: > "$dest" 2>/dev/null
+chmod 644 "$dest" 2>/dev/null
+exit 1
+CPEOF
+chmod +x "$CPSHIM/cp"
+mkdir -p "$TMP/home-partialcp/.claude"
+printf '{"projects":{},"oauthAccount":{"emailAddress":"fixture@example.com"}}\n' > "$TMP/home-partialcp/.claude.json"
+chmod 600 "$TMP/home-partialcp/.claude.json"
+( cd "$WS" && HOME="$TMP/home-partialcp" PATH="$CPSHIM:$PATH" bash "$SCRIPT" ) >/dev/null 2>&1
+PARTIAL_MODE="$(ls -l "$TMP/home-partialcp/.claude.json" | cut -c1-10)"
+case "$PARTIAL_MODE" in
+  -rw-------|-rw-r-----) ok "a partially-failing cp cannot leave ~/.claude.json group/world-readable (mode $PARTIAL_MODE)" ;;
+  *) notok "a partially-failing cp left ~/.claude.json at '$PARTIAL_MODE' — credentials readable by others" ;;
+esac
+
 # 5. It must NOT install plugins — pinning an install here is what went stale.
 if grep -qE '^[^#]*claude plugin (install|marketplace)' "$SCRIPT"; then
   notok "the setup script installs/pins plugins — the repo's settings.json must do that at session start"

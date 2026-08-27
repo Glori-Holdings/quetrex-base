@@ -79,6 +79,11 @@ json_merge() {  # json_merge <file> <jq-filter> <python-expr-on-'d'>
   # back to a PRIVATE temp (0600) rather than the ambient umask -- erring
   # tighter than the original is safe, erring looser is the bug being fixed.
   cp -p "$file" "$tmp" 2>/dev/null || ( umask 077; : > "$tmp" ) || { rm -f "$tmp"; die "cannot stage a replacement for $file"; }
+  # Belt and braces: a cp that fails PART WAY can leave a temp it already
+  # created at the ambient umask, and the `||` fallback cannot tighten a file
+  # that now exists. These are per-user config files (one holds oauthAccount),
+  # so owner-only is always correct -- never let group/other survive here.
+  chmod go-rwx "$tmp" 2>/dev/null || true
   if [ "$JSON_TOOL" = jq ]; then
     jq --arg ws "$WORKSPACE" "$filter" "$file" > "$tmp" || { rm -f "$tmp"; die "jq failed on $file"; }
   else

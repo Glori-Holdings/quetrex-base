@@ -420,15 +420,26 @@ qx_protected_basename_in() {
 # normally be reached — callers only invoke this after already confirming
 # protection — but never emits nothing).
 qx_protected_target_basename() {
-  local t="$1" b
+  local t="$1" b link_target hops=0
+  # RESOLVE SYMLINKS FIRST. This used to read the PATH TEXT before the link
+  # target, which inverted the whole point of scoping: under a legitimate
+  # QUETREX_UNLOCK_FLOOR=merge-gate.sh an agent could `ln -sfn .../verify-gate.sh
+  # ./merge-gate.sh` and then write through it -- the text said merge-gate.sh,
+  # so the unlock matched, and verify-gate.sh was clobbered. Worse, naming the
+  # file ACTUALLY being written was DENIED and the deny text told the operator
+  # to name the decoy. The unlock must name what is really written, so follow
+  # the link chain (bounded; a cycle must not hang a PreToolUse hook) and derive
+  # the required name from the real destination. Found by security review.
+  while [ -L "$t" ] && [ "$hops" -lt 10 ]; do
+    link_target=$(readlink "$t" 2>/dev/null) || break
+    [ -n "$link_target" ] || break
+    case "$link_target" in
+      /*) t="$link_target" ;;
+      *)  t="$(dirname "$t")/$link_target" ;;
+    esac
+    hops=$((hops + 1))
+  done
   b=$(qx_protected_basename_in "$t") && { printf '%s' "$b"; return 0; }
-  if [ -L "$t" ] 2>/dev/null; then
-    local link_target
-    link_target=$(readlink "$t" 2>/dev/null)
-    if [ -n "$link_target" ]; then
-      b=$(qx_protected_basename_in "$link_target") && { printf '%s' "$b"; return 0; }
-    fi
-  fi
   basename "$t" 2>/dev/null
 }
 

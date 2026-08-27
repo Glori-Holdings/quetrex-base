@@ -529,6 +529,38 @@ printf '%s' "$SEC6B_OK" | grep -q '"permissionDecision":"allow"' \
   && ok "SEC-6b control: the exact basename still unlocks from the same cwd" \
   || notok "SEC-6b control: the exact basename failed to unlock, so the glob assertions prove nothing [$SEC6B_OK]"
 
+# --- SEC-4b: THE UNLOCK MUST NAME WHAT IS ACTUALLY WRITTEN. The required name
+# used to be read from the PATH TEXT before the symlink was resolved, which
+# inverted the scoping: under a legitimate QUETREX_UNLOCK_FLOOR=merge-gate.sh an
+# agent could `ln -sfn .../verify-gate.sh ./merge-gate.sh`, write through it,
+# and clobber verify-gate.sh -- while naming the file REALLY being written was
+# denied, with the deny text pointing the operator at the decoy. Found by
+# security review.
+SEC4B_LAB="$TMP/sec4b-symlink-lab"
+mkdir -p "$SEC4B_LAB"
+ln -sfn "$REPO_UNLOCK/plugins/quetrex-factory/scripts/verify-gate.sh" "$SEC4B_LAB/merge-gate.sh"
+SEC4B_PAYLOAD="$(jq -cn --arg p "$SEC4B_LAB/merge-gate.sh" --arg cwd "$REPO_UNLOCK" \
+  '{tool_name:"Write",tool_input:{file_path:$p},cwd:$cwd}')"
+
+SEC4B_DECOY="$(printf '%s' "$SEC4B_PAYLOAD" | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR=merge-gate.sh bash "$GUARD" 2>&1)"
+printf '%s' "$SEC4B_DECOY" | grep -q '"permissionDecision":"allow"' \
+  && notok "SEC-4b: an unlock naming the SYMLINK (merge-gate.sh) authorized a write to its real target verify-gate.sh" \
+  || ok "SEC-4b: an unlock naming the symlink's own name does NOT authorize a write to its real target"
+
+SEC4B_REAL="$(printf '%s' "$SEC4B_PAYLOAD" | CLAUDE_PROJECT_DIR="$REPO_UNLOCK" QUETREX_UNLOCK_FLOOR=verify-gate.sh bash "$GUARD" 2>&1)"
+printf '%s' "$SEC4B_REAL" | grep -q '"permissionDecision":"allow"' \
+  && ok "SEC-4b: naming the REAL destination (verify-gate.sh) is what unlocks the write" \
+  || notok "SEC-4b: naming the real destination failed to unlock -- the scoping now points at nothing usable [$SEC4B_REAL]"
+
+# NOT ASSERTED HERE, deliberately: a MULTI-HOP symlink chain (a -> b -> a real
+# floor script) is not DETECTED as a protected write at all -- the guard emits
+# no decision and the write is silently allowed. That is PRE-EXISTING: measured
+# identical on main, on 4386fd1, and here, so it is a detection gap that predates
+# the unlock scoping and is out of this change's scope (a review finding must be
+# caused by the diff). The name-derivation above does follow a chain, so this
+# file will assert the end-to-end behaviour the moment detection is fixed.
+# Reported separately to the operator; do NOT widen this PR to chase it.
+
 # --- SEC-6 FAIL-FIRST: the pre-fix guard on main DID allow a blanket
 # QUETREX_UNLOCK_FLOOR=1 to unlock a floor-script write -- this is the exact
 # block this fix introduces.
