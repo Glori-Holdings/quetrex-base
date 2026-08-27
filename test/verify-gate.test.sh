@@ -1164,7 +1164,32 @@ if [ "$HOOK" -ef "$REPO_ROOT/plugins/quetrex-factory/scripts/verify-gate.sh" ]; 
   # block + its explanatory comment + the fallback definition is the SAME
   # small, bounded, ONE-TIME growth shape as C4/C6 above — bumped from 35 to
   # 45 to cover it.
-  C4_ALLOWANCE=45
+  # BASELINE_RATCHET_ALLOWANCE (2026-08-27): verify-gate.sh now sources
+  # plugins/quetrex-factory/scripts/qx-verify-baseline.sh and asks it, on a
+  # genuine non-zero exit, whether that command was ALREADY red at the base of
+  # the current work (merge-base with the default branch). This closed a
+  # measured, operator-visible kill: on a GREENFIELD task the first chain
+  # command cannot exist until a developer writes the script defining it, so
+  # the gate blocked turn 1, blocked turn 2, hit the self-heal cap on turn 3
+  # and wrote .quetrex/ESCALATION — QDM-14 died before its architect finished
+  # and the cloud run published nothing but its heartbeat commit.
+  #
+  # The growth is the sourcing block, the baseline question asked before the
+  # ledger append, the PRE-EXISTING branch in the run loop, and the report /
+  # containment lines — ALL of it inside the existing chain loop and decision
+  # section. It is the same bounded, one-time shape as C4/C6/ONE_COPY_R2 above,
+  # just larger, and every comment that could live in the helper was moved
+  # there rather than paid for here. Bumped from 45 to 105 to cover it.
+  #
+  # WHAT DID NOT CHANGE, and is what this assertion actually guards: the four
+  # needle greps above still pass, so no worktree/`--git-common-dir`/
+  # QUETREX_VERIFY_FORCE deferral came back. Nor could the new path serve as
+  # one — it never skips a command, it runs every one of them, and a
+  # pre-existing red is ledgered with its real non-zero exit, so merge-gate.sh
+  # GATE 3 still refuses to merge on it. test/verify-gate-baseline-ratchet.test.sh
+  # AC4 pins the specific refusal that a red chain on the DEFAULT branch is
+  # never excused, which is where the deleted deferral used to live.
+  C4_ALLOWANCE=105
   if [ "$DELTA" -ge "$((0 - C4_ALLOWANCE))" ]; then
     pass "AC10: verify-gate.sh has not regrown past the pre-deletion baseline 63bb114 + the C4/C6 allowance (delta $DELTA, allowance $C4_ALLOWANCE; floor, not ratchet — the 4 needle greps above are the proof)"
   else

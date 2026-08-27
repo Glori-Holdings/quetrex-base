@@ -75,8 +75,8 @@ done <<< "$COMMANDS"
 
 # Cross-check the reverse direction too: every *.sh actually present in
 # scripts/ is either registered by hooks.json OR is a known sourced-only /
-# router helper (verify-gate-quick-chain.sh is sourced by verify-gate.sh,
-# not registered directly; qx-armed.sh is sourced by deny-guard.sh,
+# router helper (verify-gate-quick-chain.sh and qx-verify-baseline.sh are both
+# sourced by verify-gate.sh, not registered directly; qx-armed.sh is sourced by deny-guard.sh,
 # secret-scan.sh, enforce-branch.sh, merge-gate.sh and verify-gate.sh
 # — ONE-COPY round 2's shared arming predicate — not registered directly
 # either; format.sh and right-size-router.sh ARE registered above and
@@ -86,7 +86,8 @@ if [ -d "$SCRIPTS_DIR" ]; then
     base=$(basename "$f")
     if printf '%s\n' "$COMMANDS" | grep -q "scripts/$base"; then
       ok "scripts/$base: registered in hooks.json"
-    elif [ "$base" = "verify-gate-quick-chain.sh" ] || [ "$base" = "qx-armed.sh" ]; then
+    elif [ "$base" = "verify-gate-quick-chain.sh" ] || [ "$base" = "qx-armed.sh" ] \
+         || [ "$base" = "qx-verify-baseline.sh" ]; then
       ok "scripts/$base: known sourced-only helper (not directly registered) — OK"
     else
       notok "scripts/$base: exists on disk but is NOT registered in hooks.json and is not a known sourced-only helper — dead file or missing wiring"

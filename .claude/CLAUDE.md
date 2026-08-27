@@ -1,5 +1,6 @@
 PROTECTED (HOOKFIX G5): the safety floor — deny-guard.sh, secret-scan.sh,
-enforce-branch.sh, merge-gate.sh, verify-gate.sh, verify-gate-quick-chain.sh —
+enforce-branch.sh, merge-gate.sh, verify-gate.sh, verify-gate-quick-chain.sh,
+qx-verify-baseline.sh —
 lives in exactly ONE place: plugins/quetrex-factory/scripts/ (the one-copy
 rule). Changing one requires explicit operator approval
 (QUETREX_UNLOCK_FLOOR=1). verify-gate.sh's quick-chain-on-Stop behavior must

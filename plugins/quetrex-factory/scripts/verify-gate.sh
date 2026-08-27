@@ -262,6 +262,23 @@ if ! source "$QX_HELPER" 2>/dev/null || ! command -v qx_apply_quick_cap >/dev/nu
 fi
 qx_apply_quick_cap
 
+# --- PRE-EXISTING RED baseline + green ratchet (sourced-only) ---------------
+# Answers, BY MEASUREMENT, "was this command already failing at the base of the
+# current work?" — never by pattern-matching output. It decides only whether the
+# agent may END ITS TURN: a pre-existing red is still ledgered with its REAL
+# non-zero exit, so merge-gate.sh GATE 3 still refuses the merge. Rationale,
+# threat model and accepted residual live in qx-verify-baseline.sh.
+# Fail-closed on a missing helper, same shape as the quick-chain helper above.
+QX_BASELINE_HELPER="$(dirname "${BASH_SOURCE[0]}")/qx-verify-baseline.sh"
+# shellcheck source=qx-verify-baseline.sh
+if ! source "$QX_BASELINE_HELPER" 2>/dev/null || ! command -v qx_baseline_is_preexisting >/dev/null 2>&1; then
+  printf 'VERIFY GATE MISCONFIGURED: required helper %s is missing or failed to load — refusing to run unverified. Reinstall/republish the plugin.
+' "$QX_BASELINE_HELPER" >&2
+  exit 2
+fi
+qx_baseline_init "$ROOT" "$QDIR" "$HEAD_SHA"
+trap 'qx_baseline_cleanup' EXIT
+
 # --- helpers ---------------------------------------------------------------
 
 # Emit a Stop/SubagentStop block and exit 0 (the only honored form).
@@ -441,6 +458,9 @@ chmod 600 "$LOG" 2>/dev/null
 # excused into a green finish.
 RED=0
 SKIPPED=0
+PREEXISTING=0        # a chain command was already red at the base of this work
+PREEXISTING_LINES=""
+PREEXISTING_CMDS=""
 SKIP_LINES=""
 SKIPPED_CMDS=""
 FAILED_CMD=""
@@ -582,17 +602,47 @@ TIME BUDGET EXHAUSTED: exceeded its ${remaining}s share of the ${BUDGET_TOTAL}s 
     break
   fi
 
+  # Asked BEFORE the ledger append so the line can carry the verdict, and only
+  # of a genuine non-zero exit. A base run killed by the cap proves nothing and
+  # the failure is treated as genuine (fail closed).
+  PREEXISTING_THIS=0
+  if [ "$code" -ne 0 ]; then
+    base_now=$(date +%s)
+    base_cap=$((BUDGET_TOTAL - (base_now - BUDGET_START)))
+    [ "$base_cap" -gt 0 ] || base_cap=1
+    if qx_baseline_is_preexisting "$cmd" "$base_cap"; then
+      PREEXISTING_THIS=1
+    fi
+  fi
+
   # Append to the append-only ledger (best-effort; failure to log never blocks).
   # `sha` pins this result to the exact commit it was proven against — the merge
   # gate requires the latest GREEN line for each chain command to carry the
   # CURRENT HEAD sha, so a stale green from an earlier commit cannot pass.
+  # A pre-existing red carries its REAL non-zero exit plus preexisting:true —
+  # deliberately NOT exit 0, so merge-gate.sh keeps reading it as "not proven"
+  # and this can never become a way to ship red code.
   jq -cn \
     --arg ts "$ts" --arg cmd "$cmd" --arg cwd "$ROOT" \
     --arg sha "$HEAD_SHA" \
     --argjson exit "$code" --arg tail "$t20" \
-    '{ts:$ts,cmd:$cmd,cwd:$cwd,sha:$sha,exit:$exit,tail:$tail}' >> "$LEDGER" 2>/dev/null
+    --argjson pre "$([ "$PREEXISTING_THIS" -eq 1 ] && echo true || echo false)" \
+    '{ts:$ts,cmd:$cmd,cwd:$cwd,sha:$sha,exit:$exit,tail:$tail}
+     + (if $pre then {preexisting:true} else {} end)' >> "$LEDGER" 2>/dev/null
 
   if [ "$code" -eq 0 ]; then
+    qx_baseline_mark_green "$cmd"   # THE RATCHET ARMS — never excusable again
+    continue
+  fi
+
+  # Already red at this work's base: not this agent's failure. Recorded above
+  # (never as a green), reported on the allow path, chain CONTINUES. Sets no
+  # RED, consumes no self-heal attempt, cannot escalate.
+  if [ "$PREEXISTING_THIS" -eq 1 ]; then
+    PREEXISTING=1
+    PREEXISTING_LINES="${PREEXISTING_LINES}VERIFY PRE-EXISTING RED: \`${cmd}\` exited ${code} in ${ROOT} — it was ALREADY failing at ${QXB_BASE_DESC}, so it is not this session's doing. BLOCKS nothing, and is NOT a pass: it is never counted green and merge-gate.sh still refuses to merge until it is.
+"
+    PREEXISTING_CMDS="${PREEXISTING_CMDS:+$PREEXISTING_CMDS, }\`${cmd}\`"
     continue
   fi
 
@@ -637,11 +687,11 @@ if [ "$RED" -eq 0 ]; then
   # unparseable and read as fail-open). They are deliberately plain text,
   # never JSON, so they can never be misread as a decision object.
   [ -n "$SKIP_LINES" ] && printf '%s' "$SKIP_LINES"
-  # A skip is NOT a green: it proves nothing about the skipped command, so a
-  # run that skipped anything must not reset the self-heal counter or clear a
-  # prior escalation. Only a run where every chain command genuinely executed
-  # and exited 0 may do either (CONTAINMENT — see header comment / AC7).
-  if [ "$SKIPPED" -eq 0 ]; then
+  [ -n "$PREEXISTING_LINES" ] && printf '%s' "$PREEXISTING_LINES"
+  # Neither a skip nor a pre-existing red is a green, so neither may reset the
+  # self-heal counter or clear a prior escalation. Only a run where every chain
+  # command genuinely executed and exited 0 may (CONTAINMENT / AC7).
+  if [ "$SKIPPED" -eq 0 ] && [ "$PREEXISTING" -eq 0 ]; then
     echo 0 > "$ATTEMPTS_FILE" 2>/dev/null   # reset self-heal counter on green
     rm -f "$ESCALATION" 2>/dev/null         # green clears any prior escalation
   fi
@@ -673,6 +723,12 @@ fi
 SKIP_NOTE=""
 if [ -n "$SKIPPED_CMDS" ]; then
   SKIP_NOTE=" NOTE: also SKIPPED before this failure (requiredEnv unavailable, never proven): ${SKIPPED_CMDS}."
+fi
+
+# Same disclosure for anything excused as PRE-EXISTING RED in this run — the
+# operator must never guess which reds were counted against the agent.
+if [ -n "$PREEXISTING_CMDS" ]; then
+  SKIP_NOTE="${SKIP_NOTE} NOTE: also red at ${QXB_BASE_DESC:-the base} and therefore not counted against this session (never proven): ${PREEXISTING_CMDS}."
 fi
 
 # QUIET BLOCK REASONS (fix part a). One labelled summary line — what ran,
