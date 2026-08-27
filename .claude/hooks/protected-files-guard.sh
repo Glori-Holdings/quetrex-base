@@ -25,25 +25,42 @@
 # make the guard trivially self-authorizing). Every unlocked write is
 # RECORDED, never silent.
 #
-# SEC-6 (security review, 2026-08-21): the unlock is NOT self-granting via
-# the ONE path this hook actually closes — an agent cannot smuggle
-# QUETREX_UNLOCK_FLOOR=1 into the environment of the SAME Bash command that
-# performs the edit, since a PreToolUse hook sees that command's own
-# env only if the agent explicitly prefixes it there, and no other
-# in-session mechanism lets a Bash tool call inject an env var into a
-# DIFFERENT, later PreToolUse invocation. What this guard does NOT close:
+# SEC-6 (security review, 2026-08-21; FIXED 2026-08-26, operator-approved):
+# the unlock is NOT self-granting via the ONE path this hook actually
+# closes — an agent cannot smuggle QUETREX_UNLOCK_FLOOR=1 into the
+# environment of the SAME Bash command that performs the edit, since a
+# PreToolUse hook sees that command's own env only if the agent explicitly
+# prefixes it there, and no other in-session mechanism lets a Bash tool
+# call inject an env var into a DIFFERENT, later PreToolUse invocation.
+# What this guard does NOT close, and cannot close by construction:
 # `.claude/settings.json`'s top-level `env` block IS passed through to
 # every hook subprocess quetrex-base spawns (confirmed empirically), so an
 # agent that already has write access to settings.json — the SAME
-# permission surface that gates most other repo-wide changes — could add
-# QUETREX_UNLOCK_FLOOR=1 there and unlock every future floor-script write
-# for the rest of the session, not just one command. That is a real,
-# disclosed limitation of THIS mechanism, not a false guarantee: the
-# original text here claimed the unlock "cannot be self-granted" without
-# qualification, which settings.json's env reaching hook subprocesses
-# makes plainly false. Reported to the operator as a design gap in the
-# unlock mechanism itself (not a defect in this hook's enforcement of it);
-# the mechanism is unchanged pending that decision.
+# permission surface that gates most other repo-wide changes — can still
+# put QUETREX_UNLOCK_FLOOR into that channel. The 2026-08-21 text
+# originally left this open: a BARE QUETREX_UNLOCK_FLOOR=1 sitting in that
+# env block (or in any ambient shell that happened to export it once, or
+# in a terminal from unrelated prior work) unlocked EVERY floor-script
+# write for the REST OF THE SESSION, silently — one blanket value, every
+# target, for as long as the process env carried it.
+#
+# THE FIX (2026-08-26): the unlock now NAMES what it unlocks. The value
+# must be the exact basename of the file actually being written (e.g.
+# QUETREX_UNLOCK_FLOOR=merge-gate.sh), or a colon/comma-separated list of
+# basenames for a command that touches more than one
+# (QUETREX_UNLOCK_FLOOR=merge-gate.sh:verify-gate.sh). A bare "1" — or any
+# value that is not this exact file's basename — is no longer a blanket
+# grant; it authorizes NOTHING, denies, and the deny message says plainly
+# that an ambient/blanket value was present and no longer authorizes
+# anything, naming the scoped form the operator actually needs. This does
+# not close the settings.json channel — that channel still reaches every
+# hook subprocess, by design (`env` blocks are meant to) — but it converts
+# what that channel can grant from "unlock every floor script for the rest
+# of the session" to "unlock exactly the named file(s), and only those,"
+# which is a deliberate, auditable, per-target act rather than an ambient
+# accident. Every unlocked write is still RECORDED (allow_unlocked), and
+# the log line now records the scoped value that actually authorized the
+# write, never a literal "=1".
 #
 # DECISION SCHEMA: PreToolUse denies via
 #   {"hookSpecificOutput":{"hookEventName":"PreToolUse",
@@ -295,9 +312,21 @@ names_protected_path_or_symlink() {
 }
 
 # --- deny / allow (correct PreToolUse schema; exit 0) -----------------------
+# deny <reason> <target-basename> -- <target-basename> is the exact
+# basename the operator would need to name to unlock THIS write (e.g.
+# "merge-gate.sh", "project.json", "verify.json"). SEC-6 FIX: if
+# QUETREX_UNLOCK_FLOOR is present in the environment but did not name this
+# target (a bare "1", a typo, or a value scoped to a DIFFERENT file), the
+# deny message says so explicitly -- an operator hitting this is never
+# mystified about why a value they clearly set did nothing.
 deny() {
-  local reason="$1"
-  reason="$reason To make this change anyway, the operator (not the agent) must set QUETREX_UNLOCK_FLOOR=1 in the environment of the command that performs the edit — never a marker file in the repo, which an agent could create for itself."
+  local reason="$1" target="${2:-}" ambient="${QUETREX_UNLOCK_FLOOR:-}"
+  local scoped_hint="QUETREX_UNLOCK_FLOOR=${target:-<basename>} (or a colon/comma-separated list of basenames including it)"
+  if [ -n "$ambient" ]; then
+    reason="$reason A QUETREX_UNLOCK_FLOOR value (\"$ambient\") was already present in the environment -- an ambient or blanket value (a bare \"1\", a stale export from an earlier command, or a settings.json env block) no longer authorizes anything here; it did not name this exact file. To make this change anyway, the operator (not the agent) must set $scoped_hint in the environment of the command that performs the edit — never a marker file in the repo, which an agent could create for itself."
+  else
+    reason="$reason To make this change anyway, the operator (not the agent) must set $scoped_hint in the environment of the command that performs the edit — never a marker file in the repo, which an agent could create for itself."
+  fi
   if command -v jq >/dev/null 2>&1; then
     jq -cn --arg r "$reason" \
       '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'
@@ -307,22 +336,22 @@ deny() {
   exit 2
 }
 
-# UNLOCKED: an explicit, operator-set env var authorizes this one write. Never
-# silent — record it, then allow via an explicit decision (never bare
-# silence) so the unlock is auditable in the same place a normal deny would
-# have appeared.
-allow_unlocked() {  # allow_unlocked <what>
-  local what="$1" root logf ts
+# UNLOCKED: an explicit, operator-set env var NAMING this exact file
+# authorizes this one write. Never silent — record it, then allow via an
+# explicit decision (never bare silence) so the unlock is auditable in the
+# same place a normal deny would have appeared.
+allow_unlocked() {  # allow_unlocked <what> <target-basename>
+  local what="$1" target="${2:-}" root logf ts
   root="$ROOT"
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   if [ -n "$root" ] && [ -d "$root" ]; then
     mkdir -p "$root/.quetrex" 2>/dev/null
     logf="$root/.quetrex/protected-files-unlock.log"
     if [ -e "$logf" ] || [ -L "$logf" ]; then rm -f "$logf" 2>/dev/null; fi
-    ( umask 077; printf '%s | QUETREX_UNLOCK_FLOOR=1 | tool: %s | %s\n' "$ts" "$TOOL_NAME" "$what" >> "$logf" )
+    ( umask 077; printf '%s | QUETREX_UNLOCK_FLOOR=%s | tool: %s | %s\n' "$ts" "$target" "$TOOL_NAME" "$what" >> "$logf" )
     chmod 600 "$logf" 2>/dev/null
   fi
-  local reason="UNLOCKED (QUETREX_UNLOCK_FLOOR=1): a safety-floor script edit was explicitly authorized by the operator and recorded ($what)."
+  local reason="UNLOCKED (QUETREX_UNLOCK_FLOOR=$target): a safety-floor script edit was explicitly authorized by the operator, scoped to this exact file, and recorded ($what)."
   if command -v jq >/dev/null 2>&1; then
     jq -cn --arg r "$reason" \
       '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",permissionDecisionReason:$r}}'
@@ -330,7 +359,89 @@ allow_unlocked() {  # allow_unlocked <what>
   exit 0
 }
 
-is_unlocked() { [ "${QUETREX_UNLOCK_FLOOR:-}" = "1" ]; }
+# is_unlocked <target-basename> -- SEC-6 FIX: true iff QUETREX_UNLOCK_FLOOR
+# names this EXACT basename (case-sensitive), either alone or as one item
+# in a colon- or comma-separated list of basenames (so a single command
+# that touches two floor scripts can be authorized in one shot). A bare
+# "1", an empty value, or any value that does not contain this exact
+# basename as a whole list item unlocks NOTHING -- see the SEC-6 header
+# note above for why a blanket grant is refused.
+is_unlocked() {
+  local target="${1:-}" val="${QUETREX_UNLOCK_FLOOR:-}" item
+  [ -n "$target" ] || return 1
+  [ -n "$val" ] || return 1
+  # SPLIT WITHOUT GLOBBING. An unquoted `for item in $val` under a `:,` IFS
+  # also performs PATHNAME EXPANSION, so QUETREX_UNLOCK_FLOOR=* expanded
+  # against the hook's cwd and matched any file sitting there -- a single `*`
+  # re-created exactly the blanket grant this scoping exists to kill, keyed on
+  # filenames an agent can create for itself (a bare ./merge-gate.sh is not a
+  # protected path, so nothing stops it writing one). That directly violated
+  # this mechanism's own promise, printed in the deny message below: "never a
+  # marker file in the repo, which an agent could create for itself." Found by
+  # security review of the commit that introduced this scoping; `read -ra` does
+  # not glob, and is what deny-guard.sh already uses -- the two guards must
+  # split this value identically.
+  local -a items=()
+  IFS=':,' read -ra items <<< "$val"
+  for item in "${items[@]}"; do
+    [ "$item" = "$target" ] && return 0
+  done
+  return 1
+}
+
+# qx_protected_basename_in <text> -- returns the FIRST protected floor-
+# script basename (deny-guard.sh, secret-scan.sh, enforce-branch.sh,
+# merge-gate.sh, verify-gate.sh, verify-gate-quick-chain.sh) found in
+# <text>, boundary-matched the same way PROT_BARE_ERE does. Checks
+# verify-gate-quick-chain.sh BEFORE verify-gate.sh so a text naming the
+# quick-chain helper reports the more specific basename rather than never
+# matching (the literal substring "verify-gate.sh" never occurs inside
+# "verify-gate-quick-chain.sh", so order does not change correctness here,
+# but keeps the more specific name first on principle). Prints nothing and
+# returns 1 if no protected basename is present.
+qx_protected_basename_in() {
+  local text="$1" alt
+  for alt in verify-gate-quick-chain deny-guard secret-scan enforce-branch merge-gate verify-gate; do
+    if printf '%s' "$text" | grep -Eq "(^|[^A-Za-z0-9_.-])${alt}\\.sh([^A-Za-z0-9_.-]|\$)"; then
+      printf '%s.sh' "$alt"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# qx_protected_target_basename <candidate> -- the basename an unlock must
+# name to authorize a write to <candidate>. Mirrors
+# names_protected_path_or_symlink's own direct-then-one-hop-symlink logic
+# so the reported basename is always the REAL protected target, not the
+# symlink's own name when the two differ (`ln -s merge-gate.sh /tmp/x` must
+# require QUETREX_UNLOCK_FLOOR=merge-gate.sh, not QUETREX_UNLOCK_FLOOR=x).
+# Falls back to a plain basename() only if neither match (should not
+# normally be reached — callers only invoke this after already confirming
+# protection — but never emits nothing).
+qx_protected_target_basename() {
+  local t="$1" b link_target hops=0
+  # RESOLVE SYMLINKS FIRST. This used to read the PATH TEXT before the link
+  # target, which inverted the whole point of scoping: under a legitimate
+  # QUETREX_UNLOCK_FLOOR=merge-gate.sh an agent could `ln -sfn .../verify-gate.sh
+  # ./merge-gate.sh` and then write through it -- the text said merge-gate.sh,
+  # so the unlock matched, and verify-gate.sh was clobbered. Worse, naming the
+  # file ACTUALLY being written was DENIED and the deny text told the operator
+  # to name the decoy. The unlock must name what is really written, so follow
+  # the link chain (bounded; a cycle must not hang a PreToolUse hook) and derive
+  # the required name from the real destination. Found by security review.
+  while [ -L "$t" ] && [ "$hops" -lt 10 ]; do
+    link_target=$(readlink "$t" 2>/dev/null) || break
+    [ -n "$link_target" ] || break
+    case "$link_target" in
+      /*) t="$link_target" ;;
+      *)  t="$(dirname "$t")/$link_target" ;;
+    esac
+    hops=$((hops + 1))
+  done
+  b=$(qx_protected_basename_in "$t") && { printf '%s' "$b"; return 0; }
+  basename "$t" 2>/dev/null
+}
 
 # =============================================================================
 # >>> QX-CMDSCAN BEGIN — copied verbatim from plugins/quetrex-factory/scripts/merge-gate.sh
@@ -779,20 +890,21 @@ if [ "$TOOL_NAME" = "Write" ] || [ "$TOOL_NAME" = "Edit" ]; then
   _pj_norm=$(qx_normalize_path "$FILE_PATH")
   case "$_pj_norm" in
     */.quetrex/project.json|.quetrex/project.json)
-      is_unlocked && allow_unlocked "$TOOL_NAME $FILE_PATH"
-      deny "PROTECTED ARMING FILE: this $TOOL_NAME targets \`$FILE_PATH\` (.quetrex/project.json) -- the file that arms deny-guard, secret-scan, enforce-branch, merge-gate, verify-gate, edit-gate and this guard for the whole repo. Overwriting it in an armed repo would silently disable the entire safety floor for the rest of the session."
+      is_unlocked "project.json" && allow_unlocked "$TOOL_NAME $FILE_PATH" "project.json"
+      deny "PROTECTED ARMING FILE: this $TOOL_NAME targets \`$FILE_PATH\` (.quetrex/project.json) -- the file that arms deny-guard, secret-scan, enforce-branch, merge-gate, verify-gate, edit-gate and this guard for the whole repo. Overwriting it in an armed repo would silently disable the entire safety floor for the rest of the session." "project.json"
       exit 0
       ;;
     */.quetrex/verify.json|.quetrex/verify.json)
-      is_unlocked && allow_unlocked "$TOOL_NAME $FILE_PATH"
-      deny "PROTECTED VERIFY CHAIN: this $TOOL_NAME targets \`$FILE_PATH\` (.quetrex/verify.json) -- the file that defines the verify chain verify-gate.sh actually gates the tree on. Overwriting it in an armed repo could silently replace the real chain with a no-op (e.g. {\"verify\":[\"true\"]}) and let every future Stop pass on a red tree."
+      is_unlocked "verify.json" && allow_unlocked "$TOOL_NAME $FILE_PATH" "verify.json"
+      deny "PROTECTED VERIFY CHAIN: this $TOOL_NAME targets \`$FILE_PATH\` (.quetrex/verify.json) -- the file that defines the verify chain verify-gate.sh actually gates the tree on. Overwriting it in an armed repo could silently replace the real chain with a no-op (e.g. {\"verify\":[\"true\"]}) and let every future Stop pass on a red tree." "verify.json"
       exit 0
       ;;
   esac
 
   names_protected_path_or_symlink "$FILE_PATH" || exit 0
-  is_unlocked && allow_unlocked "$TOOL_NAME $FILE_PATH"
-  deny "PROTECTED FLOOR SCRIPT: this $TOOL_NAME targets \`$FILE_PATH\`, one of the safety-floor scripts (deny-guard.sh, secret-scan.sh, enforce-branch.sh, merge-gate.sh, verify-gate.sh) or its quick-chain helper. Denied by default — see .claude/CLAUDE.md."
+  _floor_target=$(qx_protected_target_basename "$FILE_PATH")
+  is_unlocked "$_floor_target" && allow_unlocked "$TOOL_NAME $FILE_PATH" "$_floor_target"
+  deny "PROTECTED FLOOR SCRIPT: this $TOOL_NAME targets \`$FILE_PATH\`, one of the safety-floor scripts (deny-guard.sh, secret-scan.sh, enforce-branch.sh, merge-gate.sh, verify-gate.sh) or its quick-chain helper. Denied by default — see .claude/CLAUDE.md." "$_floor_target"
   exit 0
 fi
 
@@ -804,6 +916,7 @@ fi
 SEGMENTS=$(split_segments_quote_aware "$COMMAND")
 PENDING_CD=""
 HIT_SEG=""
+HIT_TARGET=""
 # SEC-13: fd bindings from `exec N> path`, persisted across every segment of
 # THIS one command string (never across separate tool calls -- same
 # documented per-call boundary as PENDING_CD and the rest of this hook).
@@ -826,11 +939,12 @@ while IFS= read -r seg; do
     [ -n "$t" ] || continue
     if names_protected_path_or_symlink "$t"; then
       HIT_SEG="$norm"
+      HIT_TARGET="$t"
       break
     fi
     if names_bare_protected "$t" && [ -n "$PENDING_CD" ]; then
       case "$PENDING_CD" in
-        */quetrex-factory/scripts) HIT_SEG="$norm" ;;
+        */quetrex-factory/scripts) HIT_SEG="$norm"; HIT_TARGET="$t" ;;
       esac
       [ -n "$HIT_SEG" ] && break
     fi
@@ -839,11 +953,18 @@ while IFS= read -r seg; do
 
   if qx_is_interpreter_inline_write "$norm"; then
     HIT_SEG="$norm"
+    HIT_TARGET="$norm"
     break
   fi
 done <<< "$SEGMENTS"
 
 [ -n "$HIT_SEG" ] || exit 0
 
-is_unlocked && allow_unlocked "Bash: $HIT_SEG"
-deny "PROTECTED FLOOR SCRIPT: this Bash command writes to one of the safety-floor scripts (deny-guard.sh, secret-scan.sh, enforce-branch.sh, merge-gate.sh, verify-gate.sh) or its quick-chain helper — offending segment: \`$HIT_SEG\`. Denied by default — see .claude/CLAUDE.md."
+# HIT_TARGET is either a real write-destination token (direct path or bare
+# basename, per protected_write_targets above) or, for the interpreter
+# inline-write fallback, the whole normalized segment text -- either way
+# qx_protected_target_basename resolves it to the real protected basename
+# the unlock must name.
+HIT_BASENAME=$(qx_protected_target_basename "${HIT_TARGET:-$HIT_SEG}")
+is_unlocked "$HIT_BASENAME" && allow_unlocked "Bash: $HIT_SEG" "$HIT_BASENAME"
+deny "PROTECTED FLOOR SCRIPT: this Bash command writes to one of the safety-floor scripts (deny-guard.sh, secret-scan.sh, enforce-branch.sh, merge-gate.sh, verify-gate.sh) or its quick-chain helper — offending segment: \`$HIT_SEG\`. Denied by default — see .claude/CLAUDE.md." "$HIT_BASENAME"

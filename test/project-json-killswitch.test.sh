@@ -15,7 +15,11 @@
 #
 # AC1: every Bash kill-switch vector against deny-guard.sh -> DENY in an
 #      ARMED repo.
-# AC2: every AC1 vector -> ALLOW (silent) with QUETREX_UNLOCK_FLOOR=1.
+# AC2: every AC1 vector -> ALLOW (silent) only with a SCOPED unlock that NAMES
+#      the file it unlocks. A blanket QUETREX_UNLOCK_FLOOR=1 -- an ambient
+#      export, or a settings.json env block, which reaches every hook
+#      subprocess -- authorizes NOTHING (SEC-6). AC2b/AC2c prove the blanket
+#      form is refused and that a scoped value does not leak across targets.
 # AC3: Write AND Edit of .quetrex/project.json -> DENY in an ARMED repo,
 #      both an absolute and a cwd-relative path shape.
 # AC4: AC3 -> ALLOW+RECORDED with QUETREX_UNLOCK_FLOOR=1.
@@ -87,20 +91,27 @@ fire_bash() {
   local hook="$1" cmd="$2" unlock="${3:-}"
   local payload
   payload="$(jq -cn --arg c "$cmd" --arg d "$FIXTURE" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')"
-  if [ "$unlock" = "1" ]; then
-    printf '%s' "$payload" | env QUETREX_UNLOCK_FLOOR=1 bash "$hook" 2>&1
+  # Pass the unlock value through LITERALLY. This used to hardcode `=1` and
+  # treat every other value as "unset" -- which silently turned any scoped-value
+  # assertion into a test of the unset path, passing for the wrong reason.
+  if [ -n "$unlock" ]; then
+    printf '%s' "$payload" | env QUETREX_UNLOCK_FLOOR="$unlock" bash "$hook" 2>&1
   else
     printf '%s' "$payload" | env -u QUETREX_UNLOCK_FLOOR bash "$hook" 2>&1
   fi
 }
 
-# fire_write <hook> <tool> <file_path> [1 to unlock] -> emits the hook's stdout
+# fire_write <hook> <tool> <file_path> [unlock-value] -> emits the hook's
+# stdout. Used only against PROTECTED_GUARD (.claude/hooks/protected-files-
+# guard.sh) in this file -- SEC-6 (2026-08-26) scopes its unlock to the
+# exact basename being written, so <unlock-value> must now be that basename
+# (e.g. "project.json"), never a bare "1", to permit the write.
 fire_write() {
   local hook="$1" tool="$2" fp="$3" unlock="${4:-}"
   local payload
   payload="$(jq -cn --arg t "$tool" --arg p "$fp" --arg d "$FIXTURE" '{tool_name:$t,tool_input:{file_path:$p},cwd:$d}')"
-  if [ "$unlock" = "1" ]; then
-    printf '%s' "$payload" | env QUETREX_UNLOCK_FLOOR=1 bash "$hook" 2>&1
+  if [ -n "$unlock" ]; then
+    printf '%s' "$payload" | env QUETREX_UNLOCK_FLOOR="$unlock" bash "$hook" 2>&1
   else
     printf '%s' "$payload" | env -u QUETREX_UNLOCK_FLOOR bash "$hook" 2>&1
   fi
@@ -132,13 +143,69 @@ for v in "${VECTORS[@]}"; do
     notok "AC1: deny-guard did NOT deny kill-switch vector: $v [$OUT]"
   fi
 
-  OUT_UNLOCKED="$(fire_bash "$DENY_GUARD" "$v" "1")"
-  if is_silent "$OUT_UNLOCKED"; then
-    ok "AC2: deny-guard allows (silent, unlocked) kill-switch vector: $v"
+  # The scoped value this vector requires. `rm -rf .quetrex` removes BOTH
+  # arming files, so it must name both -- naming one is not enough.
+  case "$v" in
+    "rm -rf .quetrex") SCOPED="project.json:verify.json" ;;
+    *)                 SCOPED="project.json" ;;
+  esac
+
+  OUT_SCOPED="$(fire_bash "$DENY_GUARD" "$v" "$SCOPED")"
+  if is_silent "$OUT_SCOPED"; then
+    ok "AC2: deny-guard allows (silent) with the SCOPED unlock '$SCOPED': $v"
   else
-    notok "AC2: deny-guard did NOT silently allow unlocked vector: $v [$OUT_UNLOCKED]"
+    notok "AC2: deny-guard did NOT allow the correctly-scoped unlock '$SCOPED': $v [$OUT_SCOPED]"
+  fi
+
+  # AC2b -- the blanket form. This is the NEW block: it ALLOWED before this
+  # change, which is exactly why an ambient export silently unlocked the whole
+  # session. AC2d below proves that against main's own guard.
+  OUT_BLANKET="$(fire_bash "$DENY_GUARD" "$v" "1")"
+  if is_deny "$OUT_BLANKET"; then
+    ok "AC2b: deny-guard REFUSES a blanket QUETREX_UNLOCK_FLOOR=1: $v"
+  else
+    notok "AC2b: a blanket QUETREX_UNLOCK_FLOOR=1 still unlocked the kill switch: $v [$OUT_BLANKET]"
+  fi
+
+  # AC2c -- a scoped value must not leak across targets.
+  OUT_WRONG="$(fire_bash "$DENY_GUARD" "$v" "merge-gate.sh")"
+  if is_deny "$OUT_WRONG"; then
+    ok "AC2c: a value naming a DIFFERENT file does not unlock: $v"
+  else
+    notok "AC2c: an unrelated scoped value unlocked this vector: $v [$OUT_WRONG]"
   fi
 done
+
+# AC2e -- the refusal must TEACH: an operator who hits the blanket case needs
+# the exact value to set, and needs to be told their ambient one is inert.
+# A deny nobody can act on just gets worked around.
+OUT_MSG="$(fire_bash "$DENY_GUARD" "rm -f .quetrex/project.json" "1")"
+if printf '%s' "$OUT_MSG" | grep -q 'QUETREX_UNLOCK_FLOOR=project.json'; then
+  ok "AC2e: the blanket-case refusal names the exact scoped value to set"
+else
+  notok "AC2e: the refusal does not name the required scoped form [$OUT_MSG]"
+fi
+if printf '%s' "$OUT_MSG" | grep -qi 'ambient\|blanket'; then
+  ok "AC2e: the refusal states that an ambient/blanket value no longer authorizes anything"
+else
+  notok "AC2e: the refusal never explains that the ambient value was ignored [$OUT_MSG]"
+fi
+
+# AC2d FAIL-FIRST -- prove AC2b is a genuine NEW block by running the identical
+# blanket payload against main's deny-guard, which must ALLOW it. Without this
+# the whole change could be a no-op and every assertion above would still pass.
+MAIN_GUARD="$(mktemp "${TMPDIR:-/tmp}/deny-guard-main.XXXXXX")"
+if git -C "$REPO_ROOT" show main:plugins/quetrex-factory/scripts/deny-guard.sh > "$MAIN_GUARD" 2>/dev/null && [ -s "$MAIN_GUARD" ]; then
+  OUT_MAIN="$(fire_bash "$MAIN_GUARD" "rm -f .quetrex/project.json" "1")"
+  if is_silent "$OUT_MAIN"; then
+    ok "AC2d FAIL-FIRST: main's deny-guard DID allow a blanket QUETREX_UNLOCK_FLOOR=1 -- the new refusal is a real, deliberate change"
+  else
+    notok "AC2d FAIL-FIRST: main's guard already denied the blanket form, so AC2b proves nothing new [$OUT_MAIN]"
+  fi
+else
+  notok "AC2d FAIL-FIRST: could not read main:plugins/quetrex-factory/scripts/deny-guard.sh to prove the block is new"
+fi
+rm -f "$MAIN_GUARD"
 
 # =============================================================================
 # AC6 (deny-guard side) — an unrelated command in the SAME armed repo is
@@ -189,11 +256,18 @@ for shape in "$FIXTURE/.quetrex/project.json" ".quetrex/project.json"; do
       notok "AC3: protected-files-guard did NOT deny $tool of .quetrex/project.json (shape: $shape) [$OUT]"
     fi
 
-    OUT_UNLOCKED="$(fire_write "$PROTECTED_GUARD" "$tool" "$shape" "1")"
+    OUT_UNLOCKED="$(fire_write "$PROTECTED_GUARD" "$tool" "$shape" "project.json")"
     if is_allow "$OUT_UNLOCKED"; then
-      ok "AC4: protected-files-guard allows+records unlocked $tool of .quetrex/project.json (shape: $shape)"
+      ok "AC4: protected-files-guard allows+records unlocked (QUETREX_UNLOCK_FLOOR=project.json) $tool of .quetrex/project.json (shape: $shape)"
     else
       notok "AC4: protected-files-guard did NOT allow the unlocked $tool (shape: $shape) [$OUT_UNLOCKED]"
+    fi
+
+    OUT_BLANKET="$(fire_write "$PROTECTED_GUARD" "$tool" "$shape" "1")"
+    if is_deny "$OUT_BLANKET"; then
+      ok "AC4 (SEC-6): a blanket QUETREX_UNLOCK_FLOOR=1 no longer unlocks $tool of .quetrex/project.json (shape: $shape)"
+    else
+      notok "AC4 (SEC-6): expected a blanket =1 to be denied for $tool of .quetrex/project.json (shape: $shape) [$OUT_BLANKET]"
     fi
   done
 done

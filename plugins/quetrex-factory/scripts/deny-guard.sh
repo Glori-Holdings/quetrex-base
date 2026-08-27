@@ -351,9 +351,26 @@ target_armed() {  # target_armed <explicit-dir-or-empty> [<anchor-override>]
 # per-segment via target_armed(), never just the session's own repo — an
 # unarmed repo has no gates at all, by the same rule everything else here
 # already follows, so /quetrex-setup:init creating project.json for the first
-# time is unaffected), and is itself bypassable only by the same
-# operator-approved QUETREX_UNLOCK_FLOOR=1 escape hatch every other floor
-# script honors.
+# time is unaffected).
+#
+# SCOPED UNLOCK (2026-08-26, mirrors .claude/hooks/protected-files-guard.sh's
+# own SEC-6 fix — the two guards must never disagree). This used to be
+# bypassable by a bare QUETREX_UNLOCK_FLOOR=1 checked ONCE, up front, before
+# check_quetrex_killswitch even ran (`if [ "$QUETREX_UNLOCK_FLOOR" != "1" ];
+# then check_quetrex_killswitch ...; fi`) — so an AMBIENT blanket value (a
+# terminal that exported it once for an unrelated earlier command, or the
+# `env` block in `.claude/settings.json`, which is passed to every hook
+# subprocess) silently unlocked EVERY kill-switch target for the rest of the
+# session, with no per-target scoping at all. THE FIX: the gate below now
+# calls check_quetrex_killswitch UNCONDITIONALLY, and each protected path is
+# judged individually, inside _kg_check_path, against dg_is_unlocked_for()
+# — the unlock value must NAME the exact basename(s) of the arming file(s)
+# actually being targeted (`QUETREX_UNLOCK_FLOOR=project.json`, or a
+# colon/comma-separated list for a command that touches more than one, e.g.
+# `QUETREX_UNLOCK_FLOOR=project.json:verify.json` for `rm -rf .quetrex`,
+# which removes both at once). A bare "1" — or any value that does not name
+# the actual target(s) — authorizes NOTHING; it denies, and the deny message
+# says so explicitly, naming the scoped form the operator actually needs.
 #
 # RESIDUAL, DISCLOSED (not enumerated further — see the header's own
 # documented-residual style): this matches the literal path text handed to
@@ -375,8 +392,60 @@ _kg_is_protected_literal() {
   return 1
 }
 
-_kg_deny_path() {
-  deny "Refusing to let '$1' target .quetrex/project.json or .quetrex/verify.json (or the .quetrex directory) in an armed repo — project.json is what arms the entire safety floor (deny-guard, secret-scan, enforce-branch, merge-gate, verify-gate, edit-gate, protected-files-guard), and verify.json is what defines the verify chain that actually gates the tree. Removing, moving, or overwriting either would silently disable or swap out the gate for the rest of this session. Set QUETREX_UNLOCK_FLOOR=1 for an intentional, operator-approved re-init."
+# _kg_target_for_path <normalized-path> -- the basename(s) (space-separated)
+# an unlock must name to authorize a write/removal that resolves to <path>.
+# The two single-file shapes each need only their own basename; the
+# whole-directory and glob-wildcard shapes remove BOTH arming files at once,
+# so the unlock must name both — naming only one is not enough (see
+# dg_is_unlocked_for below, which requires every space-separated item here).
+_kg_target_for_path() {
+  case "$1" in
+    */.quetrex/project.json|.quetrex/project.json) printf 'project.json' ;;
+    */.quetrex/verify.json|.quetrex/verify.json) printf 'verify.json' ;;
+    */.quetrex|.quetrex|*/.quetrex/\*|.quetrex/\*) printf 'project.json verify.json' ;;
+  esac
+}
+
+# --- scoped unlock (SEC-6-style; mirrors protected-files-guard.sh's own
+# is_unlocked/deny). No function in this file uses `local` (existing house
+# style, see opt_is/check_rm/check_git above), so these follow suit with a
+# unique variable-name prefix instead.
+dg_unlock_names() {  # dg_unlock_names <target-basename> -- true iff named
+  _dun_target="${1:-}"
+  _dun_val="${QUETREX_UNLOCK_FLOOR:-}"
+  [ -n "$_dun_target" ] && [ -n "$_dun_val" ] || return 1
+  _dun_items=()
+  IFS=':,' read -ra _dun_items <<< "$_dun_val"
+  for _dun_item in "${_dun_items[@]}"; do
+    [ "$_dun_item" = "$_dun_target" ] && return 0
+  done
+  return 1
+}
+
+dg_is_unlocked_for() {  # dg_is_unlocked_for <space-separated-required-basenames>
+  for _diu_req in $1; do
+    dg_unlock_names "$_diu_req" || return 1
+  done
+  return 0
+}
+
+# dg_scoped_hint <space-separated-required-basenames> -- the exact
+# QUETREX_UNLOCK_FLOOR value an operator must set, joined with ':' for a
+# multi-target requirement.
+dg_scoped_hint() {
+  printf 'QUETREX_UNLOCK_FLOOR=%s' "$(printf '%s' "$1" | tr ' ' ':')"
+}
+
+_kg_deny_path() {  # _kg_deny_path <verb-description> <matched-protected-path>
+  _kg_target=$(_kg_target_for_path "$2")
+  _kg_ambient="${QUETREX_UNLOCK_FLOOR:-}"
+  _kg_reason="Refusing to let '$1' target .quetrex/project.json or .quetrex/verify.json (or the .quetrex directory) in an armed repo — project.json is what arms the entire safety floor (deny-guard, secret-scan, enforce-branch, merge-gate, verify-gate, edit-gate, protected-files-guard), and verify.json is what defines the verify chain that actually gates the tree. Removing, moving, or overwriting either would silently disable or swap out the gate for the rest of this session."
+  if [ -n "$_kg_ambient" ]; then
+    _kg_reason="$_kg_reason A QUETREX_UNLOCK_FLOOR value (\"$_kg_ambient\") was already present in the environment -- an ambient or blanket value (a bare \"1\", a stale export from an earlier command, or a settings.json env block) no longer authorizes anything here; it did not name this exact file. To make this change anyway, the operator (not the agent) must set $(dg_scoped_hint "$_kg_target") in the environment of the command that performs the edit, for an intentional, operator-approved re-init."
+  else
+    _kg_reason="$_kg_reason To make this change anyway, the operator (not the agent) must set $(dg_scoped_hint "$_kg_target") in the environment of the command that performs the edit, for an intentional, operator-approved re-init."
+  fi
+  deny "$_kg_reason"
 }
 
 _kg_check_path() {
@@ -398,8 +467,9 @@ _kg_check_path() {
   # an armed repo is not the silent no-op it used to be, but it is still a
   # one-command way to force every future Stop into that block, or (if a
   # CLAUDE.md fence also happens to exist) to silently swap the chain that
-  # actually gates the tree. Same unlock (QUETREX_UNLOCK_FLOOR=1), same
-  # reasoning as project.json.
+  # actually gates the tree. Same scoped-unlock mechanism as project.json
+  # (dg_is_unlocked_for / dg_unlock_names above), just its own basename
+  # ("verify.json") rather than "project.json".
   #
   # C2 (round-2 reviewer): a RELATIVE candidate is now anchored against the
   # tracked cd (_kill_cd — the same context target_armed() already judges
@@ -417,7 +487,8 @@ _kg_check_path() {
   p=$(qx_normalize_path "$p")
 
   if _kg_is_protected_literal "$p"; then
-    _kg_deny_path "$2"
+    _kg_t=$(_kg_target_for_path "$p")
+    dg_is_unlocked_for "$_kg_t" || _kg_deny_path "$2" "$p"
   fi
 
   # GLOB SAFETY (round-2 reviewer C2): a candidate carrying an unexpanded
@@ -461,8 +532,11 @@ _kg_check_path() {
         esac
         _kg_norm2=$(qx_normalize_path "$_kg_expanded")
         if _kg_is_protected_literal "$_kg_norm2"; then
-          shopt -u nullglob 2>/dev/null
-          _kg_deny_path "$2 (glob '$1')"
+          _kg_t2=$(_kg_target_for_path "$_kg_norm2")
+          if ! dg_is_unlocked_for "$_kg_t2"; then
+            shopt -u nullglob 2>/dev/null
+            _kg_deny_path "$2 (glob '$1')" "$_kg_norm2"
+          fi
         fi
       done
       shopt -u nullglob 2>/dev/null
@@ -602,9 +676,13 @@ check_quetrex_killswitch() {
   done <<< "$(split_segments "$_kcmd")"
 }
 
-if [ "${QUETREX_UNLOCK_FLOOR:-}" != "1" ]; then
-  check_quetrex_killswitch "$cmd"
-fi
+# SCOPED UNLOCK (2026-08-26): this used to be a blanket bypass
+# (`if [ "$QUETREX_UNLOCK_FLOOR" != "1" ]; then ... fi`) that skipped the
+# whole kill-switch scan whenever ANY value happened to be in the
+# environment. The scan now always runs; each protected target is judged
+# individually, inside _kg_check_path, against dg_is_unlocked_for() -- see
+# the SEC-ONECOPY-1 comment above check_quetrex_killswitch's definition.
+check_quetrex_killswitch "$cmd"
 
 # --- long-option PREFIX matching -------------------------------------------
 # opt_is <arg> <full-long-option> — true when <arg> is `--` plus a non-empty
