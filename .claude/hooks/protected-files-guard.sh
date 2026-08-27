@@ -19,6 +19,17 @@
 # precisely the failure this guard exists to prevent: a guard that LOOKS
 # installed and gates NOTHING. What IS verified: a "deny" decision is
 # absolute and honored in every permission mode, including bypassPermissions.
+#
+# MEASURED 2026-08-27 (Claude Code 2.1.247, factory 1.7.10) — the suspicion
+# above was CORRECT, and it is now a measurement rather than a caution. A
+# sentinel branch was temporarily patched into the live deny-guard.sh and
+# fired through a real tool call under permission_mode "bypassPermissions":
+#   permissionDecision "deny" -> BLOCKED the call.
+#   permissionDecision "ask"  -> AUTO-ALLOWED it. No prompt. The tool ran.
+# So "ask" is not a protection in the mode this operator runs. It is still
+# returned in every OTHER mode (see qxva_ask below), but nothing may DEPEND
+# on it. Proof of human intent must come from somewhere unforgeable — for
+# the verify chain, that is a typed user turn in the transcript.
 # So a write to a floor script is DENIED by default. The unlock is the
 # environment variable QUETREX_UNLOCK_FLOOR=1 — never a marker file inside
 # the repo (a file is something an agent can create for itself, which would
@@ -189,6 +200,8 @@ if [ "$JQ_OK" -eq 1 ]; then
   FILE_PATH=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
   COMMAND=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)
   SESSION_CWD=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
+  PERMISSION_MODE=$(printf '%s' "$input" | jq -r '.permission_mode // empty' 2>/dev/null)
+  TRANSCRIPT_PATH=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
 else
   # jq-free fallback (same shape as secret-scan.sh:72-77 / merge-gate.sh:107-111).
   # A missing jq must never degrade to silence: best-effort extraction, then
@@ -197,7 +210,12 @@ else
   FILE_PATH=$(printf '%s' "$input" | tr -d '\n' | sed -n 's/.*"file_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
   COMMAND=$(printf '%s' "$input" | tr -d '\n' | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p')
   SESSION_CWD=$(printf '%s' "$input" | tr -d '\n' | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+  PERMISSION_MODE=$(printf '%s' "$input" | tr -d '\n' | sed -n 's/.*"permission_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+  TRANSCRIPT_PATH=$(printf '%s' "$input" | tr -d '\n' | sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 fi
+
+PERMISSION_MODE="${PERMISSION_MODE:-}"
+TRANSCRIPT_PATH="${TRANSCRIPT_PATH:-}"
 
 [ -n "$TOOL_NAME" ] || exit 0
 case "$TOOL_NAME" in Bash|Write|Edit) : ;; *) exit 0 ;; esac
@@ -387,6 +405,294 @@ is_unlocked() {
     [ "$item" = "$target" ] && return 0
   done
   return 1
+}
+
+# ===========================================================================
+# VERIFY-CHAIN HUMAN APPROVAL (2026-08-27) -- qxva_*
+# ---------------------------------------------------------------------------
+# WHY THIS EXISTS. `.quetrex/verify.json` IS the merge gate: it lists the
+# commands QA must run and prove green. An agent that can rewrite it can turn
+# `npm test` into `true` and make a red build look green. So every Write/Edit
+# at it in an ARMED repo was hard-denied, and the ONLY way through was an
+# operator-set, scoped `QUETREX_UNLOCK_FLOOR=verify.json` in the environment
+# of the writing command. That is correct but unusable: it also blocked
+# STRENGTHENING the chain (adding `typecheck`), and it forced the operator to
+# hand-run a shell command for a change the agent had already prepared.
+#
+# THE MECHANISM, AND WHY IT IS NOT `permissionDecision:"ask"`. The obvious fix
+# is for the hook to return "ask" and let the product prompt. MEASURED
+# 2026-08-27 on Claude Code 2.1.247 (by temporarily patching the live hook and
+# firing a sentinel command through it):
+#
+#     permissionDecision "deny" -> BLOCKS, even under bypassPermissions.
+#     permissionDecision "ask"  -> AUTO-ALLOWED under bypassPermissions:
+#                                  no prompt, the tool simply runs.
+#
+# The operator runs `--dangerously-skip-permissions`, so "ask" evaporates in
+# exactly the mode that matters. It is still returned in every OTHER mode
+# (better UX where it works), but it can never be the protection.
+#
+# THE UNFORGEABLE CHANNEL. The hook payload carries `transcript_path`. In that
+# JSONL, rows with type=="user" split cleanly in two:
+#   * message.content is a STRING  -> a human TYPED it. An agent cannot author
+#     one; there is no tool whose output lands in this shape.
+#   * message.content is a LIST of tool_result blocks -> agent-generated, and
+#     forgeable (a Bash command's stdout is copied into it verbatim).
+# So the proof of human approval is: a typed user turn carrying an approval
+# phrase plus a NONCE derived from a hash of the exact bytes about to be
+# written. Binding the nonce to the content is what stops an approval being
+# replayed for a different (weaker) chain later in the same session.
+#
+# FAIL CLOSED, ALWAYS. No transcript, an unreadable transcript, no typed human
+# turns (a cloud routine), no python3, or any content we cannot determine
+# (an Edit whose old_string does not match) -> DENY. The operator env-var
+# unlock stays as the explicit override and is checked BEFORE any of this.
+#
+# SCOPE, STATED HONESTLY: this covers the Write/Edit vector -- the path an
+# agent actually takes. The Bash vector (`tee`, `>`, `cp`, `git checkout --`)
+# is still guarded by deny-guard.sh's own kill-switch and still requires the
+# scoped env-var unlock, because the bytes a shell command would produce
+# cannot be known before it runs.
+# ===========================================================================
+QXVA_PHRASE="approve verify chain"
+
+# The single python3 program behind every qxva_* query. Modes:
+#   gate  <tool_name> <file_path> <transcript_path> <phrase>   payload on stdin
+# Prints a key=value block (one per line, values newline-free) and exits 0;
+# exits non-zero only if it could not run at all.
+QXVA_PY='
+import sys, json, hashlib, os
+
+mode = sys.argv[1]
+tool, fpath, tpath, phrase = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+
+def out(k, v):
+    print("%s=%s" % (k, str(v).replace("\n", " ").replace("\r", " ")))
+
+payload = {}
+try:
+    payload = json.loads(sys.stdin.read())
+except Exception:
+    payload = {}
+ti = payload.get("tool_input") or {}
+
+# --- the bytes that would end up in the file --------------------------------
+new_text = None
+if tool == "Write":
+    c = ti.get("content")
+    if isinstance(c, str):
+        new_text = c
+elif tool == "Edit":
+    old_s, new_s = ti.get("old_string"), ti.get("new_string")
+    if isinstance(old_s, str) and isinstance(new_s, str):
+        try:
+            cur = open(fpath, "r", encoding="utf-8", errors="replace").read()
+        except Exception:
+            cur = None
+        if cur is not None and old_s in cur:
+            new_text = cur.replace(old_s, new_s) if ti.get("replace_all") else cur.replace(old_s, new_s, 1)
+
+if new_text is None:
+    out("STATUS", "UNDETERMINED")
+    sys.exit(0)
+
+# --- chain extraction -------------------------------------------------------
+def chain_of(text):
+    try:
+        d = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(d, dict):
+        return None
+    v = d.get("verify")
+    if not isinstance(v, list):
+        return None
+    cmds = [str(x) for x in v]
+    req = d.get("requiredEnv")
+    envs = []
+    if isinstance(req, dict):
+        for k in sorted(req):
+            vv = req[k]
+            if isinstance(vv, list):
+                for n in vv:
+                    envs.append("%s->%s" % (k, n))
+            else:
+                envs.append("%s->%s" % (k, vv))
+    return cmds, envs
+
+try:
+    old_text = open(fpath, "r", encoding="utf-8", errors="replace").read()
+except Exception:
+    old_text = None
+
+new_chain = chain_of(new_text)
+old_chain = chain_of(old_text) if old_text is not None else None
+
+if new_chain is None:
+    out("STATUS", "UNDETERMINED")
+    sys.exit(0)
+
+new_cmds, new_envs = new_chain
+old_cmds, old_envs = old_chain if old_chain else ([], [])
+
+NOOPS = {"true", ":", "exit 0", "exit  0"}
+def is_noop(c):
+    s = " ".join(c.split())
+    if s in NOOPS:
+        return True
+    if s.startswith("echo") and not any(t in s for t in ("&&", "||", ";", "|", "$(", "`")):
+        return True
+    return False
+
+warn = ""
+verdict = "STRENGTHENS"
+lost = [c for c in old_cmds if c not in new_cmds]
+neutered = [c for c in new_cmds if is_noop(c)]
+grew_env = [e for e in new_envs if e not in old_envs]
+
+if old_chain is None and old_text is not None and old_text.strip():
+    # there WAS a file and we could not read a chain out of it -- fail closed
+    verdict = "WEAKENS"
+    warn = "the current verify.json could not be parsed, so this write cannot be proven non-weakening"
+elif neutered:
+    verdict = "WEAKENS"
+    warn = "a chain command is a NO-OP: " + ", ".join(neutered[:3])
+elif lost:
+    verdict = "WEAKENS"
+    warn = "a chain command would be REMOVED: " + ", ".join(lost[:3])
+elif grew_env:
+    verdict = "WEAKENS"
+    warn = "requiredEnv would GROW (" + ", ".join(grew_env[:3]) + ") -- an unset var makes the gate SKIP that command"
+elif old_chain is not None and new_cmds == old_cmds and new_envs == old_envs:
+    verdict = "UNCHANGED"
+
+def numbered(cs):
+    return "  ".join("%d) %s" % (i + 1, c) for i, c in enumerate(cs)) if cs else "(empty)"
+
+nonce = hashlib.sha256(new_text.encode("utf-8")).hexdigest()[:8]
+
+# --- proof of human approval: a TYPED user turn carrying the nonce ----------
+approved = "no"
+turns = 0
+if tpath and os.path.isfile(tpath):
+    needle = (phrase + " " + nonce).lower()
+    try:
+        with open(tpath, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(row, dict) or row.get("type") != "user":
+                    continue
+                msg = row.get("message")
+                if not isinstance(msg, dict):
+                    continue
+                content = msg.get("content")
+                # STRING content == a human typed it. A list of tool_result
+                # blocks is agent-generated and is deliberately IGNORED here.
+                if not isinstance(content, str):
+                    continue
+                turns += 1
+                if needle in " ".join(content.split()).lower():
+                    approved = "yes"
+    except Exception:
+        pass
+
+out("STATUS", "OK")
+out("NONCE", nonce)
+out("VERDICT", verdict)
+out("WARN", warn)
+out("APPROVED", approved)
+out("TYPED_TURNS", turns)
+out("BEFORE", numbered(old_cmds) if old_chain is not None else "(no verify.json yet)")
+out("AFTER", numbered(new_cmds))
+out("BEFORE_ENV", ", ".join(old_envs) if old_envs else "(none)")
+out("AFTER_ENV", ", ".join(new_envs) if new_envs else "(none)")
+'
+
+# qxva_ask <reason> -- permissionDecision "ask". Returned only when the
+# session is NOT in bypassPermissions, where it was measured to be a no-op.
+qxva_ask() {
+  local reason="$1"
+  if command -v jq >/dev/null 2>&1; then
+    jq -cn --arg r "$reason" \
+      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"ask",permissionDecisionReason:$r}}'
+    exit 0
+  fi
+  printf '%s\n' "$reason" >&2
+  exit 2
+}
+
+# qxva_allow <reason> -- an explicit, recorded allow (never bare silence),
+# mirroring allow_unlocked's audit line so an approved write is as visible as
+# a denied one.
+qxva_allow() {
+  local reason="$1" logf ts
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if [ -n "${ROOT:-}" ] && [ -d "${ROOT:-}" ]; then
+    mkdir -p "$ROOT/.quetrex" 2>/dev/null
+    logf="$ROOT/.quetrex/protected-files-unlock.log"
+    if [ -L "$logf" ]; then rm -f "$logf" 2>/dev/null; fi
+    ( umask 077; printf '%s | HUMAN-APPROVED verify chain | tool: %s | %s\n' "$ts" "$TOOL_NAME" "$reason" >> "$logf" )
+    chmod 600 "$logf" 2>/dev/null
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    jq -cn --arg r "$reason" \
+      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",permissionDecisionReason:$r}}'
+  fi
+  exit 0
+}
+
+# qxva_gate <file_path> -- the verify.json Write/Edit decision. Always exits;
+# returns normally ONLY when it could not determine anything, so the caller's
+# existing hard deny stays as the fail-closed floor beneath it.
+qxva_gate() {
+  local fpath="$1" report="" status nonce verdict warn approved typed before after before_env after_env msg
+
+  command -v python3 >/dev/null 2>&1 || return 0
+  report=$(printf '%s' "$input" | python3 -c "$QXVA_PY" gate "$TOOL_NAME" "$fpath" "$TRANSCRIPT_PATH" "$QXVA_PHRASE" 2>/dev/null) || return 0
+
+  status=$(printf '%s\n' "$report"  | sed -n 's/^STATUS=//p')
+  [ "$status" = "OK" ] || return 0
+  nonce=$(printf '%s\n' "$report"      | sed -n 's/^NONCE=//p')
+  verdict=$(printf '%s\n' "$report"    | sed -n 's/^VERDICT=//p')
+  warn=$(printf '%s\n' "$report"       | sed -n 's/^WARN=//p')
+  approved=$(printf '%s\n' "$report"   | sed -n 's/^APPROVED=//p')
+  typed=$(printf '%s\n' "$report"      | sed -n 's/^TYPED_TURNS=//p')
+  before=$(printf '%s\n' "$report"     | sed -n 's/^BEFORE=//p')
+  after=$(printf '%s\n' "$report"      | sed -n 's/^AFTER=//p')
+  before_env=$(printf '%s\n' "$report" | sed -n 's/^BEFORE_ENV=//p')
+  after_env=$(printf '%s\n' "$report"  | sed -n 's/^AFTER_ENV=//p')
+  [ -n "$nonce" ] || return 0
+
+  if [ "$approved" = "yes" ]; then
+    qxva_allow "HUMAN-APPROVED ($verdict, code $nonce): the operator typed \"$QXVA_PHRASE $nonce\" in this conversation, and that code is a hash of the exact bytes being written -- BEFORE [$before] AFTER [$after]."
+  fi
+
+  # The disclosure block. Authored HERE, by the hook -- not by the agent --
+  # so what the operator reads is what is actually about to be written.
+  msg=".quetrex/verify.json is the GATE: it lists the commands QA must run and prove green before this tree may merge. Rewriting it can make a red build look green, so it needs YOUR approval, not the agent's."
+  msg="$msg  ||  CHANGE: $verdict."
+  [ -n "$warn" ] && msg="$msg  WARNING -- $warn."
+  msg="$msg  ||  BEFORE: ${before:-(none)}  ||  AFTER: ${after:-(none)}"
+  if [ "$before_env" != "$after_env" ]; then
+    msg="$msg  ||  requiredEnv BEFORE: $before_env  ->  AFTER: $after_env"
+  fi
+
+  if [ "$PERMISSION_MODE" != "bypassPermissions" ]; then
+    qxva_ask "$msg  ||  Approve this write?"
+  fi
+
+  # bypassPermissions: "ask" was MEASURED to be auto-allowed, so the only
+  # honest options are allow-on-proof or deny.
+  if [ "${typed:-0}" = "0" ]; then
+    deny "$msg  ||  DENIED: no human has typed anything in this session (an unattended or cloud run), so there is nobody to approve it. The verify chain is never changed without a person." "verify.json"
+  fi
+  deny "$msg  ||  TO APPROVE, type this line yourself, in the conversation:      $QXVA_PHRASE $nonce      ||  That code is a hash of the exact bytes above -- it cannot be reused for a different chain, and the agent cannot type it for you." "verify.json"
 }
 
 # qx_protected_basename_in <text> -- returns the FIRST protected floor-
@@ -896,6 +1202,12 @@ if [ "$TOOL_NAME" = "Write" ] || [ "$TOOL_NAME" = "Edit" ]; then
       ;;
     */.quetrex/verify.json|.quetrex/verify.json)
       is_unlocked "verify.json" && allow_unlocked "$TOOL_NAME $FILE_PATH" "verify.json"
+      # HUMAN APPROVAL (2026-08-27): qxva_gate either allows this write on
+      # proof that the operator typed a content-bound approval code, or denies
+      # it with the full BEFORE -> AFTER disclosure and that code. It returns
+      # normally ONLY when it could not determine what would be written -- in
+      # which case the original hard deny below stays as the fail-closed floor.
+      qxva_gate "$FILE_PATH"
       deny "PROTECTED VERIFY CHAIN: this $TOOL_NAME targets \`$FILE_PATH\` (.quetrex/verify.json) -- the file that defines the verify chain verify-gate.sh actually gates the tree on. Overwriting it in an armed repo could silently replace the real chain with a no-op (e.g. {\"verify\":[\"true\"]}) and let every future Stop pass on a red tree." "verify.json"
       exit 0
       ;;

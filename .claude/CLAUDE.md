@@ -19,6 +19,8 @@ This repo IS the Quetrex engine — the hooks, agents, commands and installer th
 When I correct you or you catch yourself making a mistake, before continuing, add the lesson as a one-line rule under #LESSONS so it never happens again.
 
 # LESSONS
+- A PreToolUse hook's `permissionDecision:"ask"` is AUTO-ALLOWED under `bypassPermissions` (measured 2026-08-27) — only `deny` blocks. Never let a guard DEPEND on `ask`; the unforgeable human channel is a TYPED user turn in `transcript_path` (`type=="user"` with string `message.content` — a tool_result list is agent-generated and forgeable).
+
 
 - A hook must NEVER surface a raw interpreter stack trace to the operator — it reads as "the build failed" even when nothing failed and nothing was gated. Print one labelled line: what command ran, which checkout/branch it ran in, and whether it blocks. Never execute a verify chain into a throw when a required env name is simply unset; say it was skipped and why.
 
