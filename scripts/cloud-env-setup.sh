@@ -44,10 +44,16 @@ die() { printf 'cloud-env-setup: FAILED: %s\n' "$1" >&2; exit 1; }
 # failure this script exists to prevent -- so record every distinct spelling.
 WORKSPACE="$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD")"
 [ -n "$WORKSPACE" ] && [ -d "$WORKSPACE" ] || die "cannot resolve the workspace directory (PWD=$PWD)"
-WORKSPACE_PATHS="$WORKSPACE"
+# Collect the spellings in a real ARRAY. This used to be a colon-JOINED string
+# re-split with IFS=: -- so a workspace path legitimately containing a colon was
+# shredded into fragments, the real directory was never trusted, and step 3
+# re-walked the same shredded list and "verified" the corruption.
+_ws_list=("$WORKSPACE")
 for cand in "$PWD" "$(cd "$WORKSPACE" 2>/dev/null && pwd -P)" "$(cd "$PWD" 2>/dev/null && pwd -P)"; do
   [ -n "$cand" ] || continue
-  case ":$WORKSPACE_PATHS:" in *":$cand:"*) ;; *) WORKSPACE_PATHS="$WORKSPACE_PATHS:$cand" ;; esac
+  _ws_dup=0
+  for seen in "${_ws_list[@]}"; do [ "$seen" = "$cand" ] && { _ws_dup=1; break; }; done
+  [ "$_ws_dup" = "1" ] || _ws_list+=("$cand")
 done
 HOME_DIR="${HOME:?HOME is unset}"
 CLAUDE_JSON="$HOME_DIR/.claude.json"
@@ -91,9 +97,25 @@ json_merge() {  # json_merge <file> <jq-filter> <python-expr-on-'d'>
 import json, os, sys
 path, expr = sys.argv[1], sys.argv[2]
 with open(path) as fh:
-    try: d = json.load(fh)
-    except Exception: d = {}
-if not isinstance(d, dict): d = {}
+    raw = fh.read()
+# NEVER "recover" from an unparseable config by starting from {}. That silently
+# REPLACES the file -- and ~/.claude.json carries oauthAccount, so the operator
+# loses their credentials while this script prints OK. A truncated file from a
+# killed prior boot is the realistic trigger, and a cached environment re-runs
+# this every boot. An empty file is the one safe exception: there is nothing to
+# lose. Anything else is a hard, loud failure (the jq backend already behaves
+# this way -- the two backends must not disagree about destroying a file).
+if raw.strip() == "":
+    d = {}
+else:
+    try:
+        d = json.loads(raw)
+    except Exception as e:
+        sys.stderr.write("refusing to rewrite unparseable %s (%s) -- not overwriting it\n" % (path, e))
+        sys.exit(1)
+    if not isinstance(d, dict):
+        sys.stderr.write("refusing to rewrite %s: top level is %s, not an object\n" % (path, type(d).__name__))
+        sys.exit(1)
 ws = os.environ["WS"]
 exec(expr)
 with open(sys.argv[3], "w") as fh:
@@ -106,7 +128,6 @@ with open(sys.argv[3], "w") as fh:
 
 # 1. Trust the workspace, under every spelling it is reachable by.
 _saved_ws="$WORKSPACE"
-IFS=: read -r -a _ws_list <<< "$WORKSPACE_PATHS"
 for WORKSPACE in "${_ws_list[@]}"; do
   [ -n "$WORKSPACE" ] || continue
   json_merge "$CLAUDE_JSON" \

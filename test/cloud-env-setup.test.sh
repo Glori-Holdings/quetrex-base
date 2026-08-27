@@ -144,6 +144,47 @@ case "$PARTIAL_MODE" in
   *) notok "a partially-failing cp left ~/.claude.json at '$PARTIAL_MODE' — credentials readable by others" ;;
 esac
 
+# 4d. AN UNPARSEABLE CONFIG MUST NEVER BE SILENTLY REPLACED. ~/.claude.json
+#     carries oauthAccount; a truncated file from a killed prior boot (this
+#     script re-runs every boot in a cached environment) must fail LOUDLY, not
+#     be "recovered" by starting from {} -- which replaces the file and loses
+#     the operator's credentials while printing OK. Drive the python3 backend
+#     specifically: that is the branch that used to swallow the parse error.
+CORRUPT_SHIM="$TMP/shim-corrupt"; mkdir -p "$CORRUPT_SHIM"
+for b in bash sh git mkdir mv rm cp dirname python3 cat sed grep printf chmod; do
+  cbp="$(command -v "$b" 2>/dev/null)"; [ -n "$cbp" ] && ln -sf "$cbp" "$CORRUPT_SHIM/$b"
+done
+for CORRUPT_CASE in 'truncated' 'notjson' 'toplevel-array'; do
+  CH="$TMP/home-corrupt-$CORRUPT_CASE"; mkdir -p "$CH"
+  case "$CORRUPT_CASE" in
+    truncated)      printf '%s' '{"projects":{},"oauthAccount":{"emailAddress":"real@user"},"numSta' > "$CH/.claude.json" ;;
+    notjson)        printf '%s' 'not json at all real@user' > "$CH/.claude.json" ;;
+    toplevel-array) printf '%s' '["real@user"]' > "$CH/.claude.json" ;;
+  esac
+  ( cd "$WS" && HOME="$CH" PATH="$CORRUPT_SHIM" bash "$SCRIPT" ) >/dev/null 2>&1
+  CORRUPT_RC=$?
+  if [ "$CORRUPT_RC" -ne 0 ] && grep -q 'real@user' "$CH/.claude.json" 2>/dev/null; then
+    ok "unparseable ~/.claude.json ($CORRUPT_CASE): fails loudly and leaves the file untouched"
+  else
+    notok "unparseable ~/.claude.json ($CORRUPT_CASE): exited $CORRUPT_RC and the original content is gone — a credential file was destroyed"
+  fi
+done
+
+# 4e. A workspace path containing a COLON must still be trusted. The spellings
+#     were once colon-JOINED into one string and re-split with IFS=:, which
+#     shredded such a path into fragments -- the real directory was never
+#     trusted and the read-back "verified" the corruption instead of catching it.
+COLON_WS="$TMP/ws:with:colons"; mkdir -p "$COLON_WS"; git -C "$COLON_WS" init -q
+COLON_HOME="$TMP/home-colon"; mkdir -p "$COLON_HOME"
+( cd "$COLON_WS" && HOME="$COLON_HOME" bash "$SCRIPT" ) >/dev/null 2>&1
+COLON_RC=$?
+COLON_REAL="$(cd "$COLON_WS" && pwd)"
+if [ "$COLON_RC" -eq 0 ] && jq -e --arg w "$COLON_REAL" '.projects[$w].hasTrustDialogAccepted == true' "$COLON_HOME/.claude.json" >/dev/null 2>&1; then
+  ok "a workspace path containing colons is trusted under its real name"
+else
+  notok "a colon in the workspace path left the real directory untrusted (rc=$COLON_RC) — cloud would discard the repo's settings.json"
+fi
+
 # 5. It must NOT install plugins — pinning an install here is what went stale.
 if grep -qE '^[^#]*claude plugin (install|marketplace)' "$SCRIPT"; then
   notok "the setup script installs/pins plugins — the repo's settings.json must do that at session start"
