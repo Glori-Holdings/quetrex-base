@@ -170,6 +170,28 @@ for CORRUPT_CASE in 'truncated' 'notjson' 'toplevel-array'; do
   fi
 done
 
+# 4d-bis. INVALID UTF-8 must produce the same one-line refusal, never a raw
+#     interpreter traceback. A stack trace reads to the operator as "the build
+#     exploded" even when nothing was gated and nothing was lost, which this
+#     repo has a standing rule against. Compare by HASH, not grep: the fixture
+#     is deliberately not valid text.
+UTF_HOME="$TMP/home-badutf8"; mkdir -p "$UTF_HOME"
+printf '{"oauthAccount":{"emailAddress":"real@user"},"x":"\xff\xfe bad"}' > "$UTF_HOME/.claude.json"
+UTF_BEFORE="$(shasum -a 256 "$UTF_HOME/.claude.json" 2>/dev/null | cut -d" " -f1)"
+UTF_OUT="$( cd "$WS" && HOME="$UTF_HOME" PATH="$CORRUPT_SHIM" bash "$SCRIPT" 2>&1 )"
+UTF_RC=$?
+UTF_AFTER="$(shasum -a 256 "$UTF_HOME/.claude.json" 2>/dev/null | cut -d" " -f1)"
+if [ "$UTF_RC" -ne 0 ] && [ "$UTF_BEFORE" = "$UTF_AFTER" ]; then
+  ok "invalid UTF-8 in ~/.claude.json: fails loudly and leaves the file byte-identical"
+else
+  notok "invalid UTF-8 in ~/.claude.json: exited $UTF_RC and/or the file changed — a credential file was rewritten"
+fi
+if printf '%s' "$UTF_OUT" | grep -q 'Traceback (most recent call last)'; then
+  notok "invalid UTF-8 surfaced a raw Python traceback — a script must never hand the operator an interpreter stack trace"
+else
+  ok "invalid UTF-8 produces a one-line refusal, not an interpreter traceback"
+fi
+
 # 4e. A workspace path containing a COLON must still be trusted. The spellings
 #     were once colon-JOINED into one string and re-split with IFS=:, which
 #     shredded such a path into fragments -- the real directory was never

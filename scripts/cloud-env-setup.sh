@@ -96,8 +96,16 @@ json_merge() {  # json_merge <file> <jq-filter> <python-expr-on-'d'>
     WS="$WORKSPACE" python3 -c '
 import json, os, sys
 path, expr = sys.argv[1], sys.argv[2]
-with open(path) as fh:
-    raw = fh.read()
+# Read defensively too: invalid UTF-8 in the file must produce the same
+# one-line refusal, never a raw interpreter traceback. A stack trace reads to
+# the operator as "the build exploded" even when nothing was gated and nothing
+# was lost (this repo has a standing rule about exactly that).
+try:
+    with open(path) as fh:
+        raw = fh.read()
+except Exception as e:
+    sys.stderr.write("refusing to rewrite unreadable %s (%s) -- not overwriting it\n" % (path, e))
+    sys.exit(1)
 # NEVER "recover" from an unparseable config by starting from {}. That silently
 # REPLACES the file -- and ~/.claude.json carries oauthAccount, so the operator
 # loses their credentials while this script prints OK. A truncated file from a
