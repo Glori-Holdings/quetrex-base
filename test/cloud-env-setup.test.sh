@@ -258,19 +258,38 @@ else
   notok "the file does not state what the environment's Setup script field must contain"
 fi
 
-# 7. The cloud routine must REFUSE an environment whose setup script did not run
-#    (or ran stale). A misconfigured environment that proceeds quietly is how a build
-#    ends up unarmed while looking normal.
+# 7. THE CLOUD ROUTINE MUST NOT DEPEND ON A HAND-CONFIGURED ENVIRONMENT.
+#    Quetrex is used by many developers, each with their own Anthropic account and their
+#    own cloud environments. Any step that asks a person to paste something into a web
+#    console cannot be part of onboarding -- it does not scale past the one operator who
+#    knows to do it, and a stale copy of it silently pins a build to an old engine.
+#    The developer already declares the engine per project (`/quetrex-setup:init` writes
+#    enabledPlugins into the repo's committed .claude/settings.json); cloud discards that
+#    file because the workspace is untrusted, so the routine must read the declaration
+#    off the clone and honour it.
 ROUTINE="$ROOT/.claude/lib/cloud-build-routine.md"
-if grep -q 'BASH_DEFAULT_TIMEOUT_MS' "$ROUTINE"; then
-  ok "cloud-build-routine.md checks the timeout the setup script installs"
+if grep -q 'enabledPlugins' "$ROUTINE"; then
+  ok "cloud-build-routine.md installs what the repo's committed enabledPlugins declares"
 else
-  notok "cloud-build-routine.md never checks BASH_DEFAULT_TIMEOUT_MS — a stale setup script stays silent"
+  notok "cloud-build-routine.md does not read enabledPlugins — a cloud build cannot arm itself from the repo's own declaration"
 fi
-if grep -q 'bash scripts/cloud-env-setup.sh' "$ROUTINE"; then
-  ok "cloud-build-routine.md names the one-line Setup script field content in its failure path"
+if grep -q 'extraKnownMarketplaces' "$ROUTINE"; then
+  ok "cloud-build-routine.md registers the marketplaces the repo names (no hardcoded source)"
 else
-  notok "cloud-build-routine.md does not tell the operator what the Setup script field must contain"
+  notok "cloud-build-routine.md does not read extraKnownMarketplaces — the marketplace would have to be hardcoded"
+fi
+# Installing two plugins in ONE invocation silently drops all but the first (measured);
+# a build then runs on half an engine believing it succeeded.
+if grep -q 'installs only the FIRST argument' "$ROUTINE"; then
+  ok "cloud-build-routine.md warns that one install call takes only the first plugin"
+else
+  notok "cloud-build-routine.md does not warn about the multi-argument install dropping plugins"
+fi
+# The whole point: no web-console step survives anywhere in the routine.
+if grep -q 'bash scripts/cloud-env-setup.sh' "$ROUTINE"; then
+  notok "cloud-build-routine.md still requires a hand-pasted Setup script — that step cannot scale to many developers"
+else
+  ok "cloud-build-routine.md requires no hand-configured environment setup script"
 fi
 
 b="$(basename "${BASH_SOURCE[0]}")"

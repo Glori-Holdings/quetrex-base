@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # scripts/cloud-env-setup.sh — the ONE cloud-environment setup script.
 #
+# OPTIONAL. A cloud build does NOT need this script and never asks for it: the routine
+# reads the repo's own committed .claude/settings.json (extraKnownMarketplaces +
+# enabledPlugins) and installs exactly what the developer already declared when they
+# adopted the project. That matters because Quetrex is used by many developers, each with
+# their own Anthropic account and their own cloud environments -- a step that asks a person
+# to paste something into a web console cannot be part of onboarding.
+#
+# What remains here is a convenience for a self-hosted or long-lived environment where an
+# operator would rather pre-trust the workspace and set the timeouts once. Nothing depends
+# on it.
+#
 # WHY THIS FILE EXISTS. What a cloud environment does at boot used to live only
 # in a web textarea (claude.ai/code -> environment -> Setup script): untracked,
 # unreviewable, invisible to this repo's tests, and changed by hand. A stale
