@@ -180,6 +180,130 @@ node -e '
 ' "$BIND"
 ```
 
+**e. Set `cloudEnvironmentId` — derive it, do not make the user paste it.**
+
+`/quetrex:task-build` fires the build as a cloud routine, and a routine needs an
+`environment_id`. Until now nothing set it: the first build stopped and printed a `node -e`
+one-liner asking the operator to open claude.ai, find an `env_…` id in a URL, and paste it
+back. **Every new partner stalled there, on their first build, having done nothing wrong.**
+Arming a feature belongs in `init`, not in a failure message from the command that needed it.
+
+It does not have to be a question. Every routine the user already has carries the environment
+it runs in *and* the repositories it runs against:
+
+```
+job_config.ccr.environment_id
+job_config.ccr.session_context.sources[].git_repository.url
+```
+
+So list the routines and read the answer off them.
+
+**Call `RemoteTrigger` with `action: "list"`** — the OAuth token is added in-process, so this
+is not something a shell script can do with `curl`; it is a tool call you make. Write the raw
+JSON to a temp file, then hand it to the pure function below. If the call fails, skip to the
+fallback at the end of this step — never block `init` on it.
+
+```bash
+# ── quetrex:exec-block qx_env_candidates ───────────────────────────────────────
+# Executable, and executed: test/init-cloud-env.test.sh sources this exact block
+# and drives the function against a fixture captured from a REAL
+# GET /v1/code/triggers response. Pure function of (JSON on stdin, origin URL) —
+# no network, no tool calls.
+#
+# Emits one TSV row per DISTINCT environment, best candidate first:
+#     <env_id>\t<repo|other>\t<last-used ISO8601>\t<example routine name>
+# "repo" means that environment has actually run against THIS repository.
+# Sorted repo-first, then most-recently-used first. Empty output = no routine
+# anywhere names an environment, which is the genuinely-new-user case.
+#
+# WHY THIS RANKS RATHER THAN MATCHES. Measured over 20 real routines: an
+# environment is NOT one-per-repo. Two environments had both run against
+# quetrex-base AND quetrex-demo, and a third repo shared one of them. So
+# "the environment for this repo" is not always a well-defined thing — the
+# function narrows honestly and lets the caller ask when it must.
+qx_env_candidates() {          # qx_env_candidates <origin-url>  (JSON on stdin)
+  python3 -c '
+import json, sys, re
+
+def norm(u):
+    if not u:
+        return ""
+    u = u.strip().lower()
+    u = re.sub(r"^git\+", "", u)
+    u = re.sub(r"^ssh://", "", u)
+    u = re.sub(r"^git@([^:/]+)[:/]", r"https://\1/", u)
+    u = re.sub(r"^http://", "https://", u)
+    u = re.sub(r"\.git$", "", u)
+    return u.rstrip("/")
+
+want = norm(sys.argv[1] if len(sys.argv) > 1 else "")
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+envs = {}
+for t in (doc.get("data") or []):
+    ccr = ((t.get("job_config") or {}).get("ccr")) or {}
+    eid = ccr.get("environment_id")
+    if not eid:
+        continue
+    urls = set()
+    for s in (((ccr.get("session_context") or {}).get("sources")) or []):
+        urls.add(norm(((s or {}).get("git_repository") or {}).get("url")))
+    when = t.get("last_fired_at") or t.get("created_at") or ""
+    e = envs.setdefault(eid, {"repo": False, "when": "", "name": ""})
+    if want and want in urls:
+        e["repo"] = True
+    if when > e["when"]:
+        e["when"] = when
+        e["name"] = t.get("name") or ""
+
+# Two stable passes: most-recently-used first, then this-repo-first on top of
+# that. Timestamps are ISO8601 so a plain string compare orders them.
+rows = sorted(envs.items(), key=lambda kv: kv[1]["when"], reverse=True)
+rows.sort(key=lambda kv: 0 if kv[1]["repo"] else 1)
+for eid, e in rows:
+    name = (e["name"] or "-").splitlines()[0][:60] or "-"
+    print("%s\t%s\t%s\t%s" % (eid, "repo" if e["repo"] else "other", e["when"] or "-", name))
+' "$1"
+}
+# ── end quetrex:exec-block qx_env_candidates ──────────────────────────────────
+
+ORIGIN="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+CANDIDATES="$(qx_env_candidates "$ORIGIN" < "$TRIGGERS_JSON" 2>/dev/null || true)"
+```
+
+Then decide, in this order:
+
+- **Exactly one candidate, or exactly one marked `repo`** — write it and say so in one line.
+  Do not ask.
+- **More than one** — ask with `AskUserQuestion`. Label each option with the environment id
+  and whether it has run against this repo; put the `repo` ones first. This is a real fork:
+  the two environments may have different toolchains installed.
+- **None, or the `RemoteTrigger` call failed** — this user has never created a cloud
+  environment, so there is nothing to derive. Fall back to the existing instruction, and say
+  plainly why you are asking:
+
+  > No cloud environment found on your account. Open <https://claude.ai/code>, create the
+  > environment this repo should build in, then re-run `/quetrex-setup:init` — or paste its
+  > `env_…` id here and I will record it.
+
+Write the chosen value into the binding, next to `branchPrefix`:
+
+```bash
+node -e '
+  const fs=require("fs"); const [f,id]=process.argv.slice(1);
+  const o=JSON.parse(fs.readFileSync(f,"utf8"));
+  o.cloudEnvironmentId=id; fs.writeFileSync(f, JSON.stringify(o,null,2)+"\n");
+  console.log("cloud environment: "+id);
+' "$BIND" "$CHOSEN_ENV_ID"
+```
+
+On an **already-linked** repo (step 2a) with no `cloudEnvironmentId`, run this same step and
+backfill — that is what repairs every repo bound before this existed. Never overwrite a value
+the binding already has; if one is present, report it and move on.
+
 ---
 
 ## 4. Non-destructive adoption — auto-clean stale tracker refs

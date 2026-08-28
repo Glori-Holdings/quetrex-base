@@ -229,9 +229,18 @@ if [ "$RC" -ne 0 ]; then
 else
   fail "with NO environment configured the guard returned 0 ($OUT) — the dispatch would go nowhere, silently"
 fi
+# The remedy CHANGED (2026-08-28). This assertion used to require the message
+# to name the `cloudEnvironmentId` field and the `env_` id shape, because the
+# operator was expected to hand-edit the binding with a printed `node -e`
+# one-liner — which is exactly the stall every new partner hit on their first
+# build. /quetrex-setup:init now DERIVES the id from the routines already on the
+# account (test/init-cloud-env.test.sh drives that), so an actionable message is
+# one that names the command which fixes it, and never one that asks a person to
+# edit JSON by hand.
 case "$OUT" in
-  *cloudEnvironmentId*env_*) pass "the missing-environment message names the field to set and the shape of the value" ;;
-  *) fail "the missing-environment message is not actionable — it must name cloudEnvironmentId and the env_ id shape: $OUT" ;;
+  *"node -e"*) fail "the missing-environment message still prints a node -e one-liner for the operator to run by hand: $OUT" ;;
+  *quetrex-setup:init*) pass "the missing-environment message names the command that fixes it (/quetrex-setup:init), not a hand edit" ;;
+  *) fail "the missing-environment message is not actionable — it must send the operator to /quetrex-setup:init: $OUT" ;;
 esac
 
 OUT="$(QUETREX_CLOUD_ENVIRONMENT_ID=my-environment qx_cloud_env_id "$ENVDIR" 2>&1)"; RC=$?

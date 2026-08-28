@@ -102,10 +102,10 @@ qx_cloud_env_id() {            # qx_cloud_env_id <repo-root>
   [ -n "$id" ] || id="${QUETREX_CLOUD_ENVIRONMENT_ID:-}"
   if [ -z "$id" ]; then
     echo "No cloud environment is bound to this repo, so there is nowhere to run the build." >&2
-    echo "Open https://claude.ai/code, pick (or create) the environment this repo should build in," >&2
-    echo "copy its id from the URL (it looks like env_0123ABC…), and record it in the binding:" >&2
-    echo "    node -e 'const f=\"$root/.quetrex/project.json\",fs=require(\"fs\");const o=JSON.parse(fs.readFileSync(f,\"utf8\"));o.cloudEnvironmentId=process.argv[1];fs.writeFileSync(f,JSON.stringify(o,null,2)+\"\\n\")' env_YOURID" >&2
-    echo "(or export QUETREX_CLOUD_ENVIRONMENT_ID for a one-off run). Then re-run this command." >&2
+    echo "Run /quetrex-setup:init — it reads the environment off the routines already on your" >&2
+    echo "account and records it for you. Binding this by hand is not your job; if init cannot" >&2
+    echo "find one it will say so and tell you what to create at https://claude.ai/code." >&2
+    echo "(Or export QUETREX_CLOUD_ENVIRONMENT_ID for a single one-off run.)" >&2
     return 1
   fi
   case "$id" in
