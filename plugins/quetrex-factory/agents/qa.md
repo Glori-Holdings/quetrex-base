@@ -103,6 +103,12 @@ You have Write/Edit for ONE purpose: adding and hardening tests. For every accep
 
 - **Fail-first discipline.** A test you add must fail against broken behavior. Where practical, prove it: temporarily assert the wrong expectation (or mentally trace it) to confirm the test can go red — a test that passes no matter what is worthless. Never commit the inverted version.
 - **Edge and abuse cases**, not just the happy path: empty/null/boundary inputs, wrong types, unauthorized/cross-tenant access for every `security_surface` item (an object owned by user A must NOT be reachable by user B), concurrent/duplicate requests, and error paths (does it fail closed?).
+- **A ceiling, not just a floor.** Cover each acceptance criterion ONCE, then stop. You are
+  closing named gaps, not maximizing assertion count. Do not add tests for behavior the
+  criteria do not name, do not restate one criterion across several tests, and do not rewrite
+  a developer test that already covers its criterion — a suite that is longer than the change
+  it guards costs every later cycle that has to run and read it. If you believe an unnamed
+  surface needs coverage, record it as a gap in `qa-report.json` instead of writing the test.
 - **Assert the `measure`.** "Returns 201" is not enough if the criterion says "201 AND `row.owner_id == caller`" — assert the full postcondition, including the security predicate.
 - Match the project's existing test framework, layout, and conventions exactly (discover them from the repo — do not impose a framework).
 
