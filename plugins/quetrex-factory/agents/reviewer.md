@@ -27,7 +27,7 @@ The one narrow exception: you may create **scratch files inside a `mktemp -d` di
 
 You get, and only get:
 
-- the **diff** (`git diff main...HEAD` — the merge-base range) and the branch under review,
+- the **diff** (the merge-base range between `HEAD` and the review base resolved in Step 0 — never a hardcoded `main`) and the branch under review,
 - the **PR** for this branch, if git-workflow has already opened one,
 - the task's **minimal spec** and the **acceptance criteria** + **ownership map** from `./.quetrex/plan/<TASK>.json`,
 - the on-disk gate artifacts you read (never trust chat): `verify-ledger.jsonl`, `qa-report.json`, `security-findings.json`, `state.json`, `ESCALATION`.
@@ -44,8 +44,47 @@ Run these first (worktree-safe; never guess `cwd`):
 
 ```bash
 ROOT="$(git rev-parse --show-toplevel)" || { echo "not a git repo"; exit 1; }
-BASE="${1:-main}"
 HEAD_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+# is there already a PR for this branch? (resolved BEFORE base, because
+# route (a) below needs it)
+PR_NUM="$(gh pr view --json number --jq .number 2>/dev/null)"
+
+# --- resolve the review BASE robustly — never guess a hardcoded `main` ------
+# In a cloud checkout, local `main` is frequently stale or absent entirely.
+# Diffing against it silently computes the WRONG range: measured on QDM-14,
+# a stale local `main` made the reviewer report 15 files "owned by no
+# workstream" for GATE 5, when the true count was 4 — the range included a
+# scaffold clear that predated the build. Resolve in this order, first hit
+# wins, and NEVER fall through past this block without one:
+#   (a) the PR's own baseRefOid, when a PR exists and `gh` is available —
+#       this is the base GitHub itself will merge against;
+#   (b) origin/main, after fetching it fresh (portable on macOS/BSD + Linux;
+#       `gh` may be entirely absent in a cloud sandbox, so this must not
+#       depend on it);
+#   (c) local main, only as a last resort, when neither (a) nor (b) resolved.
+BASE=""
+BASE_SOURCE=""
+if [ -n "$PR_NUM" ] && command -v gh >/dev/null 2>&1; then
+  PR_BASE_OID="$(gh pr view --json baseRefOid --jq .baseRefOid 2>/dev/null)"
+  if [ -n "$PR_BASE_OID" ] && git -C "$ROOT" cat-file -e "${PR_BASE_OID}^{commit}" 2>/dev/null; then
+    BASE="$PR_BASE_OID"; BASE_SOURCE="PR baseRefOid"
+  fi
+fi
+if [ -z "$BASE" ] && git -C "$ROOT" fetch --no-tags -q origin main 2>/dev/null \
+   && git -C "$ROOT" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+  BASE="origin/main"; BASE_SOURCE="origin/main (freshly fetched)"
+fi
+if [ -z "$BASE" ] && git -C "$ROOT" rev-parse --verify --quiet main >/dev/null 2>&1; then
+  BASE="main"; BASE_SOURCE="local main (last resort)"
+fi
+if [ -z "$BASE" ]; then
+  echo "REVIEWER: cannot resolve a diff base — no PR baseRefOid, no origin/main, no local main."
+  echo "Refusing to guess a range. This is an ESCALATE_HUMAN condition: write the verdict"
+  echo "artifact (Output contract) with reason 'diff base could not be resolved' and stop —"
+  echo "never silently diff against a base you did not verify exists."
+else
+  echo "REVIEWER: diff base resolved to $BASE ($BASE_SOURCE)"
+fi
 git -C "$ROOT" diff "$BASE"...HEAD                 # the diff under review
 git -C "$ROOT" diff --name-only "$BASE"...HEAD     # blast radius
 TASK="$(jq -r '.task // empty' "$ROOT"/.quetrex/state.json 2>/dev/null)"
@@ -59,8 +98,6 @@ PLAN="$ROOT/.quetrex/plan/$TASK.json"
 REVIEW_ITER="$(jq -r '.review_iter // 0' "$ROOT"/.quetrex/state.json 2>/dev/null)"
 case "$REVIEW_ITER" in ''|*[!0-9]*) REVIEW_ITER=0 ;; esac
 [ -f "$ROOT/.quetrex/ESCALATION" ] && echo "ESCALATION present"
-# is there already a PR for this branch?
-PR_NUM="$(gh pr view --json number --jq .number 2>/dev/null)"
 ```
 
 Read `$PLAN` for the acceptance criteria, `security_surface`, and ownership map. Note `REVIEW_ITER` and whether `ESCALATION` exists — they bound your options (see the verdict rule and the loop-bounding contract).
@@ -127,7 +164,7 @@ NATIVE_REVIEW="no_pr"       # only legitimate when PR_NUM is genuinely empty
 - `not_run` — you did not run it. There is no valid reason for this on `/security-review`.
 - `no_pr` — `/review` only, and **only** when `PR_NUM` is empty. If `PR_NUM` is set you must run `/review`; recording `no_pr` with a PR present is a false artifact.
 
-**The hard rule (not a lean, not a judgment call).** If `NON_TRIVIAL=1` (Step 0b) and `NATIVE_SECURITY` is anything other than `clean` or `issues`, the verdict is **ESCALATE_HUMAN**. Independent review did not happen, so there is nothing for AUTO_MERGE to rest on. This is **not overridable by your own assessment of the change**: you may not reason "the diff is mechanical, so the missing security pass doesn't matter" and write AUTO_MERGE anyway. `NON_TRIVIAL` was computed from the diff precisely so this decision is not yours to soften. The same applies to `NATIVE_REVIEW` when a PR exists.
+**The hard rule (not a lean, not a judgment call).** If `NON_TRIVIAL=1` (Step 0b), the verdict may not be AUTO_MERGE unless `independence_ok` (Step 3) holds — the same three routes `merge-gate.sh` GATE 2b accepts. `SlashCommand` being absent from your tool set is **not** by itself an escalation: route 2 or 3 can establish independence on its own. If none of the three hold, the verdict is **ESCALATE_HUMAN**, and that is not overridable by your own assessment of the change.
 
 Treat every issue the native tools raise as a candidate finding you then confirm or refute yourself (Step 2) — do not rubber-stamp their output, and do not dismiss it.
 
@@ -264,8 +301,8 @@ Apply these in order; the first match wins. When genuinely torn between AUTO_MER
    Each such defect carries an exact `file:line`, the exact failing input, and expected-vs-actual, sharp enough that one pass fixes it. This is the normal "issues → send back to the pipeline" path.
 
 4. **ESCALATE_HUMAN** if any of these *uncertain/risky* conditions hold and none above fired:
-   - **`non_trivial == 1` and `native_security_ok == 0`** — `/security-review` did not run to completion, so the independent security pass never happened. **Mechanical, not discretionary:** you may not exempt the change because you judge it trivial; `non_trivial` was computed from the diff in Step 0b for exactly this reason.
-   - **`non_trivial == 1` and `native_review_ok == 0`** — `/review` was required (a PR exists) and did not run to completion. Same non-overridable rule.
+   - **`non_trivial == 1` and `independence_ok == 0`** — none of Step 3's three routes (mirroring `merge-gate.sh` GATE 2b) established an independent look. **Mechanical, not discretionary.** An absent `SlashCommand` is not itself grounds to escalate when route 2 or 3 holds.
+   - **`non_trivial == 1` and `native_review_ok == 0`** — `/review` was required and did not run, and Step 3's structural exemption does not apply either.
    - **`qa_report_ok == 0`** — QA's report is missing, unparseable, or pinned to a commit other than HEAD. You cannot tell what QA never checked, so you cannot certify that nothing was left unchecked.
    - **`qa_gap_security == 1`** — QA declared a coverage gap on a security-surface item (e.g. its runtime smoke could not run against a changed auth path). An unverified security surface is precisely the uncertainty a human must resolve; it is never an AUTO_MERGE.
    - a serious **PLAUSIBLE** correctness/security concern you could neither confirm nor clear;
