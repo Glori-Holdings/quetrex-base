@@ -20,7 +20,8 @@ This repo IS the Quetrex engine — the hooks, agents, commands and installer th
 When I correct you or you catch yourself making a mistake, before continuing, add the lesson as a one-line rule under #LESSONS so it never happens again.
 
 # LESSONS
-- A PreToolUse hook's `permissionDecision:"ask"` is AUTO-ALLOWED under `bypassPermissions` (measured 2026-08-27) — only `deny` blocks. Never let a guard DEPEND on `ask`; the unforgeable human channel is a TYPED user turn in `transcript_path` (`type=="user"` with string `message.content` — a tool_result list is agent-generated and forgeable).
+- A PreToolUse hook's `permissionDecision:"ask"` only actually prompts in `default` mode — it is AUTO-ALLOWED under `bypassPermissions`, `acceptEdits`, `dontAsk`, `auto`, `plan`, and when `permission_mode` is absent (measured 2026-08-27/28). Never let a guard DEPEND on `ask`, and gate it with an ALLOWLIST (`= "default"`), never a denylist against `bypassPermissions`.
+- The human channel in `transcript_path` is `origin.kind == "human"` — NOT string `message.content`. Measured: 667 of 1366 string-content `type=="user"` rows are agent-reachable (SendMessage peer rows, task-notification summaries, agent-invoked SlashCommands), and one was replayed to rewrite the verify chain. Do NOT key on `promptSource=="typed"` either: `queued` and `suggestion_accepted` are also genuinely human. Absent origin fails CLOSED.
 
 
 - A hook must NEVER surface a raw interpreter stack trace to the operator — it reads as "the build failed" even when nothing failed and nothing was gated. Print one labelled line: what command ran, which checkout/branch it ran in, and whether it blocks. Never execute a verify chain into a throw when a required env name is simply unset; say it was skipped and why.
