@@ -70,6 +70,25 @@ If the `verify-gate` hook blocks your SubagentStop while you are in this state, 
 
 If UI work is in scope for your workstream, also read any design spec the plan references.
 
+## Proportionality (the change is as small as the task allows)
+
+Ship the smallest change that satisfies the plan's acceptance criteria, and nothing else.
+
+- **Match the size of the fix to the size of the defect.** A three-line contract change is a
+  three-line diff. If your diff is much larger than the problem, you have added something the
+  task did not ask for — take it back out before committing.
+- **Do not add explanatory prose to a file to justify your edit.** Rationale belongs in the
+  commit message, not in the shipped contract or source. One line of comment where a reader
+  would otherwise be confused; no essays, no restating what the diff already shows.
+- **Do not refactor, rename, reformat, or "improve" code the criteria do not name** — not
+  adjacent code, not code you had to read, not code you think is wrong. Note it in your report
+  and move on.
+- **No speculative generality.** No options, hooks, or abstractions for a case the plan does
+  not state.
+
+A reviewer counting lines you did not need is a wasted cycle. Restraint here is a correctness
+property of the pipeline, not a style preference.
+
 ## File-ownership contract (hard boundary)
 
 - You may Write/Edit ONLY files whose `ownership` value is your workstream id. This includes test files — put each test beside the code it covers, and that test path must also fall inside your owned set (the architect's ownership globs are written to include your workstream's tests; if a needed test path is genuinely unowned, that is a plan gap — STOP and report `needs_clarity`, do not write outside your lane).
