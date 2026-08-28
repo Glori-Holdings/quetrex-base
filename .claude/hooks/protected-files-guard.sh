@@ -598,9 +598,28 @@ if tpath and os.path.isfile(tpath):
                 if not isinstance(msg, dict):
                     continue
                 content = msg.get("content")
-                # STRING content == a human typed it. A list of tool_result
-                # blocks is agent-generated and is deliberately IGNORED here.
+                # A list of tool_result blocks is agent-generated: ignored.
                 if not isinstance(content, str):
+                    continue
+                # STRING content is NOT proof a human typed it. MEASURED over
+                # the transcripts of this repo 2026-08-27: of 1366 string-content
+                # user rows, only 699 came from a person. The other 667 are
+                # agent-reachable and carry exactly this shape --
+                # `<task-notification>` summary text the agent itself wrote,
+                # `Another Claude session sent a message:` (SendMessage, peer),
+                # and `<command-message>` rows from an agent-invoked
+                # SlashCommand. A reviewer replayed the SendMessage shape and
+                # rewrote the verify chain to ["true"] with no human involved.
+                #
+                # The discriminator that actually holds is origin.kind ==
+                # "human". It is NOT promptSource == "typed": `queued` and
+                # `suggestion_accepted` rows are also genuinely human (138 real
+                # ones here) and requiring `typed` would reject them. Absent or
+                # malformed origin fails CLOSED -- an older client that does not
+                # stamp origin cannot approve a floor change, which is the safe
+                # direction.
+                origin = row.get("origin")
+                if not isinstance(origin, dict) or origin.get("kind") != "human":
                     continue
                 turns += 1
                 if needle in " ".join(content.split()).lower():
@@ -689,12 +708,20 @@ qxva_gate() {
     msg="$msg  ||  requiredEnv BEFORE: $before_env  ->  AFTER: $after_env"
   fi
 
-  if [ "$PERMISSION_MODE" != "bypassPermissions" ]; then
+  # ALLOWLIST, not a denylist. This was `!= "bypassPermissions"`, which handed
+  # the decision to `ask` in EVERY other mode -- and `ask` only actually
+  # prompts a person in "default". MEASURED: `acceptEdits`, `dontAsk`, `auto`,
+  # `plan`, and an ABSENT permission_mode all took that branch and were
+  # auto-allowed, so the gate evaporated in five modes while reporting that it
+  # had asked. Name the one mode known to prompt; everything else -- including
+  # a field the payload never carried -- falls through to allow-on-proof or
+  # deny below.
+  if [ "$PERMISSION_MODE" = "default" ]; then
     qxva_ask "$msg  ||  Approve this write?"
   fi
 
-  # bypassPermissions: "ask" was MEASURED to be auto-allowed, so the only
-  # honest options are allow-on-proof or deny.
+  # Every non-prompting mode: "ask" was MEASURED to be auto-allowed, so the
+  # only honest options are allow-on-proof or deny.
   if [ "${typed:-0}" = "0" ]; then
     deny "$msg  ||  DENIED: no human has typed anything in this session (an unattended or cloud run), so there is nobody to approve it. The verify chain is never changed without a person." "verify.json"
   fi
