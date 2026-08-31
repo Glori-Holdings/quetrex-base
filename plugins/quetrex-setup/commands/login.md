@@ -67,6 +67,11 @@ DEVICE_FIELDS="$(node -e '
 # zsh does not word-split an unquoted parameter (SH_WORD_SPLIT is off by
 # default), so $1 would swallow all five fields and every value after it would
 # be empty. Shipped blocks run in the operator's shell — zsh on macOS.
+# Arity FIRST: exactly five lines. A value carrying a newline would otherwise
+# shift every later field by a slot — a hostile /device/start body could put an
+# attacker's URL in VERIFICATION_URL and still pass a per-field non-empty check.
+[ "$(printf '%s\n' "$DEVICE_FIELDS" | wc -l | tr -d ' ')" = "5" ] \
+  || { echo "Unexpected device-flow response." >&2; exit 1; }
 fld() { printf '%s\n' "$DEVICE_FIELDS" | sed -n "${1}p"; }
 DEVICE_CODE="$(fld 1)"; USER_CODE="$(fld 2)"; VERIFICATION_URL="$(fld 3)"
 INTERVAL="$(fld 4)"; EXPIRES="$(fld 5)"

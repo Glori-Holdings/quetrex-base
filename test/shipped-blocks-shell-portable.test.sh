@@ -26,6 +26,18 @@ extract_bash() {
   awk '/^```bash$/{inb=1;next} /^```$/{inb=0} inb' "$1"
 }
 
+# Extract the SINGLE fenced ```bash block that contains $2, whole and unbounded.
+# (An earlier version bounded the block by matching its trailing guard line;
+# adding a second guard with the same shape silently truncated the extract and
+# every field came back empty. A fence is the block's real boundary.)
+extract_block_with() {
+  awk -v pat="$2" '
+    /^```bash$/ {inb=1; buf=""; next}
+    /^```$/     {if(inb && index(buf,pat)){printf "%s", buf; exit} inb=0; next}
+    inb         {buf = buf $0 "\n"}
+  ' "$1"
+}
+
 # --- ASSERTION 1: no shipped command block word-splits an unquoted parameter ---
 OFFENDERS=""
 while IFS= read -r md; do
@@ -59,8 +71,8 @@ echo "${STUB_RUNNING:-2.6.4}"
 EOF
 chmod +x "$TMP/bin/curl" "$TMP/bin/quetrex-version"
 
-extract_bash "$ROOT/plugins/quetrex-setup/commands/update.md" \
-  | awk '/^RUNNING="\$\(quetrex-version/{on=1} on' > "$TMP/update-block.sh"
+extract_block_with "$ROOT/plugins/quetrex-setup/commands/update.md" \
+  'RUNNING="$(quetrex-version' > "$TMP/update-block.sh"
 [ -s "$TMP/update-block.sh" ] || { notok "could not extract the update.md report block"; }
 
 run_update() { # $1=shell  $2=running-version
@@ -95,9 +107,8 @@ for sh_bin in bash zsh dash; do
 done
 
 # --- ASSERTION 4: login.md's device-flow fields survive zsh -------------------
-extract_bash "$ROOT/plugins/quetrex-setup/commands/login.md" \
-  | awk '/^DEVICE_FIELDS="\$\(node -e/{on=1} on{print} /^  \|\| \{ echo "Unexpected device-flow response/{if(on)exit}' \
-  > "$TMP/login-block.sh"
+extract_block_with "$ROOT/plugins/quetrex-setup/commands/login.md" \
+  'DEVICE_FIELDS="$(node -e' > "$TMP/login-block.sh"
 
 cat > "$TMP/login-pre.sh" <<'EOF'
 START_BODY='{"deviceCode":"dc-123","userCode":"WXYZ-89","verificationUrl":"https://example.test/approve","intervalSeconds":7,"expiresInSeconds":900}'
@@ -113,6 +124,30 @@ for sh_bin in bash zsh; do
     ok "$sh_bin: all five device-flow fields parse individually"
   else
     notok "$sh_bin: device-flow fields collapsed -> $(printf '%s' "$out" | tr '\n' '|')"
+  fi
+done
+
+# --- ASSERTION 5: a device-flow value carrying a NEWLINE is REJECTED ----------
+# Line-numbered field reads need an ARITY check, not just per-field non-empty
+# tests: a hostile /api/auth/device/start body whose deviceCode embeds "\n"
+# emits seven lines, every later field shifts a slot, and VERIFICATION_URL —
+# which section 3 hands to `open` — becomes attacker-chosen while all five
+# slots are still non-empty. Caught by the security gate on PR #140.
+cat > "$TMP/login-pre-evil.sh" <<'EOF'
+START_BODY='{"deviceCode":"dc\nFAKECODE\nhttps://evil.example/phish","userCode":"WXYZ-89","verificationUrl":"https://good.example/approve","intervalSeconds":7,"expiresInSeconds":900}'
+EOF
+printf 'echo "REACHED=$VERIFICATION_URL"\n' > "$TMP/login-post.sh"
+cat "$TMP/login-pre-evil.sh" "$TMP/login-block.sh" "$TMP/login-post.sh" > "$TMP/login-evil.sh"
+
+for sh_bin in bash zsh; do
+  command -v "$sh_bin" >/dev/null 2>&1 || { ok "$sh_bin not present, skipped"; continue; }
+  out="$("$sh_bin" "$TMP/login-evil.sh" 2>&1)"
+  if printf '%s' "$out" | grep -qF "evil.example"; then
+    notok "$sh_bin: a newline-injected device-flow body reached VERIFICATION_URL -> $(printf '%s' "$out" | tr '\n' '|')"
+  elif printf '%s' "$out" | grep -qF "Unexpected device-flow response."; then
+    ok "$sh_bin: a newline-injected device-flow body is rejected outright"
+  else
+    notok "$sh_bin: newline-injected body neither rejected nor caught -> $(printf '%s' "$out" | tr '\n' '|')"
   fi
 done
 
