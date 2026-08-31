@@ -1315,7 +1315,26 @@ fi
 
 ## 7. Final report
 
-Summarize for the user:
+**FIRST LINE OF THE REPORT, ALWAYS — the restart.** Step 4h wrote `enabledPlugins`. Claude
+Code registers a plugin's command layer at SESSION START, so a plugin this command just
+enabled is NOT loaded in the session you are standing in: the marketplace shows it checked,
+and `/quetrex:task-new` and every other `/quetrex:*` command still does not exist. This is the
+single most confusing thing init does, and it reads as a broken install. Say so before
+anything else, in these words:
+
+> **Restart Claude Code before doing anything else.** This session cannot see the commands
+> init just enabled — `/quetrex:*` will not exist until you restart, even though the plugin
+> shows as installed. Quit and reopen, then run `/quetrex:doctor` to confirm.
+
+Print it whenever `enabledPlugins` was written or changed. Skip it ONLY when step 4h reported
+*"already current"* and nothing else in `.claude/settings.json` changed — in that case the
+commands are already loaded and telling them to restart is noise.
+
+**Never report init as fully succeeded without it.** Adoption is not complete until the
+restart happens; a partner who reads "done" and then finds no commands concludes the product
+is broken. State it as the required next action, not as a footnote.
+
+Then summarize for the user:
 
 - **Linked / created** — `.quetrex/project.json` → `<CODE>` (state whether it was
   already linked, newly created, or admin-blocked).
