@@ -1,8 +1,8 @@
 {
   "name": "quetrex-setup",
   "displayName": "Quetrex Setup",
-  "version": "1.0.1",
-  "description": "Log in, arm a repo for Quetrex, and keep the engine current. /quetrex-setup:login, /quetrex-setup:init, /quetrex-setup:update — enabled machine-wide so an unarmed repo gets only these three commands and a one-line offer, never the full pipeline. The pipeline itself (quetrex, quetrex-factory) is enabled per repo by /quetrex-setup:init.",
+  "version": "1.0.2",
+  "description": "Log in, arm a repo for Quetrex, and keep the engine current. /quetrex-setup:login, /quetrex-setup:init, /quetrex-setup:update \u2014 enabled machine-wide so an unarmed repo gets only these three commands and a one-line offer, never the full pipeline. The pipeline itself (quetrex, quetrex-factory) is enabled per repo by /quetrex-setup:init.",
   "commands": [
     "./commands/"
   ],
