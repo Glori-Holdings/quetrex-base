@@ -52,7 +52,8 @@ marketplace only means the comparison is skipped.
 
 **Never `read ... < <(...)`.** `read` returns NON-ZERO when the final line has no
 trailing newline, so a `|| { fatal }` guard fires on SUCCESS. That defect made
-this command and `/quetrex-setup:login` fail 100% of the time. Capture, check, split.
+this command and `/quetrex-setup:login` fail 100% of the time. Capture, check, then
+let `node` do the parsing and the comparison — never shell word splitting.
 
 ```bash
 RUNNING="$(quetrex-version --plain 2>/dev/null || echo "unknown")"
@@ -60,23 +61,28 @@ echo "Running: quetrex $RUNNING"
 
 MARKET_URL="https://raw.githubusercontent.com/Glori-Holdings/quetrex-plugins/main/.claude-plugin/marketplace.json"
 if MANIFEST="$(curl -fsS --max-time 10 "$MARKET_URL" 2>/dev/null)"; then
-  VERSIONS="$(printf '%s' "$MANIFEST" | node -e '
+  # The whole comparison happens INSIDE node, so nothing depends on shell word
+  # splitting. `set -- $VERSIONS` was the bug: zsh does NOT word-split an
+  # unquoted parameter (SH_WORD_SPLIT is off by default), so $1 became the
+  # entire "quetrex factory setup" string — the "Published:" line misprinted and
+  # the equality test then falsely reported a newer engine on a machine already
+  # on the latest. Shipped blocks run in the operator's shell, which is zsh on
+  # macOS; never rely on bash-only splitting in one.
+  REPORT="$(printf '%s' "$MANIFEST" | node -e '
     let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
       let o; try{o=JSON.parse(s)}catch{process.exit(1)}
       const v=n=>{const p=(o.plugins||[]).find(x=>x&&x.name===n);return p&&p.version?String(p.version):""};
-      const q=v("quetrex"), f=v("quetrex-factory"), s2=v("quetrex-setup");
+      const q=v("quetrex"), f=v("quetrex-factory"), st=v("quetrex-setup");
       if(!q||!f){process.exit(1)}
-      process.stdout.write(q+" "+f+" "+(s2||"?"));
-    })')" || VERSIONS=""
-  if [ -n "$VERSIONS" ]; then
-    # shellcheck disable=SC2086
-    set -- $VERSIONS
-    echo "Published: quetrex $1, quetrex-factory $2, quetrex-setup $3"
-    if [ "$RUNNING" = "$1" ]; then
-      echo "This machine is on the latest engine."
-    else
-      echo "A newer engine is published — restart Claude Code to finish applying the update."
-    fi
+      const running=process.argv[1];
+      process.stdout.write(
+        "Published: quetrex "+q+", quetrex-factory "+f+", quetrex-setup "+(st||"?")+"\n"+
+        (running===q
+          ? "This machine is on the latest engine.\n"
+          : "A newer engine is published \u2014 restart Claude Code to finish applying the update.\n"));
+    })' "$RUNNING")" || REPORT=""
+  if [ -n "$REPORT" ]; then
+    printf '%s' "$REPORT"
   else
     echo "Could not read the marketplace manifest; skipping the comparison."
   fi

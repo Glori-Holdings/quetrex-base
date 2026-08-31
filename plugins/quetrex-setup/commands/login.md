@@ -53,7 +53,7 @@ is safe to hold in a shell var — but do **not** print it; only show `USER_CODE
 # carries no trailing newline, so a `|| { fatal }` guard fires on SUCCESS — the
 # values are in the variables and the command aborts anyway. That defect shipped
 # in this command and in /quetrex-setup:update, and it made both fail 100% of the time:
-# a new teammate could not even log in. Capture, check, then split.
+# a new teammate could not even log in. Capture, check, then read fields by line.
 DEVICE_FIELDS="$(node -e '
   let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
     let o; try{o=JSON.parse(s)}catch{process.exit(1)}
@@ -61,12 +61,23 @@ DEVICE_FIELDS="$(node -e '
     process.stdout.write([
       o.deviceCode, o.userCode, o.verificationUrl,
       String(o.intervalSeconds||5), String(o.expiresInSeconds||600)
-    ].join(" "))
+    ].join("\n"))
   })' <<<"$START_BODY")" || { echo "Unexpected device-flow response." >&2; exit 1; }
-# shellcheck disable=SC2086
-set -- $DEVICE_FIELDS
-[ "$#" -eq 5 ] || { echo "Unexpected device-flow response." >&2; exit 1; }
-DEVICE_CODE="$1"; USER_CODE="$2"; VERIFICATION_URL="$3"; INTERVAL="$4"; EXPIRES="$5"
+# One field per LINE, picked by line number. NEVER `set -- $DEVICE_FIELDS`:
+# zsh does not word-split an unquoted parameter (SH_WORD_SPLIT is off by
+# default), so $1 would swallow all five fields and every value after it would
+# be empty. Shipped blocks run in the operator's shell — zsh on macOS.
+# Arity FIRST: exactly five lines. A value carrying a newline would otherwise
+# shift every later field by a slot — a hostile /device/start body could put an
+# attacker's URL in VERIFICATION_URL and still pass a per-field non-empty check.
+[ "$(printf '%s\n' "$DEVICE_FIELDS" | wc -l | tr -d ' ')" = "5" ] \
+  || { echo "Unexpected device-flow response." >&2; exit 1; }
+fld() { printf '%s\n' "$DEVICE_FIELDS" | sed -n "${1}p"; }
+DEVICE_CODE="$(fld 1)"; USER_CODE="$(fld 2)"; VERIFICATION_URL="$(fld 3)"
+INTERVAL="$(fld 4)"; EXPIRES="$(fld 5)"
+[ -n "$DEVICE_CODE" ] && [ -n "$USER_CODE" ] && [ -n "$VERIFICATION_URL" ] \
+  && [ -n "$INTERVAL" ] && [ -n "$EXPIRES" ] \
+  || { echo "Unexpected device-flow response." >&2; exit 1; }
 ```
 
 ---
