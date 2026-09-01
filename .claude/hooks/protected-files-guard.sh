@@ -461,11 +461,24 @@ is_unlocked() {
 # cannot be known before it runs.
 # ===========================================================================
 QXVA_PHRASE="approve verify chain"
+# Same channel, extended to the safety-floor scripts (deny-guard.sh,
+# secret-scan.sh, enforce-branch.sh, merge-gate.sh, verify-gate.sh,
+# verify-gate-quick-chain.sh, qx-verify-baseline.sh): see qxva_floor_gate
+# below. A distinct phrase keeps a floor approval from ever being mistaken
+# for (or reused as) a verify.json approval, even though both are a
+# content-bound nonce typed by a human.
+QXVA_FLOOR_PHRASE="approve floor edit"
 
 # The single python3 program behind every qxva_* query. Modes:
 #   gate  <tool_name> <file_path> <transcript_path> <phrase>   payload on stdin
-# Prints a key=value block (one per line, values newline-free) and exits 0;
-# exits non-zero only if it could not run at all.
+#     -- full verify.json weaken/strengthen analysis, for .quetrex/verify.json
+#   floor <tool_name> <file_path> <transcript_path> <phrase>   payload on stdin
+#     -- nonce + human-approval proof only, for the seven floor scripts
+# Both modes share the SAME "what bytes would this write, and did a human
+# type the phrase plus a hash of those exact bytes" core -- only "gate" adds
+# the verify.json-specific chain comparison on top. Prints a key=value block
+# (one per line, values newline-free) and exits 0; exits non-zero only if it
+# could not run at all.
 QXVA_PY='
 import sys, json, hashlib, os
 
@@ -502,7 +515,56 @@ if new_text is None:
     out("STATUS", "UNDETERMINED")
     sys.exit(0)
 
-# --- chain extraction -------------------------------------------------------
+nonce = hashlib.sha256(new_text.encode("utf-8")).hexdigest()[:8]
+
+# --- proof of human approval: a TYPED user turn carrying the nonce ----------
+# Shared by BOTH modes -- see the long comment block above this variable for
+# why origin.kind=="human" is the only accepted discriminator.
+approved = "no"
+turns = 0
+if tpath and os.path.isfile(tpath):
+    needle = (phrase + " " + nonce).lower()
+    try:
+        with open(tpath, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(row, dict) or row.get("type") != "user":
+                    continue
+                msg = row.get("message")
+                if not isinstance(msg, dict):
+                    continue
+                content = msg.get("content")
+                # A list of tool_result blocks is agent-generated: ignored.
+                if not isinstance(content, str):
+                    continue
+                # STRING content is NOT proof a human typed it -- see the
+                # measurement in the comment block above this variable
+                # (667/1366 string-content user rows are agent-reachable).
+                # The discriminator that actually holds is origin.kind==
+                # "human". Absent or malformed origin fails CLOSED.
+                origin = row.get("origin")
+                if not isinstance(origin, dict) or origin.get("kind") != "human":
+                    continue
+                turns += 1
+                if needle in " ".join(content.split()).lower():
+                    approved = "yes"
+    except Exception:
+        pass
+
+if mode == "floor":
+    out("STATUS", "OK")
+    out("NONCE", nonce)
+    out("APPROVED", approved)
+    out("TYPED_TURNS", turns)
+    sys.exit(0)
+
+# --- chain extraction (mode == "gate", verify.json specific) ---------------
 def chain_of(text):
     try:
         d = json.loads(text)
@@ -575,58 +637,8 @@ elif old_chain is not None and new_cmds == old_cmds and new_envs == old_envs:
 def numbered(cs):
     return "  ".join("%d) %s" % (i + 1, c) for i, c in enumerate(cs)) if cs else "(empty)"
 
-nonce = hashlib.sha256(new_text.encode("utf-8")).hexdigest()[:8]
-
-# --- proof of human approval: a TYPED user turn carrying the nonce ----------
-approved = "no"
-turns = 0
-if tpath and os.path.isfile(tpath):
-    needle = (phrase + " " + nonce).lower()
-    try:
-        with open(tpath, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(row, dict) or row.get("type") != "user":
-                    continue
-                msg = row.get("message")
-                if not isinstance(msg, dict):
-                    continue
-                content = msg.get("content")
-                # A list of tool_result blocks is agent-generated: ignored.
-                if not isinstance(content, str):
-                    continue
-                # STRING content is NOT proof a human typed it. MEASURED over
-                # the transcripts of this repo 2026-08-27: of 1366 string-content
-                # user rows, only 699 came from a person. The other 667 are
-                # agent-reachable and carry exactly this shape --
-                # `<task-notification>` summary text the agent itself wrote,
-                # `Another Claude session sent a message:` (SendMessage, peer),
-                # and `<command-message>` rows from an agent-invoked
-                # SlashCommand. A reviewer replayed the SendMessage shape and
-                # rewrote the verify chain to ["true"] with no human involved.
-                #
-                # The discriminator that actually holds is origin.kind ==
-                # "human". It is NOT promptSource == "typed": `queued` and
-                # `suggestion_accepted` rows are also genuinely human (138 real
-                # ones here) and requiring `typed` would reject them. Absent or
-                # malformed origin fails CLOSED -- an older client that does not
-                # stamp origin cannot approve a floor change, which is the safe
-                # direction.
-                origin = row.get("origin")
-                if not isinstance(origin, dict) or origin.get("kind") != "human":
-                    continue
-                turns += 1
-                if needle in " ".join(content.split()).lower():
-                    approved = "yes"
-    except Exception:
-        pass
-
+# nonce, approved, and turns were already computed above -- shared with the
+# "floor" mode, not recomputed here.
 out("STATUS", "OK")
 out("NONCE", nonce)
 out("VERDICT", verdict)
@@ -652,17 +664,20 @@ qxva_ask() {
   exit 2
 }
 
-# qxva_allow <reason> -- an explicit, recorded allow (never bare silence),
-# mirroring allow_unlocked's audit line so an approved write is as visible as
-# a denied one.
+# qxva_allow <reason> [label] -- an explicit, recorded allow (never bare
+# silence), mirroring allow_unlocked's audit line so an approved write is as
+# visible as a denied one. <label> names WHAT was approved in the audit log
+# (defaults to "verify chain" for the original caller); qxva_floor_gate below
+# passes "floor edit (<basename>)" so the two channels are distinguishable
+# in .quetrex/protected-files-unlock.log without a second log format.
 qxva_allow() {
-  local reason="$1" logf ts
+  local reason="$1" label="${2:-verify chain}" logf ts
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   if [ -n "${ROOT:-}" ] && [ -d "${ROOT:-}" ]; then
     mkdir -p "$ROOT/.quetrex" 2>/dev/null
     logf="$ROOT/.quetrex/protected-files-unlock.log"
     if [ -L "$logf" ]; then rm -f "$logf" 2>/dev/null; fi
-    ( umask 077; printf '%s | HUMAN-APPROVED verify chain | tool: %s | %s\n' "$ts" "$TOOL_NAME" "$reason" >> "$logf" )
+    ( umask 077; printf '%s | HUMAN-APPROVED %s | tool: %s | %s\n' "$ts" "$label" "$TOOL_NAME" "$reason" >> "$logf" )
     chmod 600 "$logf" 2>/dev/null
   fi
   if command -v jq >/dev/null 2>&1; then
@@ -726,6 +741,53 @@ qxva_gate() {
     deny "$msg  ||  DENIED: no human has typed anything in this session (an unattended or cloud run), so there is nobody to approve it. The verify chain is never changed without a person." "verify.json"
   fi
   deny "$msg  ||  TO APPROVE, type this line yourself, in the conversation:      $QXVA_PHRASE $nonce      ||  That code is a hash of the exact bytes above -- it cannot be reused for a different chain, and the agent cannot type it for you." "verify.json"
+}
+
+# qxva_floor_gate <file_path> <basename> -- the safety-floor-script
+# Write/Edit decision, mirroring qxva_gate above but for the seven floor
+# scripts instead of .quetrex/verify.json. No chain weaken/strengthen
+# analysis applies here (a floor script is not a JSON verify chain), so this
+# calls QXVA_PY in "floor" mode: nonce + human-approval proof only, sharing
+# both computations with qxva_gate rather than a second copy. Always exits;
+# returns normally ONLY when it could not determine anything (no python3, or
+# the bytes about to be written are undetermined -- e.g. an Edit whose
+# old_string does not match), so the caller's existing hard
+# `deny "PROTECTED FLOOR SCRIPT: ..."` stays as the fail-closed floor
+# beneath it.
+qxva_floor_gate() {
+  local fpath="$1" bname="$2" report="" status nonce approved typed msg
+
+  command -v python3 >/dev/null 2>&1 || return 0
+  report=$(printf '%s' "$input" | python3 -c "$QXVA_PY" floor "$TOOL_NAME" "$fpath" "$TRANSCRIPT_PATH" "$QXVA_FLOOR_PHRASE" 2>/dev/null) || return 0
+
+  status=$(printf '%s\n' "$report"   | sed -n 's/^STATUS=//p')
+  [ "$status" = "OK" ] || return 0
+  nonce=$(printf '%s\n' "$report"    | sed -n 's/^NONCE=//p')
+  approved=$(printf '%s\n' "$report" | sed -n 's/^APPROVED=//p')
+  typed=$(printf '%s\n' "$report"    | sed -n 's/^TYPED_TURNS=//p')
+  [ -n "$nonce" ] || return 0
+
+  if [ "$approved" = "yes" ]; then
+    qxva_allow "HUMAN-APPROVED (code $nonce): the operator typed \"$QXVA_FLOOR_PHRASE $nonce\" in this conversation, and that code is a hash of the exact bytes being written to $bname." "floor edit ($bname)"
+  fi
+
+  # The disclosure block. Authored HERE, by the hook -- not by the agent --
+  # so what the operator reads is what is actually about to be written.
+  msg="\`$bname\` is one of the SAFETY-FLOOR scripts -- the enforcement machinery itself (deny-guard, secret-scan, enforce-branch, merge-gate, verify-gate and its helpers). A bad edit here can silently disable every other check, so it needs YOUR approval, not the agent's."
+  msg="$msg  ||  The agent must prepare the COMPLETE, final file and write it in ONE Write operation -- the approval code is a hash of the exact bytes, so a multi-Edit sequence would need a fresh approval per edit."
+
+  # ALLOWLIST, not a denylist -- see qxva_gate above for why (measured
+  # 2026-08-27: ask is auto-allowed in every mode but "default").
+  if [ "$PERMISSION_MODE" = "default" ]; then
+    qxva_ask "$msg  ||  Approve this write to $bname?"
+  fi
+
+  # Every non-prompting mode: "ask" was MEASURED to be auto-allowed, so the
+  # only honest options are allow-on-proof or deny.
+  if [ "${typed:-0}" = "0" ]; then
+    deny "$msg  ||  DENIED: no human has typed anything in this session (an unattended or cloud run), so there is nobody to approve it. A safety-floor script is never changed without a person." "$bname"
+  fi
+  deny "$msg  ||  TO APPROVE, type this line yourself, in the conversation:      $QXVA_FLOOR_PHRASE $nonce      ||  That code is a hash of the exact bytes about to be written -- it cannot be reused for different bytes, and the agent cannot type it for you." "$bname"
 }
 
 # qx_protected_basename_in <text> -- returns the FIRST protected floor-
@@ -1249,6 +1311,13 @@ if [ "$TOOL_NAME" = "Write" ] || [ "$TOOL_NAME" = "Edit" ]; then
   names_protected_path_or_symlink "$FILE_PATH" || exit 0
   _floor_target=$(qx_protected_target_basename "$FILE_PATH")
   is_unlocked "$_floor_target" && allow_unlocked "$TOOL_NAME $FILE_PATH" "$_floor_target"
+  # HUMAN APPROVAL (2026-09-01): same qxva_* content-bound-nonce channel
+  # verify.json uses (2026-08-27, #136), extended to the floor scripts.
+  # qxva_floor_gate either allows this write on proof that the operator
+  # typed a content-bound approval code, or denies with that code -- it
+  # returns normally ONLY when it could not determine anything, in which
+  # case the original hard deny below stays as the fail-closed floor.
+  qxva_floor_gate "$FILE_PATH" "$_floor_target"
   deny "PROTECTED FLOOR SCRIPT: this $TOOL_NAME targets \`$FILE_PATH\`, one of the safety-floor scripts (deny-guard.sh, secret-scan.sh, enforce-branch.sh, merge-gate.sh, verify-gate.sh) or its quick-chain helper. Denied by default — see .claude/CLAUDE.md." "$_floor_target"
   exit 0
 fi
