@@ -106,9 +106,11 @@ if [ ! -t 0 ]; then input=$(cat); fi
 if command -v jq >/dev/null 2>&1; then
   COMMAND=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)
   SESSION_CWD=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
+  TRANSCRIPT_PATH=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
 else
   COMMAND=""
   SESSION_CWD=""
+  TRANSCRIPT_PATH=""
 fi
 # jq-free extraction fallback (best-effort) so a missing jq cannot blind the gate
 # to a merge command. Not exhaustive — only used to detect the merge intent.
@@ -116,6 +118,128 @@ if [ -z "$COMMAND" ]; then
   COMMAND=$(printf '%s' "$input" | tr -d '\n' | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p')
 fi
 [ -z "$COMMAND" ] && exit 0
+
+# ============================================================================
+# qx_operator_driven — human-origin proof OF MERGE INTENT (QUE-1)
+# ============================================================================
+# AUTO_MERGE has exactly one job: authorizing an UNATTENDED merge with no
+# human in the loop (see the file-header note this task added above GATE 2).
+# A missing review-verdict.json and an ESCALATE_HUMAN verdict correctly stop
+# that unattended path — but they also stop an OPERATOR standing right here,
+# reading the same on-disk evidence (a green, HEAD-pinned verify ledger; zero
+# open Critical findings) the pipeline itself would trust, with no channel to
+# say so. This function is that channel's proof, not its authorization —
+# GATE 2 below still requires the SAME hard evidence (GATE 3's ledger, GATE
+# 4's findings) for an operator-driven merge as it always has; this only
+# decides whether the review-gate's OWN uncertainty may be set aside.
+#
+# WHAT IS ACTUALLY PROVEN, STATED PRECISELY: a human is demonstrably present
+# in THIS session, AND that same human has, in THIS session, expressed
+# MERGE INTENT — a turn they authored that talks about merging. Presence
+# alone is NOT enough and was a real gap in the first version of this
+# function: an operator typing one unrelated word anywhere in an
+# interactive session let an agent run `gh pr merge` on its own initiative
+# against an ESCALATE_HUMAN verdict and have it read as "operator-driven".
+# Requiring the SAME human-origin row to also mention merging closes that —
+# an agent cannot manufacture a qualifying row (see the discriminator
+# below), and a human row about something else no longer counts.
+#
+# THE DISCRIMINATOR IS PORTED, NOT SOURCED, from
+# .claude/hooks/protected-files-guard.sh's qxva_* human-origin scan — that
+# file executes its whole guard at load (same reason merge-gate.sh's own
+# tokenizer note near the top of this file gives for why ITS copy is
+# verbatim rather than sourced), so it cannot be sourced here without
+# running a different hook's decision logic. Same discriminator, same
+# fail-closed rules, same measured finding behind them: 667 of 1366
+# string-content `type=="user"` transcript rows are agent-reachable
+# (SendMessage peer rows, task-notification summaries, agent-invoked
+# SlashCommands) — so `message.content` being a plain string is NOT proof a
+# human typed it, and `promptSource=="typed"` is not trustworthy either
+# (`queued` and `suggestion_accepted` are also genuinely human turns). The
+# only discriminator that holds is `origin.kind == "human"`, read from the
+# transcript row itself. No transcript, an unreadable transcript, no
+# python3, zero human-origin turns, or human-origin turns that never mention
+# merging (a cloud/unattended routine, or an operator present but never
+# asked for a merge) all fail CLOSED — qx_operator_driven returns false and
+# the caller falls through to the existing unattended rules unchanged. Every
+# human-origin row is scanned, not only the most recent — a qualifying turn
+# anywhere earlier in the session is sufficient; it need not be the last one.
+#
+# THE MERGE-INTENT TEST is deliberately coarse: case-insensitive,
+# whitespace-normalized, substring "merge" anywhere in that row's content.
+# This covers "merge it", "merge QUE-1", and the /quetrex:merge slash
+# command — the phrasings an operator actually uses — without trying to
+# parse intent more precisely than a substring test can honestly claim to.
+#
+# THE RESIDUAL LIMIT, STATED PLAINLY rather than left implicit: this is NOT
+# bound to a specific PR number, branch, or commit. A merge-intent turn
+# about one PR in this session satisfies the check for a DIFFERENT PR the
+# same session later merges. That is a deliberate, bounded tradeoff, not an
+# oversight — GATE 3 and GATE 4 still require a green, HEAD-pinned verify
+# ledger and zero open Critical findings for the ACTUAL commit being merged
+# on every path, attended or not, so this function only ever decides
+# whether the review-gate's own uncertainty may be set aside, never whether
+# the code itself is safe to ship.
+#
+# UNLIKE qxva_gate/qxva_floor_gate in protected-files-guard.sh, this makes NO
+# claim about an approval PHRASE or a content-bound NONCE. Those exist to
+# bind a human's approval to the EXACT BYTES about to be written to a
+# protected file. A merge command writes no new bytes for a human to
+# approve — it consumes evidence that already exists on disk. The only
+# question this function answers is "did a human, in this session, express
+# intent to merge," which GATE 2 then couples with the same strict,
+# unweakened evidence GATE 3/4 already require for every merge.
+QX_HUMAN_ORIGIN_PY='
+import sys, json, os
+
+tpath = sys.argv[1] if len(sys.argv) > 1 else ""
+found = 0
+if tpath and os.path.isfile(tpath):
+    try:
+        with open(tpath, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(row, dict) or row.get("type") != "user":
+                    continue
+                msg = row.get("message")
+                if not isinstance(msg, dict):
+                    continue
+                content = msg.get("content")
+                # A list of tool_result blocks is agent-generated: ignored.
+                # Same rule protected-files-guard.sh applies, for the same
+                # measured reason.
+                if not isinstance(content, str):
+                    continue
+                origin = row.get("origin")
+                if not isinstance(origin, dict) or origin.get("kind") != "human":
+                    continue
+                # MERGE INTENT: the same human-origin row must mention
+                # merging. Same normalization protected-files-guard.sh uses
+                # for its own content needle match.
+                normalized = " ".join(content.split()).lower()
+                if "merge" not in normalized:
+                    continue
+                found = 1
+                break
+    except Exception:
+        found = 0
+print(found)
+'
+
+qx_operator_driven() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  [ -n "${TRANSCRIPT_PATH:-}" ] || return 1
+  [ -f "$TRANSCRIPT_PATH" ] || return 1
+  local r
+  r=$(python3 -c "$QX_HUMAN_ORIGIN_PY" "$TRANSCRIPT_PATH" 2>/dev/null) || return 1
+  [ "$r" = "1" ]
+}
 
 # --- is this a merge-to-main vector at all? --------------------------------
 #
@@ -1504,10 +1628,51 @@ evaluate_vector() {
   fi
 
   # ===========================================================================
-  # GATE 2 — review verdict must be AUTO_MERGE, for THIS head commit
+  # GATE 2 — review verdict must be AUTO_MERGE, for THIS head commit —
+  # UNLESS an operator-driven merge (see qx_operator_driven above) is
+  # standing on the SAME hard evidence GATE 3/4 require of every merge.
   # ===========================================================================
+  #
+  # QUE-1: AUTO_MERGE authorizes exactly one thing — an UNATTENDED merge
+  # with no human present. A missing review-verdict.json and an
+  # ESCALATE_HUMAN verdict correctly stop that unattended path; they are
+  # NOT a statement that the underlying work is unsafe to ship, only that
+  # nobody (agent or human) has affirmatively said "merge this" for it. An
+  # operator who is both present AND has expressed merge intent in this
+  # session — proven by qx_operator_driven's transcript scan, which
+  # requires the SAME human-origin turn to mention merging, not merely
+  # presence somewhere in the session — IS that affirmation, but ONLY for
+  # these two states (a review-gate that never ran, or one that was
+  # uncertain/looped/referred out). It is NOT
+  # extended to REWORK/BLOCK (a CONFIRMED defect), APPROVE (a legacy verdict
+  # this policy already treats as insufficient), or a malformed/unknown
+  # verdict — those describe an actual finding or an unreadable artifact,
+  # not mere absence of a decision, and stay hard-blocked for every merge,
+  # attended or not.
+  #
+  # The bypass below does NOT skip GATE 3 (verify ledger) or GATE 4
+  # (security findings) — those run unconditionally after this block either
+  # way, exactly as before, so "ledger green at HEAD, zero open Critical"
+  # is still the unweakened precondition for an operator-driven merge too.
+  # It DOES also skip GATE 2b (the reviewer-self-exemption check): that gate
+  # exists to stop the REVIEWER from grading its own homework on an
+  # AUTO_MERGE verdict it wrote itself — it has nothing to check when there
+  # is no AUTO_MERGE verdict being trusted at all.
+  GATE2_OPERATOR_BYPASS=0
+  if qx_operator_driven; then
+    if [ ! -f "$RV" ]; then
+      GATE2_OPERATOR_BYPASS=1
+    else
+      VERDICT_PEEK=$(jq -r '.verdict // empty' "$RV" 2>/dev/null)
+      case "$VERDICT_PEEK" in
+        ESCALATE_HUMAN|ESCALATE) GATE2_OPERATOR_BYPASS=1 ;;
+      esac
+    fi
+  fi
+
+  if [ "$GATE2_OPERATOR_BYPASS" -ne 1 ]; then
   if [ ! -f "$RV" ]; then
-    deny "MERGE GATE (REWORK): .quetrex/review-verdict.json is missing — the review-gate never ran on this branch. Run the pipeline's review-gate (native /review + /security-review) before merging '$merge_kind'."
+    deny "MERGE GATE (REWORK): .quetrex/review-verdict.json is missing — the review-gate never ran on this branch. Run the pipeline's review-gate (native /review + /security-review) before merging '$merge_kind'. An operator standing here may instead run /quetrex:merge, which merges from the same on-disk evidence (a green, HEAD-pinned verify ledger and zero open Critical findings) directly."
   fi
   VERDICT=$(jq -r '.verdict // empty' "$RV" 2>/dev/null)
   RV_SHA=$(jq -r '.sha // .head_sha // empty' "$RV" 2>/dev/null)
@@ -1548,7 +1713,7 @@ evaluate_vector() {
       ;;
     ESCALATE_HUMAN|ESCALATE)
       # ESCALATE_HUMAN is the current contract string; ESCALATE is the legacy alias.
-      deny "MERGE GATE (ESCALATE_HUMAN): review verdict is '$VERDICT' — the review-gate was uncertain, hit its rework cap, or referred this to a human. Do NOT auto-merge. Surface the verdict and its findings to the user and let them decide (/quetrex:task-rework)."
+      deny "MERGE GATE (ESCALATE_HUMAN): review verdict is '$VERDICT' — the review-gate was uncertain, hit its rework cap, or referred this to a human. Do NOT auto-merge. Surface the verdict and its findings to the user and let them decide (/quetrex:task-rework), or have the operator run /quetrex:merge to merge from the same on-disk evidence (a green, HEAD-pinned verify ledger and zero open Critical findings) directly."
       ;;
     APPROVE)
       # Legacy reviewer verdict. Under the NEW merge policy only the review-gate's
@@ -1624,6 +1789,13 @@ evaluate_vector() {
       esac
       ;;
   esac
+  fi
+  # else: GATE2_OPERATOR_BYPASS==1 — an operator is provably present AND has
+  # expressed merge intent in this session, and the only verdict states this
+  # override reaches (missing, ESCALATE_HUMAN) carry no confirmed defect.
+  # VERDICT/RV_SHA are intentionally left unset on this path; nothing below
+  # GATE 2 reads them. GATE 3 and GATE 4 (unconditional, below) still supply
+  # the unweakened evidence requirement.
 
   # ===========================================================================
   # GATE 3 — verify ledger green AND commit-pinned to HEAD (closes stale-green)
