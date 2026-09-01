@@ -179,10 +179,26 @@ execute_one() {  # <idx>
   local outfile="$JOBDIR/$idx.out" codefile="$JOBDIR/$idx.code" timefile="$JOBDIR/$idx.time"
   local start end
   start=$(date +%s)
+  # HERMETIC ENV (fixes ambient-env contamination, see git log for details):
+  # a unit's fixtures fire the real floor hooks (deny-guard.sh, verify-
+  # gate.sh, ...) against disposable temp repos, expecting each hook to
+  # resolve against the fixture's own `cwd` payload field. Several of those
+  # hooks *legitimately* prefer CLAUDE_PROJECT_DIR / QUETREX_VERIFY_FULL /
+  # QUETREX_UNLOCK_FLOOR over that payload when the var is set (worktree-
+  # safe root resolution, full-vs-quick chain selection, the floor unlock
+  # escape hatch) — correct hook behavior, but it means a unit run under a
+  # real Stop hook (which sets these for the ACTUAL session) silently judges
+  # its fixtures against the wrong repo instead of its own temp dir. Each
+  # unit is an independent process with no shared state (see PARALLELISM
+  # above) and is responsible for setting these vars itself, per fire, when
+  # its own fixtures need them — so strip them from every unit's ambient
+  # environment here, once, rather than patching every fixture helper.
   if [ "$kind" = "js" ]; then
-    node "$path" >"$outfile" 2>&1
+    env -u CLAUDE_PROJECT_DIR -u QUETREX_VERIFY_FULL -u QUETREX_UNLOCK_FLOOR \
+      node "$path" >"$outfile" 2>&1
   else
-    bash "$path" >"$outfile" 2>&1
+    env -u CLAUDE_PROJECT_DIR -u QUETREX_VERIFY_FULL -u QUETREX_UNLOCK_FLOOR \
+      bash "$path" >"$outfile" 2>&1
   fi
   printf '%s' "$?" > "$codefile"
   end=$(date +%s)
