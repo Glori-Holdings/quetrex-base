@@ -163,6 +163,16 @@ if [ "$JQ_OK" -eq 1 ]; then
   _jq_cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
   [ -n "$_jq_cwd" ] && _cwd="$_jq_cwd"
 fi
+# SEC-QUE1-1 (2026-09-01): same jq-primary/sed-fallback extraction, for the
+# payloads own transcript_path -- see _kg_is_transcript_literal below for
+# why this matters (a candidate that names the LIVE transcript by an exact
+# match, without ever spelling ".claude/projects" in its own text).
+_transcript_path=$(printf '%s' "$input" | tr -d '
+' | sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+if [ "$JQ_OK" -eq 1 ]; then
+  _jq_tp=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
+  [ -n "$_jq_tp" ] && _transcript_path="$_jq_tp"
+fi
 _session_root=""
 if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "${CLAUDE_PROJECT_DIR:-}" ]; then
   _session_root=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || _session_root="$CLAUDE_PROJECT_DIR"
@@ -197,11 +207,76 @@ LAST_CD=""
 # plugin's installed cache, and nested inside quetrex's bundled copy — same
 # shape verify-gate.sh already uses to source verify-gate-quick-chain.sh.
 QX_ARMED_HELPER="$(dirname "${BASH_SOURCE[0]}")/qx-armed.sh"
-if ! source "$QX_ARMED_HELPER" 2>/dev/null || ! command -v qx_repo_armed >/dev/null 2>&1; then
+if ! source "$QX_ARMED_HELPER" 2>/dev/null || ! command -v qx_repo_armed >/dev/null 2>&1 \
+   || ! command -v qx_normalize_path >/dev/null 2>&1; then
   # Sourcing failed (helper missing/unreadable in some non-standard install
   # layout) — degrade to the pre-shared-helper, working-tree-file-only
   # check rather than let the whole hook error out. Never a stack trace.
   qx_repo_armed() { [ -n "$1" ] && [ -f "$1/.quetrex/project.json" ]; }
+  # SEC-QUE1-1 FOLLOWUP (2026-09-01): qx_normalize_path is called from
+  # _kg_check_path (and resolve_root_for) UNCONDITIONALLY once reached — it
+  # is not optional the way an extra safety check would be. EXECUTED,
+  # before this fix: with qx-armed.sh unreachable, every call landed on an
+  # UNDEFINED function -- bash printed "qx_normalize_path: command not
+  # found" to stderr and the command substitution silently returned an
+  # EMPTY string, so the path being checked collapsed to "", matched
+  # nothing, and the write/command that should have been denied was
+  # ALLOWED. A missing helper must never fail OPEN, and this hook must
+  # never surface a raw interpreter error as if something else broke — see
+  # the DEFENSIVE FLOOR check right below this block, which is the actual
+  # belt-and-suspenders floor; THIS fallback exists so that floor is
+  # normally never even needed.
+  #
+  # ONE-COPY, THIRD COPY (mirrors the split_segments_quote_aware /
+  # normalize_segment convention this repo already uses across
+  # merge-gate.sh, protected-files-guard.sh and verify-gate-quick-chain.sh
+  # — see the QX-CMDSCAN BEGIN/END sentinel comment in those files): this
+  # is now the SECOND fallback copy of qx_normalize_path (qx-armed.sh is
+  # the canonical, sourced definition; protected-files-guard.sh carries an
+  # identical inline fallback for the same "sourcing can fail" reason).
+  # test/qx-normalize-path-parity.test.sh extracts all three copies by
+  # function-name boundary (tolerant of indentation — only the DEDENTED
+  # body is compared) and asserts them byte-identical pairwise, so a future
+  # fix to one copy cannot silently leave the others on an older, weaker
+  # one. bash 3.2-safe (no negative array indices), same as the original.
+  qx_normalize_path() {
+    local p="$1" part leading_slash="" last_idx joined
+    local -a parts=() out=()
+    case "$p" in /*) leading_slash="/" ;; esac
+    IFS='/' read -ra parts <<< "$p"
+    for part in "${parts[@]}"; do
+      case "$part" in
+        .|'') continue ;;
+        ..)
+          last_idx=$((${#out[@]} - 1))
+          if [ "$last_idx" -ge 0 ] && [ "${out[$last_idx]}" != ".." ]; then
+            unset "out[$last_idx]"
+            out=(${out[@]+"${out[@]}"})
+          else
+            out+=("..")
+          fi
+          ;;
+        *) out+=("$part") ;;
+      esac
+    done
+    ( IFS='/'; joined="${out[*]:-}"; printf '%s%s' "$leading_slash" "$joined" )
+  }
+fi
+
+# DEFENSIVE FLOOR (SEC-QUE1-1 FOLLOWUP): the fallback above should make this
+# unreachable in practice, but a hook that GATES writes must never depend on
+# "should" — if either required helper is somehow still unavailable here
+# (a stub, a future refactor that removes the fallback, a corrupted
+# install), FAIL CLOSED with one clean, labelled deny line. Never let
+# execution reach a call to an undefined function: that prints a raw
+# interpreter stack trace to the operator (this repos own rule: a hook must
+# never surface one) AND, because `$(undefined_fn ...)` silently expands to
+# an empty string rather than aborting the script, every downstream path
+# check would silently match nothing and ALLOW the exact write this hook
+# exists to deny -- fail OPEN on a missing dependency, the one failure mode
+# a safety floor can never have.
+if ! command -v qx_repo_armed >/dev/null 2>&1 || ! command -v qx_normalize_path >/dev/null 2>&1; then
+  deny "deny-guard.sh: a required internal helper (qx_repo_armed or qx_normalize_path) is unavailable in this process, so this command cannot be safely evaluated. Refusing to run it unchecked rather than risk a silent bypass. This should never happen in a normal install -- if it does, report it."
 fi
 
 # PERF-ONECOPY-2 (round 4 reviewer, Medium): target_armed() below is called
@@ -378,6 +453,33 @@ target_armed() {  # target_armed <explicit-dir-or-empty> [<anchor-override>]
 # already has for $VARIABLES; `git clean` is not checked because
 # .quetrex/project.json is a TRACKED file and git clean never removes
 # tracked files (verified: `git ls-files .quetrex/` lists it).
+# _kg_is_transcript_literal <normalized-path> -- SEC-QUE1-1 (2026-09-01):
+# 0 iff <normalized-path> is a Claude Code session transcript
+# (~/.claude/projects/<slug>/<session>.jsonl) -- the ONE channel this whole
+# safety floor treats as unforgeable proof a HUMAN, not the agent, is
+# speaking (protected-files-guard.sh's qxva_* scans and merge-gate.sh's own
+# QX_HUMAN_ORIGIN_PY both key on a rows origin.kind=="human" read straight
+# out of that file). Nothing protected the file ITSELF before this fix: an
+# agent could append one forged row and self-grant its own approval for
+# every floor script this file gates. Checked by path-tail (any candidate
+# whose text contains the ".claude/projects/<...>/<...>.jsonl" shape) AND,
+# separately, by an exact match against THIS calls own payload
+# transcript_path (_transcript_path, extracted above) after the same
+# normalization -- so a candidate that resolves to the live transcript
+# without spelling ".claude/projects" in its own text is still caught.
+# UNCONDITIONAL: see _kg_deny_transcript below -- there is no unlock for
+# this, unlike _kg_is_protected_literal below it.
+_kg_is_transcript_literal() {
+  case "$1" in
+    *.claude/projects/*.jsonl) return 0 ;;
+  esac
+  if [ -n "$_transcript_path" ]; then
+    _kgtl_norm_tp=$(qx_normalize_path "$_transcript_path")
+    [ -n "$_kgtl_norm_tp" ] && [ "$1" = "$_kgtl_norm_tp" ] && return 0
+  fi
+  return 1
+}
+
 # _kg_is_protected_literal <normalized-path> -- 0 iff it IS one of the
 # protected shapes. Factored out of _kg_check_path (round 2, reviewer C2)
 # so the glob-expansion branch below can re-run the exact same literal test
@@ -436,6 +538,13 @@ dg_scoped_hint() {
   printf 'QUETREX_UNLOCK_FLOOR=%s' "$(printf '%s' "$1" | tr ' ' ':')"
 }
 
+_kg_deny_transcript() {  # _kg_deny_transcript <verb-description> <matched-path>
+  # UNCONDITIONAL. Unlike _kg_deny_path below, this never reads or mentions
+  # QUETREX_UNLOCK_FLOOR -- there is no legitimate reason for an agent to
+  # write a transcript, so there is no door to unlock.
+  deny "Refusing to let '$1' target '$2', a Claude Code session transcript under ~/.claude/projects/. A transcript is the ONLY channel this safety floor treats as unforgeable proof that a HUMAN, not the agent, is speaking -- an agent must never be able to write, plant, or edit a row in one. Denied unconditionally: there is no QUETREX_UNLOCK_FLOOR for this and no approval channel."
+}
+
 _kg_deny_path() {  # _kg_deny_path <verb-description> <matched-protected-path>
   _kg_target=$(_kg_target_for_path "$2")
   _kg_ambient="${QUETREX_UNLOCK_FLOOR:-}"
@@ -485,6 +594,10 @@ _kg_check_path() {
     *) [ -n "$_kill_cd" ] && p="$_kill_cd/$p" ;;
   esac
   p=$(qx_normalize_path "$p")
+
+  if _kg_is_transcript_literal "$p"; then
+    _kg_deny_transcript "$2" "$p"
+  fi
 
   if _kg_is_protected_literal "$p"; then
     _kg_t=$(_kg_target_for_path "$p")

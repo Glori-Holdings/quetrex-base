@@ -165,21 +165,32 @@ fi
 # human-origin row is scanned, not only the most recent — a qualifying turn
 # anywhere earlier in the session is sufficient; it need not be the last one.
 #
-# THE MERGE-INTENT TEST is deliberately coarse: case-insensitive,
-# whitespace-normalized, substring "merge" anywhere in that row's content.
-# This covers "merge it", "merge QUE-1", and the /quetrex:merge slash
-# command — the phrasings an operator actually uses — without trying to
-# parse intent more precisely than a substring test can honestly claim to.
+# THE MERGE-INTENT TEST (SEC-QUE1-3 FIX, 2026-09-01): case-insensitive,
+# whitespace-normalized, WORD-BOUNDARY match on merge/merges/merging/merged
+# (never a bare substring), AND the same row must not carry a negation
+# immediately governing that word (do not merge / don't merge / never merge
+# / not ready to merge / no merge). This covers "merge it", "merge QUE-1",
+# and the /quetrex:merge slash command — the phrasings an operator actually
+# uses — while rejecting the two shapes EXECUTED against the pre-fix code
+# and proven to falsely qualify: "do NOT merge this, it is not ready" and
+# "the submerged cable" (a bare substring test matches "merged" inside
+# "submerged"; a word-boundary regex does not).
 #
-# THE RESIDUAL LIMIT, STATED PLAINLY rather than left implicit: this is NOT
-# bound to a specific PR number, branch, or commit. A merge-intent turn
-# about one PR in this session satisfies the check for a DIFFERENT PR the
-# same session later merges. That is a deliberate, bounded tradeoff, not an
-# oversight — GATE 3 and GATE 4 still require a green, HEAD-pinned verify
-# ledger and zero open Critical findings for the ACTUAL commit being merged
-# on every path, attended or not, so this function only ever decides
-# whether the review-gate's own uncertainty may be set aside, never whether
-# the code itself is safe to ship.
+# WHAT THIS STILL DOES NOT PROVE, STATED PLAINLY. This is a short regex plus
+# an explicit negation list, deliberately NOT full intent parsing (per
+# operator direction) — a row that merely MENTIONS merging without asking
+# for it ("fix the merge conflict in README", "is the worktree not merged
+# yet") can still satisfy the word-boundary test and is not covered by the
+# fixed five-phrase negation list; that residual imprecision is disclosed,
+# not silently accepted as complete. And, UNCHANGED from before this fix:
+# this is NOT bound to a specific PR number, branch, or commit. A
+# merge-intent turn about one PR in this session satisfies the check for a
+# DIFFERENT PR the same session later merges. That is a deliberate, bounded
+# tradeoff, not an oversight — GATE 3 and GATE 4 still require a green,
+# HEAD-pinned verify ledger and zero open Critical findings for the ACTUAL
+# commit being merged on every path, attended or not, so this function only
+# ever decides whether the review-gate's own uncertainty may be set aside,
+# never whether the code itself is safe to ship.
 #
 # UNLIKE qxva_gate/qxva_floor_gate in protected-files-guard.sh, this makes NO
 # claim about an approval PHRASE or a content-bound NONCE. Those exist to
@@ -190,7 +201,13 @@ fi
 # intent to merge," which GATE 2 then couples with the same strict,
 # unweakened evidence GATE 3/4 already require for every merge.
 QX_HUMAN_ORIGIN_PY='
-import sys, json, os
+import sys, json, os, re
+
+# SEC-QUE1-3 FIX: word-boundary merge-word match, plus an explicit negation
+# list for a negation phrase immediately governing that word. Kept as a
+# short regex plus a literal phrase list on purpose — no NLP.
+MERGE_RE = re.compile(r"\bmerg(?:e|es|ing|ed)\b")
+NEG_RE = re.compile(r"\b(do not|dont|never|not ready to|no)\s+merg(?:e|es|ing|ed)\b")
 
 tpath = sys.argv[1] if len(sys.argv) > 1 else ""
 found = 0
@@ -219,11 +236,22 @@ if tpath and os.path.isfile(tpath):
                 origin = row.get("origin")
                 if not isinstance(origin, dict) or origin.get("kind") != "human":
                     continue
-                # MERGE INTENT: the same human-origin row must mention
-                # merging. Same normalization protected-files-guard.sh uses
-                # for its own content needle match.
+                # MERGE INTENT (SEC-QUE1-3 FIX): the same human-origin row
+                # must contain a WORD-BOUNDARY merge word (never a bare
+                # substring -- "submerged" must not match), and must NOT
+                # carry a negation immediately governing it (do not/dont/
+                # never/not ready to/no + merge word). Apostrophes are
+                # stripped before the negation check: NEG_RE matches
+                # the apostrophe-free spelling "dont" only, so a contraction
+                # with a real apostrophe character must be normalized to
+                # that spelling first. This python source is embedded in a
+                # single-quoted bash string, which cannot itself carry a
+                # literal apostrophe character.
                 normalized = " ".join(content.split()).lower()
-                if "merge" not in normalized:
+                normalized_noapos = normalized.replace("’", "").replace(chr(39), "")
+                if not MERGE_RE.search(normalized):
+                    continue
+                if NEG_RE.search(normalized_noapos):
                     continue
                 found = 1
                 break
