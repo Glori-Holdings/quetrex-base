@@ -173,6 +173,119 @@ if [ "$JQ_OK" -eq 1 ]; then
   _jq_tp=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
   [ -n "$_jq_tp" ] && _transcript_path="$_jq_tp"
 fi
+
+# --- SEC-QUE1-1 REMEDIATION (round 2): PHYSICAL resolution ------------------
+# _kg_is_transcript_literal below matches on the SPELLING of a candidate
+# (a ".claude/projects/...jsonl" text shape, or an exact match against this
+# call's own transcript_path). Four proven bypasses spell nothing
+# text-matchable: a `cd`-anchored bare relative basename, a symlinked
+# PARENT directory, a hardlink to the live transcript, and `rm -rf`/`mv` of
+# ~/.claude/projects itself. None of those can be closed by matching more
+# text -- they need the candidate's PARENT directory resolved to its real,
+# symlink-free filesystem path (never a hard realpath/readlink -f
+# dependency -- neither ships reliably on macOS) and, for the hardlink
+# case, device+inode identity. ADDITIVE: every existing literal check below
+# still runs and still denies everything it always denied.
+#
+# CLOUD INERTNESS / COST: if $HOME/.claude/projects does not exist and no
+# transcript_path was given, _kg_resolution_active stays 0 and every
+# physical check below returns 1 (no match) on its first line -- zero
+# forks in the common/cloud case. This file has no `local`, matching its
+# existing house style (see the comment above dg_unlock_names) -- unique
+# `_kg`-prefixed globals instead.
+_kg_projects_root_raw="${HOME:-}/.claude/projects"
+_kg_projects_root_abs=""
+if [ -n "${HOME:-}" ] && [ -d "$_kg_projects_root_raw" ]; then
+  _kg_projects_root_abs=$(cd "$_kg_projects_root_raw" 2>/dev/null && pwd -P 2>/dev/null)
+fi
+_kg_transcript_devino=""
+_kg_resolution_active=0
+[ -n "$_kg_projects_root_abs" ] && _kg_resolution_active=1
+
+# _kg_realdir <dir> -- physical (symlink-resolved) form of <dir>, empty if
+# it doesn't exist / can't be entered.
+_kg_realdir() {
+  [ -n "${1:-}" ] || return 1
+  ( cd "$1" 2>/dev/null && pwd -P 2>/dev/null )
+}
+
+# _kg_stat_devino <file> -- "device:inode" for an EXISTING file. Tries the
+# BSD/macOS `stat -f` form first, then GNU/Linux `stat -c` -- detected,
+# never assumed. Empty on any failure.
+_kg_stat_devino() {
+  _kgsdi_f="${1:-}"
+  [ -n "$_kgsdi_f" ] && [ -e "$_kgsdi_f" ] || return 1
+  _kgsdi_out=$(stat -f '%d:%i' "$_kgsdi_f" 2>/dev/null)
+  if [ -n "$_kgsdi_out" ]; then printf '%s' "$_kgsdi_out"; return 0; fi
+  _kgsdi_out=$(stat -c '%d:%i' "$_kgsdi_f" 2>/dev/null)
+  if [ -n "$_kgsdi_out" ]; then printf '%s' "$_kgsdi_out"; return 0; fi
+  return 1
+}
+
+if [ -n "$_transcript_path" ] && [ -e "$_transcript_path" ]; then
+  _kg_transcript_devino=$(_kg_stat_devino "$_transcript_path")
+  [ -n "$_kg_transcript_devino" ] && _kg_resolution_active=1
+fi
+
+# _kg_is_transcript_physical <already-cd-anchored-normalized-path> -- called
+# from _kg_check_path AFTER it has already joined a relative candidate onto
+# _kill_cd and normalized it, so <p> is always absolute here (or this
+# returns 1 having matched nothing).
+_kg_is_transcript_physical() {
+  _kgtp_p="${1:-}"
+  [ "$_kg_resolution_active" -eq 1 ] || return 1
+  [ -n "$_kgtp_p" ] || return 1
+
+  # directory-level: candidate resolved AS A DIRECTORY is, or is under,
+  # the resolved projects root -- `rm -rf` / `mv` of ~/.claude/projects
+  # (or a symlink chain that reaches it) directly.
+  if [ -n "$_kg_projects_root_abs" ]; then
+    _kgtp_full=$(_kg_realdir "$_kgtp_p")
+    if [ -n "$_kgtp_full" ]; then
+      case "$_kgtp_full" in
+        "$_kg_projects_root_abs"|"$_kg_projects_root_abs"/*) return 0 ;;
+      esac
+    fi
+  fi
+
+  case "$_kgtp_p" in
+    */) _kgtp_dir="${_kgtp_p%/}"; _kgtp_base="" ;;
+    *) _kgtp_dir="${_kgtp_p%/*}"; _kgtp_base="${_kgtp_p##*/}" ;;
+  esac
+  [ "$_kgtp_dir" = "$_kgtp_p" ] && _kgtp_dir="/"
+  _kgtp_rdir=$(_kg_realdir "$_kgtp_dir")
+  [ -n "$_kgtp_rdir" ] || return 1
+
+  # symlinked-parent / cd-anchored relative basename: _kg_check_path
+  # already anchored a relative candidate onto _kill_cd before calling
+  # here, so a bare basename written from inside the (real or
+  # symlinked-into) transcript directory resolves via the same prefix test
+  # an explicit symlink hop would.
+  if [ -n "$_kg_projects_root_abs" ]; then
+    case "$_kgtp_rdir" in
+      "$_kg_projects_root_abs"|"$_kg_projects_root_abs"/*) return 0 ;;
+    esac
+  fi
+
+  [ -n "$_kgtp_base" ] || return 1
+  _kgtp_cand="${_kgtp_rdir}/${_kgtp_base}"
+
+  if [ -n "$_kg_projects_root_abs" ]; then
+    case "$_kgtp_cand" in
+      "$_kg_projects_root_abs"|"$_kg_projects_root_abs"/*) return 0 ;;
+    esac
+  fi
+
+  # hardlink identity: an EXISTING candidate whose dev+inode equals the
+  # live transcript's, regardless of what name/path reached it.
+  if [ -n "$_kg_transcript_devino" ] && [ -e "$_kgtp_cand" ]; then
+    _kgtp_devino=$(_kg_stat_devino "$_kgtp_cand")
+    [ -n "$_kgtp_devino" ] && [ "$_kgtp_devino" = "$_kg_transcript_devino" ] && return 0
+  fi
+
+  return 1
+}
+
 _session_root=""
 if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "${CLAUDE_PROJECT_DIR:-}" ]; then
   _session_root=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --show-toplevel 2>/dev/null) || _session_root="$CLAUDE_PROJECT_DIR"
@@ -599,6 +712,14 @@ _kg_check_path() {
     _kg_deny_transcript "$2" "$p"
   fi
 
+  # SEC-QUE1-1 (round 2): physical resolution -- $p is already anchored
+  # onto _kill_cd and normalized above, so this catches the cd-anchored
+  # relative basename, the symlinked-parent hop, the hardlink, and the
+  # projects directory itself, for every verb that reaches _kg_check_path.
+  if _kg_is_transcript_physical "$p"; then
+    _kg_deny_transcript "$2" "$p"
+  fi
+
   if _kg_is_protected_literal "$p"; then
     _kg_t=$(_kg_target_for_path "$p")
     dg_is_unlocked_for "$_kg_t" || _kg_deny_path "$2" "$p"
@@ -661,6 +782,20 @@ _kg_check_path() {
 check_quetrex_killswitch() {
   _kcmd="$1"
   _kill_cd=""   # C5: this scanner's OWN cd-tracking, mirroring LAST_CD below
+  # SEC-QUE1-1 (round 2): quoted string literals pulled from the RAW
+  # command text, BEFORE split_segments strips the quote characters --
+  # best-effort candidate write targets for interpreter inline code
+  # (python3 -c/-e, node -e) this scanner cannot structurally parse.
+  # Computed ONCE per invocation (one grep fork), reused by every
+  # python/node/nodejs segment below, and skipped entirely when transcript
+  # resolution is inactive (cloud / no ~/.claude/projects) -- cost
+  # discipline, same spirit as PERF-ONECOPY-1's glob prefilter above.
+  _kg_literals=()
+  if [ "$_kg_resolution_active" -eq 1 ]; then
+    while IFS= read -r _kgl; do
+      [ -n "$_kgl" ] && _kg_literals+=("$_kgl")
+    done <<< "$(printf '%s\n' "$_kcmd" | grep -Eo "'[^']*'|\"[^\"]*\"" | sed -e "s/^['\"]//" -e "s/['\"]\$//")"
+  fi
   while IFS= read -r _kseg; do
     [ -n "$_kseg" ] || continue
     set -f
@@ -715,12 +850,77 @@ check_quetrex_killswitch() {
     esac
 
     case "$_khead" in
-      rm|unlink|truncate|tee|mv|cp|chmod)
+      rm|unlink|truncate|tee|mv|cp|chmod|install|rsync)
+        # SEC-QUE1-8 (round 2): install/rsync joined this case -- they take
+        # the same "destination is a non-flag positional argument" shape
+        # cp/mv already cover, and previously reached NO check at all here.
         target_armed "$_kill_cd" || continue
         for ((_kj = _ki; _kj < _kn; _kj++)); do
           case "${_ktoks[$_kj]}" in -*) continue ;; esac
           _kg_check_path "${_ktoks[$_kj]}" "$_khead"
         done ;;
+      sed)
+        # SEC-QUE1-8 (round 2): sed never reached _kg_check_path at all --
+        # only when an in-place flag is present does sed WRITE anything
+        # (otherwise it streams to stdout, which this scanner never treats
+        # as a write). Gated the same way protected-files-guard.sh's own
+        # sed case is, so the two guards agree on when sed writes.
+        target_armed "$_kill_cd" || continue
+        _ksed_inplace=0
+        for ((_kj = _ki; _kj < _kn; _kj++)); do
+          case "${_ktoks[$_kj]}" in -*i*|--in-place*) _ksed_inplace=1 ;; esac
+        done
+        if [ "$_ksed_inplace" -eq 1 ]; then
+          _ksed_last=""
+          for ((_kj = _ki; _kj < _kn; _kj++)); do
+            case "${_ktoks[$_kj]}" in -*) continue ;; esac
+            _ksed_last="${_ktoks[$_kj]}"
+          done
+          [ -n "$_ksed_last" ] && _kg_check_path "$_ksed_last" "sed -i"
+        fi ;;
+      dd)
+        # SEC-QUE1-8 (round 2): dd never reached _kg_check_path -- only
+        # of=PATH is a write destination.
+        target_armed "$_kill_cd" || continue
+        for ((_kj = _ki; _kj < _kn; _kj++)); do
+          case "${_ktoks[$_kj]}" in
+            of=*) _kg_check_path "${_ktoks[$_kj]#of=}" "dd of=" ;;
+          esac
+        done ;;
+      perl)
+        # SEC-QUE1-8 (round 2): perl -pi's trailing file operand is a write
+        # destination exactly like sed -i's -- gated the same way.
+        target_armed "$_kill_cd" || continue
+        _kperl_pi=0
+        for ((_kj = _ki; _kj < _kn; _kj++)); do
+          case "${_ktoks[$_kj]}" in *-pi*) _kperl_pi=1 ;; esac
+        done
+        if [ "$_kperl_pi" -eq 1 ]; then
+          _kperl_last=""
+          for ((_kj = _ki; _kj < _kn; _kj++)); do
+            case "${_ktoks[$_kj]}" in -*) continue ;; esac
+            _kperl_last="${_ktoks[$_kj]}"
+          done
+          [ -n "$_kperl_last" ] && _kg_check_path "$_kperl_last" "perl -pi"
+        fi ;;
+      python|python3|node|nodejs)
+        # SEC-QUE1-8 (round 2): interpreter inline `-c`/`-e` code is
+        # arbitrary source this scanner cannot structurally parse -- same
+        # disclosed, best-effort limitation as protected-files-guard.sh's
+        # own qx_is_interpreter_inline_write. _kg_literals (quoted string
+        # literals pulled from the RAW, pre-split command text -- see
+        # check_quetrex_killswitch's own setup above) stands in for the
+        # candidate write-target tokens a real parser would extract.
+        target_armed "$_kill_cd" || continue
+        _kinl_flag=0
+        for ((_kj = _ki; _kj < _kn; _kj++)); do
+          case "${_ktoks[$_kj]}" in -c|-e) _kinl_flag=1 ;; esac
+        done
+        if [ "$_kinl_flag" -eq 1 ] && [ "${#_kg_literals[@]}" -gt 0 ]; then
+          for _klit in "${_kg_literals[@]}"; do
+            _kg_check_path "$_klit" "$_khead inline write"
+          done
+        fi ;;
       find)
         # C2 hygiene (round-2 reviewer): `find .quetrex -name project.json
         # -delete` names no protected path as a literal ARGUMENT the way

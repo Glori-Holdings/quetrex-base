@@ -367,6 +367,170 @@ names_protected_path_or_symlink() {
 # relative path from inside that directory) is still caught.
 TRANSCRIPT_PROT_ERE='(^|[^A-Za-z0-9_.-])[^[:space:]]*\.claude/projects/[^[:space:]]*\.jsonl([^A-Za-z0-9_.-]|$)'
 
+# --- SEC-QUE1-1 REMEDIATION (2026-09-01, round 2): PHYSICAL resolution ----
+# The text-shape checks above (TRANSCRIPT_PROT_ERE, the exact-match against
+# TRANSCRIPT_PATH) all match on the SPELLING of the candidate token. Four
+# proven bypasses never spell anything text-matchable: (a) `cd
+# ~/.claude/projects/<slug> && python3 -c "open('sess.jsonl','a').write(...)"`
+# -- a bare relative basename, never joined to the tracked cd; (b) `ln -s
+# ~/.claude/projects /tmp/plink` then a write through
+# /tmp/plink/<slug>/sess.jsonl -- a symlinked PARENT directory, never
+# resolved (the existing one-hop symlink check in
+# names_transcript_path_or_symlink only tests the full candidate path
+# itself, never an intermediate component); (c) `ln <transcript> /tmp/hl`
+# (a HARDLINK, not a symlink -- no [-L] to catch) then a write to /tmp/hl;
+# (d) `rm -rf` / `mv` of ~/.claude/projects ITSELF. None of these can be
+# closed by matching more text -- they need the candidate's PARENT
+# directory resolved to its real, symlink-free filesystem path (`cd "$dir"
+# && pwd -P`, never a hard `realpath`/`readlink -f` dependency -- neither
+# ships reliably on macOS) and, for the hardlink case, device+inode
+# identity against the live transcript. This is ADDITIVE: every text-shape
+# check above still runs and still denies everything it always denied.
+#
+# CLOUD INERTNESS: if $HOME/.claude/projects does not exist AND no
+# transcript_path was given, QX_TRANSCRIPT_RESOLUTION_ACTIVE stays 0 and
+# every function below returns 1 (no match) on its very first line --
+# zero forks, zero stat calls, ordinary cloud work is untouched. A failed
+# resolution step (a directory that doesn't exist, a `cd` that fails)
+# contributes no match; it never errors and never denies.
+QX_PROJECTS_ROOT_RAW="${HOME:-}/.claude/projects"
+QX_PROJECTS_ROOT_ABS=""
+if [ -n "${HOME:-}" ] && [ -d "$QX_PROJECTS_ROOT_RAW" ]; then
+  QX_PROJECTS_ROOT_ABS=$(cd "$QX_PROJECTS_ROOT_RAW" 2>/dev/null && pwd -P 2>/dev/null)
+fi
+QX_TRANSCRIPT_DEVINO=""
+QX_TRANSCRIPT_RESOLUTION_ACTIVE=0
+[ -n "$QX_PROJECTS_ROOT_ABS" ] && QX_TRANSCRIPT_RESOLUTION_ACTIVE=1
+
+# qx_realdir <dir> -- the physical (symlink-resolved) form of <dir>, or
+# empty if it doesn't exist / can't be entered. Never a hard dependency on
+# realpath/readlink -f -- `cd && pwd -P` is a plain POSIX builtin pair.
+qx_realdir() {
+  [ -n "${1:-}" ] || return 1
+  ( cd "$1" 2>/dev/null && pwd -P 2>/dev/null )
+}
+
+# qx_stat_devino <file> -- "device:inode" for an EXISTING file, trying the
+# BSD/macOS `stat -f` form first, then the GNU/Linux `stat -c` form --
+# detected, never assumed. Empty on any failure.
+qx_stat_devino() {
+  local f="${1:-}" out
+  [ -n "$f" ] && [ -e "$f" ] || return 1
+  out=$(stat -f '%d:%i' "$f" 2>/dev/null)
+  if [ -n "$out" ]; then printf '%s' "$out"; return 0; fi
+  out=$(stat -c '%d:%i' "$f" 2>/dev/null)
+  if [ -n "$out" ]; then printf '%s' "$out"; return 0; fi
+  return 1
+}
+
+if [ -n "$TRANSCRIPT_PATH" ] && [ -e "$TRANSCRIPT_PATH" ]; then
+  QX_TRANSCRIPT_DEVINO=$(qx_stat_devino "$TRANSCRIPT_PATH")
+  [ -n "$QX_TRANSCRIPT_DEVINO" ] && QX_TRANSCRIPT_RESOLUTION_ACTIVE=1
+fi
+
+# qx_expand_home <text> -- textual ~ / $HOME / ${HOME} expansion. This hook
+# never executes the candidate, only reasons about the string, so a shell's
+# automatic ~-expansion never happens for us -- do it ourselves, the same
+# deliberate, narrow, text-only spirit as qx_normalize_path's own `..`
+# collapsing.
+qx_expand_home() {
+  local p="${1:-}"
+  case "$p" in
+    '~'|'~/'*) p="${HOME:-}${p#\~}" ;;
+    '$HOME'|'$HOME/'*) p="${HOME:-}${p#\$HOME}" ;;
+    '${HOME}'|'${HOME}/'*) p="${HOME:-}${p#\$\{HOME\}}" ;;
+  esac
+  printf '%s' "$p"
+}
+
+# names_transcript_path_physical <candidate-target-token> -- the physical-
+# resolution pass. <anchor> is an optional absolute cd-anchor (PENDING_CD_ABS
+# in the Bash vector, unset/empty for the Write/Edit vector, where a
+# relative FILE_PATH falls back to SESSION_CWD -- the same anchor a real
+# shell would use).
+names_transcript_path_physical() {
+  local t="${1:-}" anchor="${2:-${PENDING_CD_ABS:-}}"
+  [ "$QX_TRANSCRIPT_RESOLUTION_ACTIVE" -eq 1 ] || return 1
+  [ -n "$t" ] || return 1
+  local expanded dir base resolved_full resolved_dir cand cand_devino
+
+  expanded=$(qx_expand_home "$t")
+  case "$expanded" in
+    /*) : ;;
+    *)
+      [ -z "$anchor" ] && anchor="${SESSION_CWD:-}"
+      [ -n "$anchor" ] || return 1
+      expanded="${anchor%/}/$expanded"
+      ;;
+  esac
+
+  # (d) directory-level: the candidate resolved AS A DIRECTORY is, or is
+  # under, the resolved projects root -- `rm -rf` / `mv` of
+  # ~/.claude/projects (or a symlink chain that reaches it) directly.
+  if [ -n "$QX_PROJECTS_ROOT_ABS" ]; then
+    resolved_full=$(qx_realdir "$expanded")
+    if [ -n "$resolved_full" ]; then
+      case "$resolved_full" in
+        "$QX_PROJECTS_ROOT_ABS"|"$QX_PROJECTS_ROOT_ABS"/*) return 0 ;;
+      esac
+    fi
+  fi
+
+  case "$expanded" in
+    */) dir="${expanded%/}"; base="" ;;
+    *) dir="${expanded%/*}"; base="${expanded##*/}" ;;
+  esac
+  [ "$dir" = "$expanded" ] && dir="/"
+  resolved_dir=$(qx_realdir "$dir")
+  [ -n "$resolved_dir" ] || return 1
+
+  # (b) symlinked-parent / (a) cd-anchored relative basename: once the
+  # anchor above joins a relative candidate onto PENDING_CD, a bare
+  # basename written from inside the (real or symlinked-into) transcript
+  # directory resolves here exactly like an explicit symlink hop would.
+  if [ -n "$QX_PROJECTS_ROOT_ABS" ]; then
+    case "$resolved_dir" in
+      "$QX_PROJECTS_ROOT_ABS"|"$QX_PROJECTS_ROOT_ABS"/*) return 0 ;;
+    esac
+  fi
+
+  [ -n "$base" ] || return 1
+  cand="${resolved_dir}/${base}"
+
+  if [ -n "$QX_PROJECTS_ROOT_ABS" ]; then
+    case "$cand" in
+      "$QX_PROJECTS_ROOT_ABS"|"$QX_PROJECTS_ROOT_ABS"/*) return 0 ;;
+    esac
+  fi
+
+  # (c) hardlink identity: an EXISTING candidate whose dev+inode equals the
+  # live transcript's, regardless of what name/path reached it.
+  if [ -n "$QX_TRANSCRIPT_DEVINO" ] && [ -e "$cand" ]; then
+    cand_devino=$(qx_stat_devino "$cand")
+    [ -n "$cand_devino" ] && [ "$cand_devino" = "$QX_TRANSCRIPT_DEVINO" ] && return 0
+  fi
+
+  return 1
+}
+
+# qx_extract_candidate_tokens <segment-text> -- best-effort candidate write
+# targets out of a segment this hook cannot structurally parse (interpreter
+# inline code): every quoted string literal (quotes stripped -- split_seg
+# ments_quote_aware/normalize_segment preserve them, so a real
+# `open('sess.jsonl','a')` still has them here), plus the trailing non-flag
+# whitespace token (covers `perl -pi -e '...' FILE`'s bare file operand).
+# Same disclosed, accepted-limitation spirit as qx_is_interpreter_inline_
+# write itself -- not a parser, a heuristic.
+qx_extract_candidate_tokens() {
+  local seg="${1:-}" w last=""
+  printf '%s\n' "$seg" | grep -Eo "'[^']*'|\"[^\"]*\"" | sed -e "s/^['\"]//" -e "s/['\"]\$//"
+  for w in $seg; do
+    case "$w" in -*) continue ;; esac
+    last="$w"
+  done
+  [ -n "$last" ] && printf '%s\n' "$last"
+}
+
 names_transcript_path() {  # <text> -> 0 if it names a protected transcript path
   local norm
   norm=$(qx_normalize_path "$1")
@@ -396,6 +560,10 @@ names_transcript_path_or_symlink() {
     link_target=$(readlink "$t" 2>/dev/null)
     [ -n "$link_target" ] && names_transcript_path "$link_target" && return 0
   fi
+  # SEC-QUE1-1 (round 2): physical resolution -- catches the cd-anchored
+  # relative basename, the symlinked-PARENT-directory hop, the hardlink,
+  # and the projects directory itself. See names_transcript_path_physical.
+  names_transcript_path_physical "$t" && return 0
   return 1
 }
 
@@ -1329,6 +1497,44 @@ protected_write_targets() {
   done
 }
 
+# qx_transcript_removal_targets <segment> -- SEC-QUE1-1 (round 2), sets
+# QTR_TARGETS. protected_write_targets above deliberately tracks only
+# DESTINATION tokens (the right model for floor-script protection: overwrite,
+# not read/remove-as-source, is the concern). `rm -rf ~/.claude/projects`
+# and `mv ~/.claude/projects /tmp/stolen` are transcript-directory attacks
+# that name the transcript tree as a SOURCE/removal argument, which
+# protected_write_targets never surfaces (rm isn't in its verb set at all;
+# mv's own case only ever emits the destination). A SEPARATE, narrow
+# extractor -- rm/unlink/rmdir's targets, and mv's SOURCE arguments -- feeds
+# ONLY the transcript check, never names_protected_path/floor-script
+# matching, so floor-script deletion semantics are completely unchanged.
+qx_transcript_removal_targets() {
+  local seg="$1" first tok
+  local -a w=() nf=()
+  read -ra w <<< "$seg"
+  QTR_TARGETS=()
+  [ "${#w[@]}" -ge 1 ] || return 0
+  first="${w[0]}"
+  case "$first" in
+    rm|unlink|rmdir)
+      for tok in "${w[@]:1}"; do
+        case "$tok" in -*) continue ;; esac
+        QTR_TARGETS+=("$tok")
+      done
+      ;;
+    mv)
+      for tok in "${w[@]:1}"; do
+        case "$tok" in -*) continue ;; esac
+        nf+=("$tok")
+      done
+      local n=${#nf[@]} i
+      if [ "$n" -ge 2 ]; then
+        for ((i = 0; i < n - 1; i++)); do QTR_TARGETS+=("${nf[$i]}"); done
+      fi
+      ;;
+  esac
+}
+
 # qx_is_interpreter_inline_write <normalized-segment> [checker-fn] --
 # best-effort ONLY. python3/node/perl/ruby's inline `-c`/`-e` argument is
 # arbitrary source code this hook cannot structurally parse (no interpreter
@@ -1353,7 +1559,25 @@ qx_is_interpreter_inline_write() {
     *' -c '*|*' -e '*|*' -pi '*|*' -pi'*) : ;;
     *) return 1 ;;
   esac
-  "$checker" "$seg"
+  "$checker" "$seg" && return 0
+  # SEC-QUE1-1 (round 2): the whole-segment scan above only catches a
+  # candidate that spells ".claude/projects/...jsonl" (or matches
+  # transcript_path exactly) in the raw text -- a bare relative filename
+  # inside inline code (`open('sess.jsonl','a')`) or perl -pi's trailing
+  # file operand names nothing on its own until it is joined to a `cd`
+  # anchor and resolved physically. Only the TRANSCRIPT checker gets this
+  # extra pass -- names_protected_path (the floor scripts) has no
+  # PENDING_CD-anchored bare-relative gap of its own to close here, and
+  # running physical resolution against every candidate token for THAT
+  # checker too would just be cost with no matching defect to fix.
+  if [ "$checker" = "names_transcript_path" ]; then
+    local tok
+    while IFS= read -r tok; do
+      [ -n "$tok" ] || continue
+      names_transcript_path_physical "$tok" && return 0
+    done <<< "$(qx_extract_candidate_tokens "$seg")"
+  fi
+  return 1
 }
 
 # =============================================================================
@@ -1434,6 +1658,13 @@ fi
 
 SEGMENTS=$(split_segments_quote_aware "$COMMAND")
 PENDING_CD=""
+# SEC-QUE1-1 (round 2): PENDING_CD's PHYSICAL, absolute resolution --
+# recomputed every time PENDING_CD changes (below), never derived from the
+# raw text at match time. Empty whenever it can't be resolved (a directory
+# that doesn't exist, no HOME/SESSION_CWD to anchor a relative `cd`) --
+# names_transcript_path_physical then falls back to SESSION_CWD, same as
+# the Write/Edit vector.
+PENDING_CD_ABS=""
 HIT_SEG=""
 HIT_TARGET=""
 # SEC-QUE1-1: a SEPARATE hit tracker for the transcript-path check, checked
@@ -1455,6 +1686,27 @@ while IFS= read -r seg; do
 
   if [[ "$norm" =~ ^cd[[:space:]]+([^[:space:]]+) ]]; then
     PENDING_CD=$(printf '%s' "${BASH_REMATCH[1]}" | sed "s/^[\"']*//; s/[\"']*\$//")
+    # SEC-QUE1-1 (round 2): resolve the new PENDING_CD to an absolute,
+    # physical path NOW, once per `cd` seen -- never per candidate token.
+    # A relative `cd` is joined onto the PRIOR PENDING_CD_ABS if we have
+    # one (composes correctly across multiple `cd`s in one command), else
+    # onto SESSION_CWD. Best-effort: an unresolvable `cd` (nonexistent dir,
+    # no anchor available) just leaves PENDING_CD_ABS empty -- the physical
+    # checks below then contribute no match for THIS command, never a deny.
+    if [ "$QX_TRANSCRIPT_RESOLUTION_ACTIVE" -eq 1 ]; then
+      _cd_expanded=$(qx_expand_home "$PENDING_CD")
+      case "$_cd_expanded" in
+        /*) PENDING_CD_ABS=$(qx_realdir "$_cd_expanded") ;;
+        *)
+          _cd_anchor="${PENDING_CD_ABS:-${SESSION_CWD:-}}"
+          if [ -n "$_cd_anchor" ]; then
+            PENDING_CD_ABS=$(qx_realdir "${_cd_anchor%/}/$_cd_expanded")
+          else
+            PENDING_CD_ABS=""
+          fi
+          ;;
+      esac
+    fi
     continue
   fi
 
@@ -1477,6 +1729,20 @@ while IFS= read -r seg; do
       [ -n "$HIT_SEG" ] && break
     fi
   done
+
+  # SEC-QUE1-1 (round 2): rm/unlink/rmdir/mv-source targets, checked
+  # against the transcript ONLY -- see qx_transcript_removal_targets.
+  if [ -z "$TRANSCRIPT_HIT_SEG" ]; then
+    qx_transcript_removal_targets "$norm"
+    for t in ${QTR_TARGETS[@]+"${QTR_TARGETS[@]}"}; do
+      [ -n "$t" ] || continue
+      if names_transcript_path_or_symlink "$t"; then
+        TRANSCRIPT_HIT_SEG="$norm"
+        break
+      fi
+    done
+  fi
+
   [ -n "$TRANSCRIPT_HIT_SEG" ] && break
   [ -n "$HIT_SEG" ] && break
 
