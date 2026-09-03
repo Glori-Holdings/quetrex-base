@@ -60,6 +60,13 @@
 # nothing except an informational stderr hint in `propose` — never for a
 # confirmable candidate, never for a write.
 #
+# A READ SITE IS SOURCE, NEVER PROSE. The read-site search (committed AND
+# working-tree, one shared exclusion list) skips *.md, *.mdx, *.txt, *.rst
+# and the trees .claude/**, .issue/**, .issues/**, docs/**, .github/** — a
+# markdown plan or an agent memory that quotes `process.env.NAME` is not a
+# read the chain can execute, and offering it as `read_at` sent a human to
+# pair a command with a location he could not act on.
+#
 # THE ONLY WRITER OF requiredEnv IS `declare`, AND ONLY WITH EXPLICIT PAIRS.
 # `declare <repo-root> [--cmd C --env N[,N...]]... [--decline N]...` is the
 # ONE code path in this file that may ever write a `requiredEnv` key, and it
@@ -77,9 +84,11 @@
 #       Print one "NAME<TAB>file:line" line per COMMITTED candidate.
 #       Read-only; never touches .quetrex/verify.json.
 #   quetrex-env-derive propose <repo-root>
-#       Print one JSON object on stdout: {candidates, chain, requiredEnv,
-#       requiredEnvDeclined, note} — candidates from committed evidence, the
-#       rest from the COMMITTED .quetrex/verify.json (never the working
+#       Print one JSON object on stdout: {candidates, outstanding, chain,
+#       requiredEnv, requiredEnvDeclined, note} — candidates from committed
+#       evidence, `outstanding` the subset covered by neither requiredEnv
+#       nor requiredEnvDeclined (the only list init asks about), the rest
+#       from the COMMITTED .quetrex/verify.json (never the working
 #       tree). A candidate is NEVER paired to a verify[] command (F2,
 #       CONFIRMED) — `note` says so in the output itself, not only in this
 #       comment, so nothing reading raw JSON can mistake `chain` sitting
@@ -103,7 +112,7 @@
 #       Report-only: print one committed-candidate name per line that is
 #       covered by NEITHER an existing `requiredEnv` entry NOR
 #       `requiredEnvDeclined`. Never writes anything. Used by
-#       /quetrex:doctor Check 5 to suggest a declaration, never to demand
+#       /quetrex-setup:doctor Check 5 to suggest a declaration, never to demand
 #       one.
 #   quetrex-env-derive plan <plan.json> <repo-root>
 #       Stamp Contract A `required_env[]` entries (name, read_at,
@@ -186,6 +195,22 @@ function declaredNames(repoRoot) {
   return [];
 }
 
+// A READ SITE MUST BE SOURCE, NOT PROSE. Measured on a real repo: `propose`
+// offered NODE_ENV "read at .issue/plan-SMA-197.md:29" and DATABASE_URL
+// "read at .claude/agent-memory/reviewer/playbook_client_bundle_db_leak.md:13"
+// — markdown that merely QUOTES `process.env.X`, not a read the verify chain
+// could ever execute. The human was asked to pair a chain command with a
+// location he could not act on. So the read-site search excludes prose
+// files and prose trees by pathspec, and BOTH the committed (git grep) and
+// working-tree (ls-files) searches apply the IDENTICAL list — they must
+// share one path resolution or the liveness hint and the candidate list
+// disagree about the same file. Declared names (.env.example) are unaffected;
+// only where a name is READ is filtered.
+var READ_SITE_EXCLUDES = [
+  ":!*.md", ":!*.mdx", ":!*.txt", ":!*.rst",
+  ":!.claude/**", ":!.issue/**", ":!.issues/**", ":!docs/**", ":!.github/**"
+];
+
 // Equivalence list: process.env.NAME (JS/TS), os.environ[...] (Python),
 // System.getenv(...) (Java), ENV[...] (Ruby). A read counts only when
 // nothing supplying a default sits immediately behind it on the same line.
@@ -222,7 +247,9 @@ function fallbacklessReads(repoRoot) {
   // occurrence-wins logic below recorded read_at as the CONFIG file, never
   // the real source line, and a human confirming a `propose` candidate was
   // shown a location they could never actually go read.
-  var out = runGit(repoRoot, ["grep", "-n", "-I", "-E", combined, "HEAD", "--", ".", ":!.quetrex"]);
+  // READ_SITE_EXCLUDES drops prose (*.md etc.) and prose trees for the same
+  // reason — see its definition; workingTreeFileList() applies the same list.
+  var out = runGit(repoRoot, ["grep", "-n", "-I", "-E", combined, "HEAD", "--", ".", ":!.quetrex"].concat(READ_SITE_EXCLUDES));
   if (out === null) return found;
   var lines = out.split("\n");
   for (var li = 0; li < lines.length; li++) {
@@ -289,8 +316,9 @@ function workingTreeFileList(repoRoot) {
   // a chain command string sitting inside .quetrex/verify.json can itself
   // contain "process.env.NAME" as literal text, which would otherwise
   // corrupt the read_at that workingTreeFallbacklessReads() computes, the
-  // same way.
-  var out = runGit(repoRoot, ["ls-files", "--cached", "--others", "--exclude-standard", "--", ".", ":!.quetrex"]);
+  // same way. READ_SITE_EXCLUDES is the identical prose exclusion
+  // fallbacklessReads() applies — one path resolution, both searches.
+  var out = runGit(repoRoot, ["ls-files", "--cached", "--others", "--exclude-standard", "--", ".", ":!.quetrex"].concat(READ_SITE_EXCLUDES));
   if (out === null) return [];
   return out.split("\n").filter(Boolean);
 }
@@ -398,8 +426,22 @@ function cmdPropose(args) {
   var candidates = candidateList(repoRoot);
   var committed = readCommittedVerifyJson(repoRoot);
 
+  // `outstanding` = candidates covered by NEITHER a committed requiredEnv
+  // entry NOR requiredEnvDeclined — the ONLY list init step 5c asks about,
+  // so a name the human already paired or already declined is never asked
+  // again on a re-run. Same coverage rule as `missing`, kept beside the full
+  // candidate list (which `declare` still validates against).
+  var coveredNames = {};
+  Object.keys(committed.requiredEnv).forEach(function (c) {
+    var arr = Array.isArray(committed.requiredEnv[c]) ? committed.requiredEnv[c] : [];
+    arr.forEach(function (n) { coveredNames[n] = true; });
+  });
+  committed.requiredEnvDeclined.forEach(function (n) { coveredNames[n] = true; });
+  var outstanding = candidates.filter(function (c) { return !Object.prototype.hasOwnProperty.call(coveredNames, c.name); });
+
   var out = {
     candidates: candidates,
+    outstanding: outstanding,
     chain: committed.verify,
     requiredEnv: committed.requiredEnv,
     requiredEnvDeclined: committed.requiredEnvDeclined,

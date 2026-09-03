@@ -175,7 +175,7 @@
 }</code></pre>
 
 <ul>
-  <li><code>"quetrex@quetrex": true</code> is the command layer. Without it you get no <code>/quetrex:*</code> commands at all — no build, no deploy, no doctor. It is the plugin to check first when the commands are simply not there.</li>
+  <li><code>"quetrex@quetrex": true</code> is the command layer. Without it you get no <code>/quetrex:*</code> commands at all — no build, no deploy. (<code>/quetrex-setup:doctor</code> still works — it ships with quetrex-setup precisely so it can diagnose an unarmed repo.) It is the plugin to check first when the commands are simply not there.</li>
   <li><code>"quetrex-factory@quetrex": true</code> is the build engine: the specialist agents, the pipeline definition, and the hooks.</li>
   <li><code>"quetrex-setup@quetrex": true</code> is enabled here TOO, at project scope, alongside its machine-wide enablement — a cloud routine and a teammate's fresh clone are provisioned from this repo's own settings.json, and both need the tools quetrex-setup ships (<code>quetrex-api</code>, <code>quetrex-env-derive</code>) on PATH.</li>
   <li><code>"autoUpdate": true</code> on the marketplace entry is required, not decoration. A third-party marketplace defaults to auto-update <em>off</em>, which freezes the catalog: a fix published today would never reach anyone on the team.</li>
@@ -191,7 +191,7 @@
 <p>The same marketplace also carries optional per-stack packs (<code>quetrex-nextjs</code>, <code>quetrex-python</code>, <code>quetrex-rust</code>, <code>quetrex-swift</code>). They are optional, and <code>/quetrex-setup:init</code> does not enable them.</p>
 
 <h3>2.5 &nbsp;Checking your work</h3>
-<pre><code>/quetrex:doctor</code></pre>
+<pre><code>/quetrex-setup:doctor</code></pre>
 <p>Health-checks the Quetrex layer of the current repo: board reachable, engine enabled and auto-updating and never pinned, no stale legacy artifacts, verify chain configured, deploy target set. It reports in the checkmark-and-fix style of the native <code>/doctor</code> and tells you the command that fixes each finding. It is triage — it is not how a feature gets armed. Arming is <code>/quetrex-setup:login</code> and <code>/quetrex-setup:init</code>.</p>
 
 <div class="panel">
@@ -329,7 +329,7 @@
   <tbody>
     <tr><td><code>/quetrex-setup:login</code></td><td>Once per machine, before anything else.</td></tr>
     <tr><td><code>/quetrex-setup:init</code></td><td>Once per repo, to link and arm it. Re-run to repair.</td></tr>
-    <tr><td><code>/quetrex:doctor</code></td><td>When something is off and you want the fix named.</td></tr>
+    <tr><td><code>/quetrex-setup:doctor</code></td><td>When something is off and you want the fix named.</td></tr>
     <tr><td><code>/quetrex:task-new</code></td><td>Put work on the board.</td></tr>
     <tr><td><code>/quetrex:task-refine</code></td><td>Sharpen it into a buildable spec. Highest-leverage step.</td></tr>
     <tr><td><code>/quetrex:task-build</code></td><td>Plan, approve the scope, fire the cloud build.</td></tr>

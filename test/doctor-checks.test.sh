@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test/doctor-checks.test.sh — behavioural test for two false positives in
-# .claude/commands/doctor.md, verified live on quetrex-base and reported by
+# plugins/quetrex-setup/commands/doctor.md, verified live on quetrex-base and reported by
 # the operator:
 #
 # Run: bash test/doctor-checks.test.sh
@@ -82,7 +82,7 @@
 set -uo pipefail
 
 TOOLROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DOCTOR_MD="$TOOLROOT/.claude/commands/doctor.md"
+DOCTOR_MD="$TOOLROOT/plugins/quetrex-setup/commands/doctor.md"
 
 if [ ! -f "$DOCTOR_MD" ]; then
   echo "FAIL: doctor.md not found at $DOCTOR_MD"

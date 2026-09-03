@@ -360,7 +360,7 @@ fi
 # (e) doctor Check 10 — user-scope plugin hygiene.
 # =============================================================================
 echo "# (e) doctor Check 10"
-DOCTOR_MD="$ROOT/.claude/commands/doctor.md"
+DOCTOR_MD="$ROOT/plugins/quetrex-setup/commands/doctor.md"
 extract_doctor_section() {
   local heading="$1"
   awk -v heading="$heading" '

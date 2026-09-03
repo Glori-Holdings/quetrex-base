@@ -37,7 +37,7 @@
 # Nothing is version-pinned anywhere (a pinned enabledPlugins entry makes the
 # plugin count as DISABLED and the whole /quetrex:* command layer stops
 # loading), so config carries no version at all. `/quetrex-setup:update` and
-# `/quetrex:doctor` both tell the operator the running engine version "lives
+# `/quetrex-setup:doctor` both tell the operator the running engine version "lives
 # in the status bar" — but nothing installed it, so in every armed repo the
 # one place the product says to look was blank. A Claude Code plugin CANNOT
 # register a `statusLine`, so arming has to write the registration into the

@@ -22,7 +22,7 @@
 #      /quetrex:merge reports STALE EVIDENCE for a PR that was built correctly.
 #   3. FOREIGN ENVIRONMENT. `environment_id` was the bare literal
 #      env_011CUpkAEM4fzsAD6dx1zW3r — one account's environment, hardcoded, and
-#      neither /quetrex-setup:login nor /quetrex-setup:init nor /quetrex:doctor provisions or
+#      neither /quetrex-setup:login nor /quetrex-setup:init nor /quetrex-setup:doctor provisions or
 #      checks one. For anybody else the dispatch went nowhere, silently.
 #   4. RE-DISPATCH DEAD END. The base sha was re-resolved from origin/<base> on
 #      EVERY dispatch. `quetrex-cloud-prep sync` resumes the existing unit branch

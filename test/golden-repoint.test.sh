@@ -9,13 +9,14 @@
 # already states the general rule ("NEVER amend a spec/invariant/doctrine to
 # match what an agent built") — this test is what makes that rule
 # ENFORCEABLE for this one file, rather than trusting a reviewer to notice.
-# For every line the diff touches: the OLD line, after a SINGLE (first-match
-# only, matching JS String.prototype.replace's default semantics — GOLDEN.md
-# row 2 also names `/quetrex:doctor`, which does NOT move, so a global
-# replace would wrongly rename it too and this check would demand the wrong
-# thing) substitution of '/quetrex:' -> '/quetrex-setup:', must equal the NEW
-# line exactly. Any other difference — reworded prose, a reordered column, a
-# deleted/added row — fails loudly.
+# For every line the diff touches: the OLD line, after substituting ONLY the
+# four verbs quetrex-setup owns ('/quetrex:(login|init|update|doctor)' ->
+# '/quetrex-setup:$1' — doctor moved into quetrex-setup after the original
+# split, and GOLDEN.md row 2 names both init and doctor on one line, so the
+# substitution is per-verb, never a blanket '/quetrex:' rename that would also
+# rewrite a pipeline command), must equal the NEW line exactly. Any other
+# difference — reworded prose, a reordered column, a deleted/added row — fails
+# loudly.
 #
 # Compared against 1032770, this branch's merge-base with main (the last
 # commit to touch GOLDEN.md before this task) — not a moving ref, so this
@@ -77,13 +78,13 @@ RESULT="$(node -e '
   }
   let bad = 0;
   for (let i = 0; i < oldLines.length; i++) {
-    const expected = oldLines[i].replace("/quetrex:", "/quetrex-setup:"); // single-match, like JS default
+    const expected = oldLines[i].replace(/\/quetrex:(login|init|update|doctor)\b/g, "/quetrex-setup:$1"); // only the four quetrex-setup verbs
     if (expected !== newLines[i]) {
       bad++;
       console.log("NOT OK: line differs by more than the command rename:\n  old: " + oldLines[i] + "\n  new: " + newLines[i] + "\n  expected: " + expected);
     }
   }
-  if (bad === 0) console.log("OK: " + oldLines.length + " changed line pair(s), each differing ONLY by the /quetrex: -> /quetrex-setup: rename");
+  if (bad === 0) console.log("OK: " + oldLines.length + " changed line pair(s), each differing ONLY by the /quetrex:<setup-verb> -> /quetrex-setup:<setup-verb> rename");
 ' <<< "$DIFF")"
 
 echo "$RESULT"
@@ -100,11 +101,13 @@ else
   notok "GOLDEN.md does not name both /quetrex-setup:login and /quetrex-setup:init"
 fi
 
-# doctor is untouched by this task's rename — it must still read /quetrex:doctor.
-if grep -q '/quetrex:doctor' "$ROOT/GOLDEN.md"; then
-  ok "GOLDEN.md's /quetrex:doctor reference is untouched (doctor did not move)"
+# doctor moved into quetrex-setup too (user scope, so it exists before a repo's
+# project plugin is enabled) — row 2 must name it under the new namespace and
+# the old name must be gone.
+if grep -q '/quetrex-setup:doctor' "$ROOT/GOLDEN.md" && ! grep -q '/quetrex:doctor' "$ROOT/GOLDEN.md"; then
+  ok "GOLDEN.md row 2 names /quetrex-setup:doctor and no longer /quetrex:doctor"
 else
-  notok "GOLDEN.md no longer names /quetrex:doctor — doctor.md did not move in this split and should not have been renamed here"
+  notok "GOLDEN.md must name /quetrex-setup:doctor (doctor moved to quetrex-setup) and must not still name /quetrex:doctor"
 fi
 
 echo

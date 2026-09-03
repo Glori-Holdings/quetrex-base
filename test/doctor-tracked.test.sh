@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test/doctor-tracked.test.sh — behavioural test for .claude/commands/doctor.md
+# test/doctor-tracked.test.sh — behavioural test for plugins/quetrex-setup/commands/doctor.md
 # Check 8 ("Arming is COMMITTED, not just present on disk").
 #
 # Run: bash test/doctor-tracked.test.sh
@@ -66,7 +66,7 @@
 set -uo pipefail
 
 TOOLROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DOCTOR_MD="$TOOLROOT/.claude/commands/doctor.md"
+DOCTOR_MD="$TOOLROOT/plugins/quetrex-setup/commands/doctor.md"
 
 if [ ! -f "$DOCTOR_MD" ]; then
   echo "FAIL: doctor.md not found at $DOCTOR_MD"
