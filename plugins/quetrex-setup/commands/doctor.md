@@ -727,9 +727,68 @@ fi
 
 ---
 
+## Check 14 — Webhook registered
+
+A cloud build has no board credential, so the card's move to `pr_ready` rides on a
+GitHub webhook the board verifies against THIS project's vault entry
+`GITHUB_WEBHOOK_SECRET` (generated and stored by `/quetrex-setup:init` 4i — never typed
+by the operator, never needed by an agent). Four things must all hold: the origin is a
+GitHub repo; that repo carries a hook pointed at the board; the vault lists the name
+(names-only collection GET — never the export endpoint); and the project records its
+`githubRepo`, or the board drops the delivery. Report which is missing; the one writer
+for all four is init:
+
+```bash
+QX_ORIGIN="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null)"
+QX_SLUG="$(printf '%s' "$QX_ORIGIN" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##')"
+if ! printf '%s' "$QX_SLUG" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+  echo "✗ Webhook registered — origin is not a GitHub repo, so no hook can move cards to pr_ready."
+  echo "    Fix: add a GitHub origin remote, then re-run /quetrex-setup:init"
+elif ! command -v gh >/dev/null 2>&1; then
+  echo "✗ Webhook registered — gh CLI not installed, so the hook on $QX_SLUG could not be checked."
+  echo "    Fix: install gh (brew install gh && gh auth login), then re-run /quetrex-setup:init"
+elif ! { [ -f "$BIND" ] && CODE="$(quetrex-api json-get "$BIND" projectCode 2>/dev/null)" && [ -n "$CODE" ]; }; then
+  echo "✗ Webhook registered — this repo has no project binding, so there is no vault or project to check."
+  echo "    Fix: run /quetrex-setup:init"
+elif ! KANBAN="$(quetrex-api kanban-url 2>/dev/null)" || [ -z "$KANBAN" ]; then
+  echo "✗ Webhook registered — not logged in, so the board's hook URL is unknown."
+  echo "    Fix: run /quetrex-setup:login, then re-run /quetrex-setup:init"
+else
+  HOOK_URL="${KANBAN%/}/api/webhooks/github"
+  WH_MISSING=""
+  # (b) a hook on the repo whose config.url is the board's endpoint
+  HOOK_ID="$(gh api "repos/$QX_SLUG/hooks" --jq '.[] | select(.config.url=="'"$HOOK_URL"'") | .id' 2>/dev/null | head -1)"
+  [ -n "$HOOK_ID" ] || WH_MISSING="$WH_MISSING GitHub hook on $QX_SLUG -> $HOOK_URL;"
+  # (c) the vault lists the NAME — masked collection GET, never a value
+  if ! quetrex-api GET "/api/projects/$CODE/secrets" 2>/dev/null | node -e '
+    let d=""; process.stdin.on("data",c=>{d+=c;}).on("end",()=>{
+      let a; try { a=JSON.parse(d); } catch { process.exit(1); }
+      const list = Array.isArray(a) ? a : (Array.isArray(a.secrets) ? a.secrets : Object.keys(a).map(k=>({name:k})));
+      process.exit(list.some(x=>(typeof x==="string"?x:(x&&(x.name||x.key||x.id)))==="GITHUB_WEBHOOK_SECRET") ? 0 : 1);
+    });' 2>/dev/null; then
+    WH_MISSING="$WH_MISSING GITHUB_WEBHOOK_SECRET in project $CODE's vault;"
+  fi
+  # (d) the project records its repo, or the board refuses the delivery
+  LINKED_REPO="$(quetrex-api GET "/api/projects/$CODE" 2>/dev/null | node -e '
+    let d=""; process.stdin.on("data",c=>{d+=c;}).on("end",()=>{
+      let p; try { p=JSON.parse(d); } catch { process.exit(0); }
+      process.stdout.write(String((p && p.githubRepo) || ""));
+    });' 2>/dev/null)"
+  [ -n "$LINKED_REPO" ] || WH_MISSING="$WH_MISSING project $CODE githubRepo;"
+  if [ -z "$WH_MISSING" ]; then
+    echo "✓ Webhook registered — $QX_SLUG hook $HOOK_ID -> $HOOK_URL, GITHUB_WEBHOOK_SECRET in project $CODE's vault, project linked to $LINKED_REPO."
+  else
+    echo "✗ Webhook registered — missing:$WH_MISSING cards will not auto-move to pr_ready."
+    echo "    Fix: re-run /quetrex-setup:init"
+  fi
+fi
+```
+
+---
+
 ## Final summary
 
-After the thirteen checks, print a one-line roll-up: *"Quetrex health: N/13 green."*
+After the fourteen checks, print a one-line roll-up: *"Quetrex health: N/14 green."*
 If any check surfaced a **platform or plugin-install** symptom (a plugin not
 enabled, the CLI itself unhealthy, marketplace unreachable), add one line
 directing the user to native **`/doctor`** for that layer — this command

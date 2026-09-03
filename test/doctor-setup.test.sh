@@ -36,7 +36,12 @@
 #   AC6  Check 5's requiredEnv section, EXECUTED: an outstanding candidate is
 #        listed as `NAME (read at file:line)` with a Fix naming
 #        /quetrex-setup:init, and doctor wrote nothing.
-#   PARITY: AC3-AC6 run under zsh as well when it is installed — the
+#   AC7  Check 14 (Webhook registered), EXECUTED against stub gh + quetrex-api:
+#        all four conditions hold -> ✓; each of hook / vault name / githubRepo
+#        missing -> ✗ naming it + one 'Fix: re-run /quetrex-setup:init' line;
+#        non-GitHub origin -> ✗; gh absent -> ✗ with an install hint. Names
+#        only — the export endpoint is never called.
+#   PARITY: AC3-AC7 run under zsh as well when it is installed — the
 #        operator's shell must not change a diagnosis.
 
 set -uo pipefail
@@ -112,10 +117,15 @@ if ! grep -q 'AskUserQuestion' "$DOCTOR_MD"; then
 else
   fail "AC2: doctor.md mentions AskUserQuestion ($(grep -c 'AskUserQuestion' "$DOCTOR_MD") time(s))"
 fi
-if grep -q 'N/13 green' "$DOCTOR_MD"; then
-  pass "AC2: the roll-up counts 13 checks"
+if grep -q 'N/14 green' "$DOCTOR_MD"; then
+  pass "AC2: the roll-up counts 14 checks"
 else
-  fail "AC2: the roll-up does not say N/13 green"
+  fail "AC2: the roll-up does not say N/14 green"
+fi
+if grep -qF '## Check 14 — Webhook registered' "$DOCTOR_MD"; then
+  pass "AC2: doctor.md has '## Check 14 — Webhook registered'"
+else
+  fail "AC2: doctor.md lacks '## Check 14 — Webhook registered'"
 fi
 
 # --- harness -----------------------------------------------------------------
@@ -130,11 +140,26 @@ cat > "$STUB/quetrex-api" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
   json-get) exec "$QX_REAL_API" json-get "$2" "$3" ;;
-  GET) [ -n "${QX_STUB_VAULT:-}" ] || exit 1; cat "$QX_STUB_VAULT" ;;
+  kanban-url) printf 'https://kanban.test/\n' ;;
+  GET) case "$2" in
+         */secrets/export) echo "export endpoint called" >&2; exit 1 ;;
+         */secrets) [ -n "${QX_STUB_VAULT:-}" ] || exit 1; cat "$QX_STUB_VAULT" ;;
+         *) [ -n "${QX_STUB_PROJECT:-}" ] || exit 1; cat "$QX_STUB_PROJECT" ;;
+       esac ;;
+  POST) echo "export endpoint called" >&2; exit 1 ;;
   *) exit 1 ;;
 esac
 EOF
 chmod +x "$STUB/quetrex-api"
+# A stub gh: 'gh api repos/<slug>/hooks --jq ...' prints QX_STUB_HOOK_ID (empty = no hook).
+cat > "$STUB/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "api repos/"*"/hooks") printf '%s\n' "${QX_STUB_HOOK_ID:-}" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$STUB/gh"
 RUN_PATH="$STUB:$REAL_BIN:$NODE_DIR:$GIT_BIN_DIR:$PY_DIR:/usr/bin:/bin"
 export QX_REAL_API="$REAL_BIN/quetrex-api"
 
@@ -322,6 +347,61 @@ EOF
     pass "AC6/$SH: doctor wrote nothing to .quetrex/verify.json (report-only)"
   else
     fail "AC6/$SH: doctor modified .quetrex/verify.json"
+  fi
+  # --- AC7: Check 14 Webhook registered --------------------------------------
+  VAULT_WH="$WORK/vault-wh.json"
+  write_json "$VAULT_WH" '[{"name":"DATABASE_URL","isSet":true,"last4":"5432"},{"name":"GITHUB_WEBHOOK_SECRET","isSet":true,"last4":"beef"}]'
+  PROJ_WH="$WORK/project-wh.json"; write_json "$PROJ_WH" '{"code":"DEA","githubRepo":"dealerq"}'
+  PROJ_NOREPO="$WORK/project-norepo.json"; write_json "$PROJ_NOREPO" '{"code":"DEA","githubRepo":null}'
+  R="$(mkrepo "c14-ok-$SH" git@github.com:Glori-Holdings/dealerq.git)"
+  write_json "$R/.quetrex/project.json" '{"projectCode":"DEA","branchPrefix":"claude/"}'
+  OUT="$(run_check "$SH" '## Check 14' "$R" QX_STUB_VAULT="$VAULT_WH" QX_STUB_PROJECT="$PROJ_WH" QX_STUB_HOOK_ID=4242)"
+  if printf '%s' "$OUT" | grep -q '^✓ Webhook registered' && printf '%s' "$OUT" | grep -q 'Glori-Holdings/dealerq hook 4242 -> https://kanban.test/api/webhooks/github' \
+     && ! printf '%s' "$OUT" | grep -q 'export endpoint called'; then
+    pass "AC7/$SH: hook + vault name + githubRepo all present -> ✓ (names-only GET, export never called)"
+  else
+    fail "AC7/$SH: all-present case wrong: $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+  OUT="$(run_check "$SH" '## Check 14' "$R" QX_STUB_VAULT="$VAULT_WH" QX_STUB_PROJECT="$PROJ_WH" QX_STUB_HOOK_ID=)"
+  if printf '%s' "$OUT" | grep -q '^✗ Webhook registered' && printf '%s' "$OUT" | grep -q 'missing: GitHub hook on Glori-Holdings/dealerq' \
+     && ! printf '%s' "$OUT" | grep -q 'vault;' && [ "$(printf '%s\n' "$OUT" | grep -c 'Fix: re-run /quetrex-setup:init')" -eq 1 ]; then
+    pass "AC7/$SH: no hook on the repo -> ✗ naming the hook only, one init Fix line"
+  else
+    fail "AC7/$SH: no-hook case wrong: $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+  OUT="$(run_check "$SH" '## Check 14' "$R" QX_STUB_VAULT="$VAULT" QX_STUB_PROJECT="$PROJ_WH" QX_STUB_HOOK_ID=4242)"
+  if printf '%s' "$OUT" | grep -q '^✗ Webhook registered' && printf '%s' "$OUT" | grep -q "GITHUB_WEBHOOK_SECRET in project DEA's vault" \
+     && ! printf '%s' "$OUT" | grep -q 'GitHub hook on' && printf '%s' "$OUT" | grep -q 'Fix: re-run /quetrex-setup:init'; then
+    pass "AC7/$SH: vault lacks the name -> ✗ naming the vault entry only"
+  else
+    fail "AC7/$SH: no-vault-name case wrong: $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+  OUT="$(run_check "$SH" '## Check 14' "$R" QX_STUB_VAULT="$VAULT_WH" QX_STUB_PROJECT="$PROJ_NOREPO" QX_STUB_HOOK_ID=4242)"
+  if printf '%s' "$OUT" | grep -q '^✗ Webhook registered' && printf '%s' "$OUT" | grep -q 'project DEA githubRepo' \
+     && ! printf '%s' "$OUT" | grep -q 'GitHub hook on' && printf '%s' "$OUT" | grep -q 'Fix: re-run /quetrex-setup:init'; then
+    pass "AC7/$SH: project.githubRepo unset -> ✗ naming githubRepo only"
+  else
+    fail "AC7/$SH: no-githubRepo case wrong: $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+  R2="$(mkrepo "c14-nogh-$SH" https://gitlab.example.com/x/y.git)"
+  write_json "$R2/.quetrex/project.json" '{"projectCode":"DEA","branchPrefix":"claude/"}'
+  OUT="$(run_check "$SH" '## Check 14' "$R2" QX_STUB_VAULT="$VAULT_WH" QX_STUB_PROJECT="$PROJ_WH" QX_STUB_HOOK_ID=4242)"
+  if printf '%s' "$OUT" | grep -q '^✗ Webhook registered — origin is not a GitHub repo'; then
+    pass "AC7/$SH: a non-GitHub origin -> ✗ naming it"
+  else
+    fail "AC7/$SH: non-GitHub origin case wrong: $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+  NOGH="$WORK/nogh-bin"; mkdir -p "$NOGH"; cp "$STUB/quetrex-api" "$NOGH/quetrex-api"
+  NOGH_PATH="$NOGH:$REAL_BIN:$NODE_DIR:$GIT_BIN_DIR:/usr/bin:/bin"
+  if ! PATH="$NOGH_PATH" command -v gh >/dev/null 2>&1; then
+    OUT="$(RUN_PATH="$NOGH_PATH" run_check "$SH" '## Check 14' "$R" QX_STUB_VAULT="$VAULT_WH" QX_STUB_PROJECT="$PROJ_WH")"
+    if printf '%s' "$OUT" | grep -q '^✗ Webhook registered — gh CLI not installed' && printf '%s' "$OUT" | grep -q 'Fix: install gh'; then
+      pass "AC7/$SH: gh absent -> ✗ with an install hint"
+    else
+      fail "AC7/$SH: gh-absent case wrong: $(printf '%s' "$OUT" | tr '\n' '|')"
+    fi
+  else
+    pass "AC7/$SH: (skipped) gh is on the system PATH, cannot simulate its absence"
   fi
 done
 
