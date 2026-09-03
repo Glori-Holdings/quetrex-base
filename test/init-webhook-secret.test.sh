@@ -26,7 +26,8 @@
 #        line names the cause; an existing vault value is reused (no
 #        secret-put, POST carries it); an already-registered hook is left alone
 #        (no secret-put, no POST).
-#   AC4  FAIL-FIRST against the literal pre-change sha 5d383b8 (never `main`):
+#   AC4  FAIL-FIRST against the literal pre-change sha 7333ab0 (the main
+#        commit this change is based on — never `main`, never a branch-only sha):
 #        its 4i block, driven by the same stubs, prints the "skipped" line and
 #        never calls secret-put.
 
@@ -34,7 +35,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INIT_MD="$ROOT/plugins/quetrex-setup/commands/init.md"
-BASE_SHA="5d383b8"
+BASE_SHA="7333ab0"
 
 PASS=0; FAIL=0
 ok()    { PASS=$((PASS+1)); printf 'ok - %s\n' "$1"; }
@@ -186,9 +187,13 @@ for SH in $SHELLS; do
 done
 
 # --- AC4: fail-first against the pre-change sha ------------------------------
-if git -C "$ROOT" cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
-  git -C "$ROOT" show "$BASE_SHA:plugins/quetrex-setup/commands/init.md" \
-    | awk '/^## 4i\./{s=1} s && /^```bash/{f=1;next} s && f && /^```/{exit} s && f' > "$WORK/old-block.sh"
+# The old 4i had no exec-block markers, so the block is the first bash fence
+# under `## 4i.` (up to `## 4j.`). A baseline that cannot be read is a FAILURE,
+# never a skip — a silently-degraded fail-first arm proves nothing.
+if git -C "$ROOT" show "$BASE_SHA:plugins/quetrex-setup/commands/init.md" > "$WORK/old-init.md" 2>/dev/null \
+   && [ -s "$WORK/old-init.md" ]; then
+  awk '/^## 4i\./{s=1} s && /^## 4j\./{exit} s && /^```bash/{f=1;next} s && f && /^```/{exit} s && f' \
+    "$WORK/old-init.md" > "$WORK/old-block.sh"
   # The old block called a bare `qapi` (a function inside quetrex-api, never on
   # the operator's PATH); route it to the stub so the comparison is fair.
   { printf 'qapi() { quetrex-api "$@"; }\n'; cat "$WORK/old-block.sh"; } > "$WORK/old-block-shimmed.sh"
@@ -201,7 +206,7 @@ if git -C "$ROOT" cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
     notok "AC4: $BASE_SHA's 4i did not behave as the pre-change baseline: $(printf '%s' "$OUT" | tr '\n' '|')"
   fi
 else
-  ok "AC4: (skipped) $BASE_SHA not present in this clone (shallow) — fail-first baseline unavailable"
+  notok "AC4: baseline blob $BASE_SHA:plugins/quetrex-setup/commands/init.md is unreadable (shallow clone?) — fail-first arm cannot run"
 fi
 
 finish

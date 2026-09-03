@@ -16,7 +16,7 @@ itself. If a check below reveals a platform/plugin-install problem (a plugin not
 enabled, the CLI unhealthy), say so and **point the user at `/doctor`** rather
 than re-implementing those checks here.
 
-What THIS command owns are the thirteen Quetrex-app checks native `/doctor` knows
+What THIS command owns are the fourteen Quetrex-app checks native `/doctor` knows
 nothing about. Run them all, then print one line per check:
 
 - `✓ <check> — <what's good>`

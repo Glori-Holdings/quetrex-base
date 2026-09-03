@@ -20,7 +20,8 @@
 #        Usage is /quetrex-setup:doctor, the old path is gone, and the
 #        quetrex-setup manifest lists all four commands.
 #   AC2  the four new check headings are present; the file contains NO
-#        `AskUserQuestion` token anywhere; the roll-up counts 13.
+#        `AskUserQuestion` token anywhere; the roll-up counts 14 and the intro's
+#        spelled-out count agrees with the number of `## Check N` headings.
 #   AC3  Check 11 (Cloud environment), EXECUTED: id set -> ✓; unset with one
 #        `repo` environment -> ✗ + `Fix: quetrex-cloud-env set . <id>`; two
 #        -> one Fix line per id; none -> the claude.ai/code instruction.
@@ -126,6 +127,14 @@ if grep -qF '## Check 14 — Webhook registered' "$DOCTOR_MD"; then
   pass "AC2: doctor.md has '## Check 14 — Webhook registered'"
 else
   fail "AC2: doctor.md lacks '## Check 14 — Webhook registered'"
+fi
+# The intro's spelled-out count must agree with the headings (it said "thirteen" once).
+N_HEAD="$(grep -cE '^## Check [0-9]+ ' "$DOCTOR_MD")"
+WORDS=(zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty)
+if [ "$N_HEAD" -le 20 ] && grep -q "are the ${WORDS[$N_HEAD]} Quetrex-app checks" "$DOCTOR_MD"; then
+  pass "AC2: the intro says '${WORDS[$N_HEAD]}' checks and there are $N_HEAD '## Check N' headings"
+else
+  fail "AC2: the intro's spelled-out check count disagrees with the $N_HEAD '## Check N' headings"
 fi
 
 # --- harness -----------------------------------------------------------------
