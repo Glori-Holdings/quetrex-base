@@ -29,6 +29,7 @@ project `.claude/CLAUDE.md` contains `quetrex_welcome: false`.
 | --- | --- |
 | First time on this machine | `/quetrex-setup:login` |
 | Link a repo to a project | `/quetrex-setup:init` |
+| See every task and its status | `/quetrex:status` |
 | Create a task | `/quetrex:task-new` |
 | Refine a task into a spec | `/quetrex:task-refine` |
 | Build a task | `/quetrex:task-build` |

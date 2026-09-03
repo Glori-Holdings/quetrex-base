@@ -77,7 +77,7 @@ const LEGACY_CMD_RE = '/' + 'q-' + '(' + VERBS.join('|') + ')';
 // doctor followed them (user scope, so it exists on a repo BEFORE its
 // project plugins are enabled — a diagnostic that needs the thing it
 // diagnoses to be armed first is no diagnostic).
-const CORE_COMMANDS = ['deploy', 'merge', 'task-build',
+const CORE_COMMANDS = ['deploy', 'merge', 'status', 'task-build',
   'task-complete', 'task-new', 'task-refine', 'task-rework'].map((n) => `${n}.md`);
 // The four commands quetrex-setup owns exclusively.
 const SETUP_COMMANDS = ['login.md', 'init.md', 'update.md', 'doctor.md'];
@@ -196,7 +196,7 @@ check('every bash block embedded in every command is syntactically valid', () =>
 });
 
 // --- AC2: the command split is exact, and the moved files carry real history
-check('the command split is exact: quetrex-setup owns login/init/update/doctor, quetrex keeps the pipeline seven', () => {
+check('the command split is exact: quetrex-setup owns login/init/update/doctor, quetrex keeps the pipeline eight', () => {
   const setupDir = path.join(REPO_ROOT, 'plugins/quetrex-setup/commands');
   const coreDir = path.join(REPO_ROOT, '.claude/commands');
   const setupFiles = fs.readdirSync(setupDir).filter((f) => f.endsWith('.md')).sort();
