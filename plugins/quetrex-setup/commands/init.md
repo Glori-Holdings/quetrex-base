@@ -1054,21 +1054,42 @@ fi
 # ── end quetrex:exec-block qx_register_webhook ─────────────────────────────────
 ```
 
-**The project must also record its repo.** The webhook refuses a delivery whose repository
-does not match `project.githubRepo` — the identifier alone is not authorisation, since
-`QDM-5` means something in every project coded QDM. If that field is unset, no card moves:
+**The project must also record its repo — both halves.** The webhook refuses a delivery
+whose repository does not match the project's stored repo — the identifier alone is not
+authorisation, since `QDM-5` means something in every project coded QDM. And the board
+shows the repository as **linked** only when BOTH `githubOwner` and `githubRepo` are set
+(`RepoLink` checks the pair); a project with only `githubRepo` reads "repository not
+linked" on every card. So this block derives `owner` and `repo` from the origin slug and
+writes the pair whenever either is missing. It never overwrites a non-empty value that
+differs — that project belongs to another repo, and init says so and leaves it. Runs in
+the operator's zsh as well as bash: `${SLUG%%/*}` / `${SLUG##*/}` only, no `$var:`
+modifiers.
 
 ```bash
-QX_LINKED="$(quetrex-api GET "/api/projects/$QX_PROJECT_CODE" 2>/dev/null | jq -r '.githubRepo // empty')"
-if [ -z "$QX_LINKED" ] && [ -n "$QX_SLUG" ]; then
-  # BARE repo name only. The API validates githubRepo against ^[A-Za-z0-9._-]+$,
-  # so sending "owner/repo" is rejected outright — and the webhook's repo check
-  # is written to match a bare stored name against the delivered owner/repo.
+# ── quetrex:exec-block qx_link_project_repo ────────────────────────────────────
+# Owner and repo are the two halves of the origin slug. The API validates each
+# against ^[A-Za-z0-9._-]+$ — bare halves, never "owner/repo" in one field.
+QX_ORIGIN="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null)"
+QX_SLUG="$(printf '%s' "$QX_ORIGIN" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##')"
+if printf '%s' "$QX_SLUG" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+  QX_OWNER_NAME="${QX_SLUG%%/*}"
   QX_REPO_NAME="${QX_SLUG##*/}"
-  quetrex-api PATCH "/api/projects/$QX_PROJECT_CODE" "$(jq -cn --arg r "$QX_REPO_NAME" '{githubRepo:$r}')" >/dev/null 2>&1 \
-    && echo "project $QX_PROJECT_CODE linked to $QX_REPO_NAME" \
-    || echo "could not link project $QX_PROJECT_CODE to $QX_REPO_NAME — the webhook will ignore its deliveries" >&2
+  QX_LINKED_JSON="$(quetrex-api GET "/api/projects/$QX_PROJECT_CODE" 2>/dev/null)"
+  QX_LINKED_OWNER="$(printf '%s' "$QX_LINKED_JSON" | jq -r '.githubOwner // empty' 2>/dev/null)"
+  QX_LINKED_REPO="$(printf '%s' "$QX_LINKED_JSON" | jq -r '.githubRepo // empty' 2>/dev/null)"
+  if { [ -n "$QX_LINKED_OWNER" ] && [ "$QX_LINKED_OWNER" != "$QX_OWNER_NAME" ]; } \
+     || { [ -n "$QX_LINKED_REPO" ] && [ "$QX_LINKED_REPO" != "$QX_REPO_NAME" ]; }; then
+    QX_LINKED_SHOWN="${QX_LINKED_OWNER:+$QX_LINKED_OWNER/}$QX_LINKED_REPO"
+    echo "project $QX_PROJECT_CODE is linked to a different repo ($QX_LINKED_SHOWN), not $QX_SLUG — left alone; relink it on the board if this repo is the right one" >&2
+  elif [ -z "$QX_LINKED_OWNER" ] || [ -z "$QX_LINKED_REPO" ]; then
+    quetrex-api PATCH "/api/projects/$QX_PROJECT_CODE" \
+      "$(jq -cn --arg o "$QX_OWNER_NAME" --arg r "$QX_REPO_NAME" '{githubOwner:$o,githubRepo:$r}')" >/dev/null 2>&1 \
+      && echo "project $QX_PROJECT_CODE linked to $QX_OWNER_NAME/$QX_REPO_NAME" \
+      || echo "could not link project $QX_PROJECT_CODE to $QX_OWNER_NAME/$QX_REPO_NAME — the board shows it unlinked and the webhook will ignore its deliveries" >&2
+  fi
+  unset QX_LINKED_JSON
 fi
+# ── end quetrex:exec-block qx_link_project_repo ────────────────────────────────
 ```
 
 ## 4j. One-time legacy cleanup (guarded, reversible, per-machine)

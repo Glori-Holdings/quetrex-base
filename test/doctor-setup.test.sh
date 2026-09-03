@@ -360,8 +360,11 @@ EOF
   # --- AC7: Check 14 Webhook registered --------------------------------------
   VAULT_WH="$WORK/vault-wh.json"
   write_json "$VAULT_WH" '[{"name":"DATABASE_URL","isSet":true,"last4":"5432"},{"name":"GITHUB_WEBHOOK_SECRET","isSet":true,"last4":"beef"}]'
-  PROJ_WH="$WORK/project-wh.json"; write_json "$PROJ_WH" '{"code":"DEA","githubRepo":"dealerq"}'
-  PROJ_NOREPO="$WORK/project-norepo.json"; write_json "$PROJ_NOREPO" '{"code":"DEA","githubRepo":null}'
+  # The board links a project only when BOTH githubOwner and githubRepo are set
+  # (board-repo-link.test.sh owns the owner-half cases; this file keeps the
+  # original hook / vault / githubRepo arms).
+  PROJ_WH="$WORK/project-wh.json"; write_json "$PROJ_WH" '{"code":"DEA","githubOwner":"Glori-Holdings","githubRepo":"dealerq"}'
+  PROJ_NOREPO="$WORK/project-norepo.json"; write_json "$PROJ_NOREPO" '{"code":"DEA","githubOwner":"Glori-Holdings","githubRepo":null}'
   R="$(mkrepo "c14-ok-$SH" git@github.com:Glori-Holdings/dealerq.git)"
   write_json "$R/.quetrex/project.json" '{"projectCode":"DEA","branchPrefix":"claude/"}'
   OUT="$(run_check "$SH" '## Check 14' "$R" QX_STUB_VAULT="$VAULT_WH" QX_STUB_PROJECT="$PROJ_WH" QX_STUB_HOOK_ID=4242)"

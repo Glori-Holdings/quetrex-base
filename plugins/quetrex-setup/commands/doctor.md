@@ -734,9 +734,11 @@ GitHub webhook the board verifies against THIS project's vault entry
 `GITHUB_WEBHOOK_SECRET` (generated and stored by `/quetrex-setup:init` 4i — never typed
 by the operator, never needed by an agent). Four things must all hold: the origin is a
 GitHub repo; that repo carries a hook pointed at the board; the vault lists the name
-(names-only collection GET — never the export endpoint); and the project records its
-`githubRepo`, or the board drops the delivery. Report which is missing; the one writer
-for all four is init:
+(names-only collection GET — never the export endpoint); and the project records BOTH
+halves of the origin slug — `githubOwner` and `githubRepo` — equal to it. The board
+shows the repository as linked only when both are set (`RepoLink` checks the pair), and
+the webhook drops a delivery from any other repo. Report which is missing or mismatched;
+the one writer for all four is init:
 
 ```bash
 QX_ORIGIN="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null)"
@@ -768,15 +770,29 @@ else
     });' 2>/dev/null; then
     WH_MISSING="$WH_MISSING GITHUB_WEBHOOK_SECRET in project $CODE's vault;"
   fi
-  # (d) the project records its repo, or the board refuses the delivery
-  LINKED_REPO="$(quetrex-api GET "/api/projects/$CODE" 2>/dev/null | node -e '
+  # (d) the project records BOTH halves of the origin slug — the board shows the
+  # repository as linked only when githubOwner AND githubRepo are set, and the
+  # webhook refuses a delivery from any other repo. Each half is named on its own.
+  LINKED_JSON="$(quetrex-api GET "/api/projects/$CODE" 2>/dev/null)"
+  linked_field() { printf '%s' "$LINKED_JSON" | node -e '
     let d=""; process.stdin.on("data",c=>{d+=c;}).on("end",()=>{
       let p; try { p=JSON.parse(d); } catch { process.exit(0); }
-      process.stdout.write(String((p && p.githubRepo) || ""));
-    });' 2>/dev/null)"
-  [ -n "$LINKED_REPO" ] || WH_MISSING="$WH_MISSING project $CODE githubRepo;"
+      process.stdout.write(String((p && p[process.argv[1]]) || ""));
+    });' "$1" 2>/dev/null; }
+  LINKED_OWNER="$(linked_field githubOwner)"; LINKED_REPO="$(linked_field githubRepo)"
+  SLUG_OWNER="${QX_SLUG%%/*}"; SLUG_REPO="${QX_SLUG##*/}"
+  if [ -z "$LINKED_OWNER" ]; then
+    WH_MISSING="$WH_MISSING project $CODE githubOwner (unset; origin is $SLUG_OWNER);"
+  elif [ "$LINKED_OWNER" != "$SLUG_OWNER" ]; then
+    WH_MISSING="$WH_MISSING project $CODE githubOwner (is $LINKED_OWNER, origin is $SLUG_OWNER);"
+  fi
+  if [ -z "$LINKED_REPO" ]; then
+    WH_MISSING="$WH_MISSING project $CODE githubRepo (unset; origin is $SLUG_REPO);"
+  elif [ "$LINKED_REPO" != "$SLUG_REPO" ]; then
+    WH_MISSING="$WH_MISSING project $CODE githubRepo (is $LINKED_REPO, origin is $SLUG_REPO);"
+  fi
   if [ -z "$WH_MISSING" ]; then
-    echo "✓ Webhook registered — $QX_SLUG hook $HOOK_ID -> $HOOK_URL, GITHUB_WEBHOOK_SECRET in project $CODE's vault, project linked to $LINKED_REPO."
+    echo "✓ Webhook registered — $QX_SLUG hook $HOOK_ID -> $HOOK_URL, GITHUB_WEBHOOK_SECRET in project $CODE's vault, project linked to $LINKED_OWNER/$LINKED_REPO — board shows the repository as linked."
   else
     echo "✗ Webhook registered — missing:$WH_MISSING cards will not auto-move to pr_ready."
     echo "    Fix: re-run /quetrex-setup:init"
