@@ -21,6 +21,14 @@
 #   QA3  the malicious-title row (QA1) renders BYTE-IDENTICAL under bash and
 #        zsh — the shells must not diverge on how they hand the fence's
 #        stdin/argv to node.
+#   QA4  a title carrying ESC `[2K` (erase line), an OSC sequence ending in
+#        BEL (`ESC ] 0 ; hijacked BEL` — retitles the terminal), and a DEL
+#        renders with NONE of those bytes in the output (`cat -v` shows no
+#        `^[`, `^G`, `^?`) — the renderer must strip terminal control bytes,
+#        not just collapse whitespace. Under bash and zsh.
+#   QA5  a task whose status is `constructor` (a prototype property name)
+#        renders the literal word `constructor` in the Status cell, never
+#        a `function ...` body from Object.prototype.
 
 set -uo pipefail
 
@@ -62,6 +70,25 @@ node -e '
 # --- badjson fixture (QA2): API returns non-JSON garbage ---------------------
 printf 'not json at all <<<garbage>>>' > "$WORK/tasks-badjson.txt"
 
+# --- QA4/QA5 fixture: terminal control bytes in a title + prototype-name
+# status. ESC [2K erases the line, ESC ]0;hijacked BEL retitles the terminal,
+# DEL is 0x7F; "constructor" is inherited from Object.prototype by any
+# plain-object lookup table.
+node -e '
+  const fs = require("fs");
+  const title = "pwn\x1b[2K\x1b[1;31mSAFE\x1b]0;hijacked\x07\x7fend";
+  const tasks = [
+    {id:"c1", identifier:"DEA-10", number:10, projectCode:"DEA",
+     title, status:"queued", priority:"high", type:"bug",
+     assignee:{id:"a1",name:"Glen\x1b[2K Barnhardt",image:null},
+     updatedAt:"2026-09-02T00:00:00.000Z"},
+    {id:"c2", identifier:"DEA-11", number:11, projectCode:"DEA",
+     title:"proto status", status:"constructor", priority:"low", type:"chore",
+     assignee:null, updatedAt:"2026-09-02T00:00:00.000Z"}
+  ];
+  fs.writeFileSync(process.argv[1], JSON.stringify(tasks));
+' "$WORK/tasks-ctrl.json"
+
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/quetrex-api" <<'STUB'
 #!/usr/bin/env bash
@@ -78,6 +105,7 @@ case "$1" in
       /api/projects/DEA) echo '{"id":"p1","code":"DEA","name":"DealerQ"}'; exit 0 ;;
       "/api/tasks?project=DEA")
         if [ "$MODE" = "badjson" ]; then cat "$QX_STUB_FIXTURE_TXT"; exit 0; fi
+        if [ "$MODE" = "ctrl" ]; then cat "$QX_STUB_FIXTURE_CTRL"; exit 0; fi
         cat "$QX_STUB_FIXTURE"; exit 0 ;;
       *) echo "Quetrex API error (HTTP 404)" >&2; exit 1 ;;
     esac ;;
@@ -91,6 +119,7 @@ run_block() {  # run_block <shell> <mode> <arguments-string>
   { printf 'ARGUMENTS=%q\n' "$args"; cat "$WORK/block.sh"; } > "$WORK/run.sh"
   PATH="$WORK/bin:$PATH" QX_STUB_MODE="$mode" \
     QX_STUB_FIXTURE="$WORK/tasks-malicious.json" QX_STUB_FIXTURE_TXT="$WORK/tasks-badjson.txt" \
+    QX_STUB_FIXTURE_CTRL="$WORK/tasks-ctrl.json" \
     "$sh" "$WORK/run.sh" 2>&1
 }
 
@@ -129,6 +158,24 @@ for SH in $SHELLS; do
     ok "QA2/$SH: exactly a clean unreadable-list line (+ board link), non-zero exit"
   else
     notok "QA2/$SH: badjson handling wrong: rc=$RC lines=$NONBLANK: $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+
+  # --- QA4: ESC/OSC-BEL/DEL in a title never reach the terminal ------------
+  OUT="$(run_block "$SH" ctrl "")"; RC=$?
+  VIS="$(printf '%s\n' "$OUT" | cat -v)"
+  if [ "$RC" -eq 0 ] && ! printf '%s\n' "$VIS" | grep -qE '\^\[|\^G|\^\?' \
+     && printf '%s\n' "$VIS" | grep -qE '^\| DEA-10 \| pwn .*SAFE .*end \| Queued \|.*\| Glen .*Barnhardt \|$'; then
+    ok "QA4/$SH: ESC [2K, OSC..BEL and DEL stripped from title and assignee (cat -v shows no ^[, ^G, ^?)"
+  else
+    notok "QA4/$SH: control bytes leaked or row malformed: rc=$RC: $(printf '%s' "$VIS" | tr '\n' '|')"
+  fi
+
+  # --- QA5: a prototype-name status renders as its raw string ---------------
+  if printf '%s\n' "$OUT" | grep -qE '^\| DEA-11 \| proto status \| constructor \| low \|' \
+     && ! printf '%s\n' "$OUT" | grep -qi 'function'; then
+    ok "QA5/$SH: status \"constructor\" renders the literal word, not Object.prototype.constructor"
+  else
+    notok "QA5/$SH: prototype-name status mishandled: $(printf '%s' "$OUT" | tr '\n' '|')"
   fi
 done
 

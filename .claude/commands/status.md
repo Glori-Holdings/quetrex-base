@@ -45,9 +45,11 @@ printf '%s' "$QX_TASKS" | node -e '
    || a.i - b.i).map((x) => x.t);
   const hiddenComplete = showAll ? 0 : all.filter((t) => t.status === "complete").length;
   const shown = showAll ? all : all.filter((t) => t.status !== "complete");
-  const norm = (s) => String(s == null ? "" : s).replace(/\s+/g, " ").trim();
+  // Strip C0/DEL/C1 control bytes (ESC/OSC/BEL — terminal escapes) before collapsing whitespace.
+  const norm = (s) => String(s == null ? "" : s).replace(/[\u0000-\u001F\u007F-\u009F]/g, " ").replace(/\s+/g, " ").trim();
   const esc  = (s) => s.replace(/\|/g, "\\|");
   const cell = (s) => esc(norm(s));
+  const label = (s) => Object.hasOwn(LABEL, s) ? LABEL[s] : cell(s);
   const clip = (s) => { const a = Array.from(s); return a.length > 60 ? a.slice(0, 59).join("") + "…" : s; };
   const out = [];
   if (all.length === 0) {
@@ -60,12 +62,12 @@ printf '%s' "$QX_TASKS" | node -e '
     for (const t of shown) {
       const id = cell(t.identifier || (t.projectCode && t.number != null ? t.projectCode + "-" + t.number : ""));
       const assignee = t.assignee && t.assignee.name ? cell(t.assignee.name) : "—";
-      out.push("| " + [id, esc(clip(norm(t.title))), LABEL[t.status] || cell(t.status), cell(t.priority || "none"),
+      out.push("| " + [id, esc(clip(norm(t.title))), label(t.status), cell(t.priority || "none"),
                         cell(t.type || "—"), assignee].join(" | ") + " |");
     }
     const counts = new Map();
     for (const t of shown) counts.set(t.status, (counts.get(t.status) || 0) + 1);
-    const parts = ORDER.filter((s) => counts.has(s)).map((s) => counts.get(s) + " " + LABEL[s].toLowerCase());
+    const parts = ORDER.filter((s) => counts.has(s)).map((s) => counts.get(s) + " " + label(s).toLowerCase());
     for (const s of counts.keys()) if (!ORDER.includes(s)) parts.push(counts.get(s) + " " + cell(s));
     if (hiddenComplete > 0) parts.push(hiddenComplete + " complete (hidden — use --all)");
     out.push("");
