@@ -1002,7 +1002,7 @@ operator's zsh as well as bash: no unquoted `$VAR` splitting, no `$var:` modifie
 # ── quetrex:exec-block qx_register_webhook ─────────────────────────────────────
 # Owner/repo from the origin remote — skip silently when there is no GitHub origin.
 QX_ORIGIN="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null)"
-QX_SLUG="$(printf '%s' "$QX_ORIGIN" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##')"
+QX_SLUG="$(printf '%s' "$QX_ORIGIN" | sed -E 's#^(git@github\.com:|(https?|ssh|git)://(git@)?github\.com/)##; s#/+$##; s#\.git$##; s#/+$##')"
 QX_HOOK_URL="${QX_KANBAN_URL%/}/api/webhooks/github"
 
 if ! printf '%s' "$QX_SLUG" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
@@ -1070,7 +1070,7 @@ modifiers.
 # Owner and repo are the two halves of the origin slug. The API validates each
 # against ^[A-Za-z0-9._-]+$ — bare halves, never "owner/repo" in one field.
 QX_ORIGIN="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null)"
-QX_SLUG="$(printf '%s' "$QX_ORIGIN" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##')"
+QX_SLUG="$(printf '%s' "$QX_ORIGIN" | sed -E 's#^(git@github\.com:|(https?|ssh|git)://(git@)?github\.com/)##; s#/+$##; s#\.git$##; s#/+$##')"
 if printf '%s' "$QX_SLUG" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
   QX_OWNER_NAME="${QX_SLUG%%/*}"
   QX_REPO_NAME="${QX_SLUG##*/}"

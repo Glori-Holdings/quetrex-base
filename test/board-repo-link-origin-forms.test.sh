@@ -6,9 +6,15 @@
 # ever reach the PATCH? Run: bash test/board-repo-link-origin-forms.test.sh
 #
 #   AC1  EXECUTED (bash + zsh): git@github.com:Owner/repo.git,
-#        https://github.com/Owner/repo.git and https://github.com/Owner/repo
-#        (no .git) all derive owner=Owner repo=repo and PATCH exactly once.
-#   AC2  EXECUTED: a non-GitHub origin (gitlab.com) never PATCHes.
+#        https://github.com/Owner/repo.git, https://github.com/Owner/repo
+#        (no .git), http://github.com/Owner/repo.git,
+#        ssh://git@github.com/Owner/repo.git, git://github.com/Owner/repo.git,
+#        and the trailing-slash forms https://github.com/Owner/repo/ and
+#        https://github.com/Owner/repo.git/ all derive owner=Owner repo=repo
+#        and PATCH exactly once.
+#   AC2  EXECUTED: a non-GitHub origin (gitlab.com) never PATCHes; nor does
+#        a GitHub URL with an explicit port (ssh://git@github.com:22/...) —
+#        it is not a bare owner/repo slug, so the block skips cleanly.
 #   AC3  EXECUTED: an origin whose owner or repo half contains a character
 #        outside ^[A-Za-z0-9._-]+$ (space, semicolon, backtick, shell
 #        metacharacters) never reaches the PATCH and injects nothing into the
@@ -16,13 +22,10 @@
 #   AC4  EXECUTED: the PATCH body is valid JSON for a dotted/hyphenated/
 #        underscored owner+repo pair (proves it is built with jq, not string
 #        interpolation).
-#   GAP  KNOWN, NON-BLOCKING (documented, not asserted as a failure here):
-#        `ssh://git@github.com/Owner/repo.git` — a valid, real GitHub remote
-#        form — is NOT recognized by the block's two sed patterns
-#        (`^git@github\.com:` and `^https://github\.com/`), so QX_SLUG never
-#        matches the owner/repo regex and the block skips cleanly (no PATCH,
-#        no error, no injection) instead of linking. Reported to the reviewer
-#        in qa-report.json; not converted into a red gate here.
+#   HISTORY: the ssh://, git:// and trailing-slash forms in AC1 were a
+#        documented GAP (clean skip, no link) until the derivation was
+#        widened; the AC1 assertions for those forms are the fail-first for
+#        that fix — they fail against the old two-pattern sed.
 
 set -uo pipefail
 
@@ -87,7 +90,12 @@ for SH in $SHELLS; do
   for entry in \
     "git@github.com:Owner/repo.git|git-scp" \
     "https://github.com/Owner/repo.git|https-dotgit" \
-    "https://github.com/Owner/repo|https-nodotgit"; do
+    "https://github.com/Owner/repo|https-nodotgit" \
+    "http://github.com/Owner/repo.git|http-dotgit" \
+    "ssh://git@github.com/Owner/repo.git|ssh-scheme" \
+    "git://github.com/Owner/repo.git|git-scheme" \
+    "https://github.com/Owner/repo/|https-trailing-slash" \
+    "https://github.com/Owner/repo.git/|https-dotgit-trailing-slash"; do
     origin="${entry%%|*}"; tag="${entry##*|}"; suf="$tag-$SH"
     run_case "$SH" "$origin" "$suf" >/dev/null
     L="$WORK/log-$suf"
@@ -99,10 +107,14 @@ for SH in $SHELLS; do
   done
 
   # AC2
-  suf="non-github-$SH"
-  run_case "$SH" "https://gitlab.com/Owner/repo.git" "$suf" >/dev/null
-  L="$WORK/log-$suf"
-  if [ "$(patch_count "$L")" = 0 ]; then ok "$SH/non-github: no PATCH"; else notok "$SH/non-github: unexpected PATCH"; fi
+  for entry in \
+    "https://gitlab.com/Owner/repo.git|non-github" \
+    "ssh://git@github.com:22/Owner/repo.git|github-explicit-port"; do
+    origin="${entry%%|*}"; tag="${entry##*|}"; suf="$tag-$SH"
+    run_case "$SH" "$origin" "$suf" >/dev/null
+    L="$WORK/log-$suf"
+    if [ "$(patch_count "$L")" = 0 ]; then ok "$SH/$tag ($origin): no PATCH"; else notok "$SH/$tag ($origin): unexpected PATCH"; fi
+  done
 
   # AC3
   for entry in \
@@ -128,16 +140,6 @@ for SH in $SHELLS; do
     ok "$SH/jsonvalid: PATCH body is valid JSON (jq-built, not interpolated)"
   else
     notok "$SH/jsonvalid: invalid or missing PATCH body"
-  fi
-
-  # GAP (documented, non-blocking): ssh:// scheme origin.
-  suf="ssh-scheme-$SH"
-  run_case "$SH" "ssh://git@github.com/Owner/repo.git" "$suf" >/dev/null
-  L="$WORK/log-$suf"
-  if [ "$(patch_count "$L")" = 0 ]; then
-    ok "$SH/ssh-scheme: KNOWN GAP confirmed as a clean skip, not a crash or injection (ssh://... is not linked — see header)"
-  else
-    notok "$SH/ssh-scheme: behavior changed since this test was written — re-check the header GAP note"
   fi
 done
 
