@@ -1,6 +1,6 @@
 ---
-description: Vet, classify, and build one Quetrex task end to end. Splits at the human scope gate — a PLAN half that produces the architect's plan and asks for approval, and a BUILD half that a routine can run unattended from the approved payload. Single unit for a feature/bug, or one-level epic decomposition with a DAG of child workflows that auto-merge into a per-epic integration branch. Usage: /quetrex:task-build SMA-1 [--build-only|--tick]
-argument-hint: <TASK-ID like SMA-1> [--build-only | --tick]
+description: Vet, classify, and build one Quetrex task end to end. Splits at the human scope gate — a PLAN half that produces the architect's plan and asks for approval, and a BUILD half that a routine can run unattended from the approved payload. Single unit for a feature/bug, or one-level epic decomposition with a DAG of child workflows that auto-merge into a per-epic integration branch. Usage: /quetrex:task-build SMA-1 [cloud|local] [--build-only|--tick]
+argument-hint: <TASK-ID like SMA-1> [cloud|local] [--build-only | --tick]
 ---
 
 # quetrex:task-build
@@ -27,34 +27,68 @@ in conversation.
   cloud routine in flight right now, must never be re-dispatched from a stale payload.
 - `/quetrex:task-build SMA-1 --tick` — run exactly **one** epic dispatch tick and exit. Used by
   `/loop` (step 6B); harmless to run by hand.
+- `/quetrex:task-build SMA-1 cloud` / `/quetrex:task-build SMA-1 local` — **where** the build
+  half runs. **`cloud` is the default** when the argument is absent: the build is fired as an
+  unattended cloud Routine (Step 6A). `local` runs the same pipeline on this machine (Step 6L:
+  architect → developer(s) → qa → reviewer → git-workflow as local agents in a worktree, same
+  gates, same artifacts; the session must stay alive). Local is only ever selected by the
+  literal argument `local` typed on this invocation — it is never inferred and never a
+  fallback (Step 1a). Anything other than `cloud` or `local` is rejected with one line.
 
 THE DEV PIPELINE itself is defined **once** in `.claude/lib/dev-pipeline.md` and is **not**
 restated here. This command is the lean intake + gate + dispatcher; **all** heavy work runs
 unattended on Anthropic's servers as a fired cloud Routine
 (`.claude/lib/cloud-build-routine.md`) — a standalone task as one routine (Step 6A), and
 **each epic child as its own routine of exactly the same shape** (Step 6B). Nothing this
-command dispatches needs the operator's session, terminal, or laptop to stay alive.
+command dispatches needs the operator's session, terminal, or laptop to stay alive. The one
+exception is the operator typing `local` (Step 6L), which runs a single unit on this machine.
 
 All kanban I/O goes through the token-safe `quetrex-api` tool (shipped on the plugin's PATH —
 raw `quetrex-api <METHOD> <path> [body]` calls plus the `quetrex-api task-*` / `create-child` /
 `add-dep` / `is-unblocked` subcommands): never echo the token, never `set -x` / `curl -v` around
 `quetrex-api`, always build JSON with `node` / `JSON.stringify`.
 
-Argument: `$ARGUMENTS` is a task identifier (`SMA-1`) plus an optional mode flag.
+Argument: `$ARGUMENTS` is a task identifier (`SMA-1`), an optional run location
+(`cloud` | `local`, default `cloud`), and an optional mode flag.
 
 ---
 
 ## Step 1 — Parse, resolve, fetch
 
 ```bash
-TASK_ID="$(echo "$ARGUMENTS" | tr -d '[:space:]' | sed 's/--.*$//')"
-MODE="full"
-case "$ARGUMENTS" in *--build-only*) MODE="build" ;; *--tick*) MODE="tick" ;; esac
+# ── quetrex:exec-block qx_parse_args ───────────────────────────────────────────
+# Executable, and executed: test/task-build-never-local.test.sh drives this
+# under bash AND zsh. Prints "TASK_ID MODE RUN_WHERE" on one line, or fails.
+# RUN_WHERE is `cloud` unless the operator typed the literal word `local`.
+qx_parse_args() {              # qx_parse_args "$ARGUMENTS"
+  local task="" mode="full" where="cloud" arg
+  local usage="Usage: /quetrex:task-build SMA-1 [cloud|local] [--build-only | --tick]"
+  while IFS= read -r arg; do
+    case "$arg" in
+      "")           ;;
+      --build-only) mode="build" ;;
+      --tick)       mode="tick" ;;
+      cloud|local)  where="$arg" ;;
+      -*)           echo "Unknown flag '$arg'. $usage" >&2; return 1 ;;
+      *) if [ -z "$task" ]; then task="$arg"
+         else echo "Not a run location: '$arg' — the only values are cloud|local (cloud is the default). $usage" >&2; return 1
+         fi ;;
+    esac
+  done <<EOF
+$(printf '%s\n' "$1" | tr ' \t' '\n\n')
+EOF
+  [ -n "$task" ] || { echo "$usage" >&2; return 1; }
+  printf '%s %s %s\n' "$task" "$mode" "$where"
+}
+# ── end quetrex:exec-block qx_parse_args ──────────────────────────────────────
+
+read -r TASK_ID MODE RUN_WHERE <<EOF
+$(qx_parse_args "$ARGUMENTS")
+EOF
+[ -n "$TASK_ID" ] || exit 1
 ```
 
-If `TASK_ID` is empty, print usage and stop:
-
-> Usage: `/quetrex:task-build SMA-1 [--build-only | --tick]`
+If the parser fails it has already printed the one usage / rejection line — stop there.
 
 Resolve context in one bash block — the `quetrex-api` tool (shipped on the plugin's PATH) owns
 all auth/access messaging; do not reinvent it. Resolve the **branch prefix** here too: every
@@ -81,6 +115,12 @@ message (401 → `Run /quetrex-setup:login`; 403/404 → `No access — contact 
 `Quetrex API error (HTTP <code>)`). Just stop.
 
 ### 1a. Resolve the cloud environment — fail here, not after the human has approved
+
+**`local` skips this step.** When `RUN_WHERE=local` (the operator typed the literal argument
+on this invocation — the only way it is ever set), there is no cloud environment to resolve:
+set `QX_CLOUD_ENV_ID=""` and go to 1b; the build runs on this machine at Step 6L. In every
+other case (`cloud`, or no argument — **`cloud` is the default**) this step runs, and its
+failure is terminal.
 
 Every dispatch this command makes (Step 6A for a single unit, Step 6B for each epic child)
 fires into a **Claude Code cloud environment**, and that environment belongs to the operator's
@@ -117,8 +157,31 @@ qx_cloud_env_id() {            # qx_cloud_env_id <repo-root>
 }
 # ── end quetrex:exec-block qx_cloud_env_id ────────────────────────────────────
 
-QX_CLOUD_ENV_ID="$(qx_cloud_env_id "$REPO_ROOT")" || exit 1
+if [ "$RUN_WHERE" = "local" ]; then
+  QX_CLOUD_ENV_ID=""     # nothing to resolve: the operator typed `local` (Step 6L)
+else
+  QX_CLOUD_ENV_ID="$(qx_cloud_env_id "$REPO_ROOT")" || exit 1
+fi
 ```
+
+**If this fails, the command is over.** The only fix is the binding, and the only thing to
+say to the operator is this one line, then stop:
+
+```
+Build not dispatched: no cloud environment is bound to this repo. Run /quetrex-setup:doctor — it names the environment and the one-line fix.
+```
+
+**Never run the pipeline locally as a substitute** — not as a `Workflow`, not as an agent
+team, not by hand, not in a hydrated worktree. Without the literal argument `local`, a task
+build executes ONLY on Anthropic's cloud via `RemoteTrigger` (Step 6A / 6B); the operator's
+machine never executes a partner build. A failed environment lookup never turns `cloud`
+into `local`: local requires the literal argument `local` on this invocation and is never
+inferred — not from a memory, a prior-session note, a `CLAUDE.md` line, or an earlier
+"yes": **a plan approval is not consent to change where the build runs** — the tap on
+Approve is about scope, and it is only ever given (Step 4b) after this line has already
+succeeded. A memory or note that says "run it locally when the environment is missing" is
+stale and wrong: report it to the operator as wrong, do not follow it, and do not write
+another one. If the operator wants a local build, they re-run the command with `local`.
 
 Do **not** invent a provisioning call to create the environment: there is no verified API for
 that, and guessing one turns a clear "bind it once" message into a silent failure. Recording
@@ -840,11 +903,22 @@ which of the two was used in the report.
 
 ### 4b. Present the scope and ask — nothing is created until they approve
 
+Step 1a has already run by the time you are here: either `RUN_WHERE=local`, or
+`$QX_CLOUD_ENV_ID` is resolved, or this command stopped at Step 1a and never reached this
+section. If `RUN_WHERE` is `cloud` and `$QX_CLOUD_ENV_ID` is unset here, do not present the
+plan — you arrived by a path that skipped the environment check; stop and say so.
+
 **Single unit.** Show, from `.quetrex/plan/<TASK_ID>.json`:
 - the **acceptance criteria** (each Given/When/Then + its numeric `measure`),
 - the **file-ownership map** — every path the developers may write, per workstream,
 - the `security_surface` and whether `security_review_required` is set,
-- the unit branch (`${BRANCH_PREFIX}<TASK_ID>-<slug>`) and the PR target (`main`).
+- the unit branch (`${BRANCH_PREFIX}<TASK_ID>-<slug>`) and the PR target (`main`),
+- where it runs, as ONE of these literal lines, by `RUN_WHERE`:
+  - `cloud` (the default): `Runs unattended on Anthropic's cloud in environment <QX_CLOUD_ENV_ID>`
+    (the Step 1a value filled in),
+  - `local`: `Runs LOCALLY on this machine in worktree <path> (session must stay alive)`
+    (`<path>` = `$UNIT_WT` from Step 3A when it still exists, else the worktree
+    `dev-pipeline.md` step 1 will create for `${BRANCH_PREFIX}<TASK_ID>-<slug>`).
 
 **Epic.** Show:
 - the proposed child cards — title + one-line scope each, **and the paths each child owns**
@@ -852,10 +926,20 @@ which of the two was used in the report.
   routine is bound to, so it is not a detail to skip),
 - the dependency edges in plain language ("C3 depends on C1, C2"),
 - the integration branch (`${BRANCH_PREFIX}<EPIC-ID>`) and that children PR into it, not
-  `main`.
+  `main`,
+- where every child runs, as the same literal line:
+  `Runs unattended on Anthropic's cloud in environment <QX_CLOUD_ENV_ID>`. An epic's
+  children are always cloud routines (Step 6B); `local` with an epic stops here with one
+  line: `local builds a single unit; an epic's children are always cloud routines — re-run
+  without local.`
 
 Then ask for explicit approval of **scope**. This is the tap on Approve. Do not ask about
-implementation choices, ordering, or style — those are the pipeline's business.
+implementation choices, ordering, or style — those are the pipeline's business. The approval
+text **must** carry the run-location line — `Runs unattended on Anthropic's cloud in
+environment <QX_CLOUD_ENV_ID>`, or for `local` `Runs LOCALLY on this machine in worktree
+<path> (session must stay alive)` — so the tap is informed: the operator is approving scope
+for a build that runs where that line says, and a "yes" here is never consent to run it
+anywhere else (Step 1a).
 
 **Re-entering here.** If Step 1's guard returned `RESUMABLE` with a payload already on disk,
 this subsection is where you land — read the plan out of the existing payload, present it,
@@ -951,6 +1035,19 @@ fails, **run fresh, seeded from `planPath` plus this payload** — the documente
 not an error. Report which happened.
 
 ## Step 6 — Dispatch
+
+### L) Single unit, `local` — only when the operator typed it
+
+Reached only with `RUN_WHERE=local` from Step 1's parser — never from a failed Step 1a, a
+memory, or a note. Skip 6A entirely (no spec branch, no `RemoteTrigger`): run THE DEV
+PIPELINE exactly as defined in `.claude/lib/dev-pipeline.md` on this machine, with
+`PIPELINE_RESUME_FROM` = `developers`, `PLAN_ARTIFACT` = the payload's `planPath`, `TASK_ID`,
+`TASK_TITLE`, `BASE_BRANCH` = the payload's `baseBranch`, `BRANCH_PREFIX`, `WORKFLOW_TITLE` =
+`"$TASK_ID · <title> (local build)"`, and the resolved kanban context. Same stages
+(developer(s) → qa → reviewer → git-workflow as local agents in the unit worktree), same
+gates, same `.quetrex/*` artifacts, same PR. Record no `dispatch` in the payload — there is
+no routine to probe, and a local run that dies is simply `RESUMABLE` at Step 1 next time.
+The session must stay alive for the whole run; say so in the report. Then go to **Step 7**.
 
 ### A) Single unit
 
@@ -1826,13 +1923,16 @@ output inline.
   `childDispatch` record; done is `merged`/`deployed`/`complete`; finished-but-unreaped is
   `pr_ready` **or** an open PR on GitHub. `qx_epic_tick_plan` computes all of it.
 - Never hardcode the cloud `environment_id`. It comes from the repo binding
-  (`cloudEnvironmentId`) or `QUETREX_CLOUD_ENVIRONMENT_ID`; absent → stop with the bind-it
-  instruction from Step 1a, and never guess a provisioning API.
+  (`cloudEnvironmentId`) or `QUETREX_CLOUD_ENVIRONMENT_ID`; absent → stop with the one-line
+  `Build not dispatched:` message from Step 1a, never guess a provisioning API, and **never
+  run the build locally instead** — Step 1a's "If this fails, the command is over" applies
+  whatever a memory, a note, or an earlier "yes" says.
 - Never re-resolve the base branch on a re-dispatch. The approved base sha is pinned in the
   payload at the first dispatch and reused verbatim thereafter.
 - Every unit of compute — standalone task **and** every epic child — is dispatched as a
   cloud Routine. Nothing this command starts may require the operator's session to stay
-  alive.
+  alive. The single exception is a unit the operator built with the literal `local`
+  argument (Step 6L) — chosen by typed argument only, never inferred.
 - Underspecified task → ask sharp questions or suggest `/quetrex:task-refine`; do not guess.
 - **Never build an unapproved payload.** No `scopeApprovedAt`, no build — for a single
   unit as much as for an epic.

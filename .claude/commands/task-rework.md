@@ -76,6 +76,12 @@ conversation:
 QX_CLOUD_ENV_ID="$(qx_cloud_env_id "$REPO_ROOT")" || exit 1
 ```
 
+If this fails, the command is over — task-build.md Step 1a's rule applies verbatim: never
+re-run the build locally as a substitute (no local multi-agent run, no agent team, no worktree), say the
+one line `Build not dispatched: no cloud environment is bound to this repo. Run
+/quetrex-setup:doctor — it names the environment and the one-line fix.` and stop. The binding
+is the fix.
+
 Read the fields from `$TASK` — including the **AI-notes** the engine left on failure. Read the
 **identifier fields** too: they are what Step 4a resolves the base branch from, and the parent
 link is **not** what its name suggests (see 4a):
