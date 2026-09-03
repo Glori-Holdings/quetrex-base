@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# test/init-cloud-env.test.sh — /quetrex-setup:init DERIVES cloudEnvironmentId
-# instead of asking the operator to paste one.
+# test/init-cloud-env.test.sh — cloudEnvironmentId is DERIVED, by ONE shipped
+# executable, instead of asked for.
 #
 # Run: bash test/init-cloud-env.test.sh
 #
@@ -10,9 +10,12 @@
 # paste it back. Every new partner stalled there. Arming a feature belongs in
 # init, never in a failure message from the command that needed it.
 #
-# THIS FILE DRIVES THE SHIPPED BLOCK. It extracts the `qx_env_candidates`
-# exec-block from plugins/quetrex-setup/commands/init.md — the same bytes the
-# model is told to run — and executes it. No restatement of the logic.
+# ONE COPY. The ranking used to be inline python inside init.md's step 3e.
+# /quetrex-setup:doctor needed the identical logic for its Cloud-environment
+# check, and two copies of a ranking function drift — so it is now
+# plugins/quetrex-setup/bin/quetrex-cloud-env, and BOTH commands call it by
+# name. This file drives THAT executable (the bytes that actually run) and
+# asserts init.md no longer carries its own copy.
 #
 # THE FIXTURE IS REAL. test/fixtures/remote-triggers.json was captured from an
 # actual `RemoteTrigger action:"list"` response (GET /v1/code/triggers, 20
@@ -21,15 +24,16 @@
 # code, so if the API ever moves environment_id or the repo sources, AC1 fails
 # loudly rather than the derivation silently returning nothing.
 #
-# FAIL-FIRST (baseline pinned to a FIXED SHA, never `main`): against 1d5c364,
-# init.md has no qx_env_candidates block at all —
-#   git show 1d5c364:plugins/quetrex-setup/commands/init.md > /tmp/old-init.md
-#   QX_INIT_COMMAND=/tmp/old-init.md bash test/init-cloud-env.test.sh
-# prints NOT OK on extraction and exits 1.
+# FAIL-FIRST (baseline pinned to a FIXED SHA, never `main`): against
+# 7333ab07abecf95c3e699c528eb0abae79e078a6 there is no
+# plugins/quetrex-setup/bin/quetrex-cloud-env at all, and init.md still
+# carries the inline `qx_env_candidates()` python — AC0 and AC10 below both
+# print NOT OK against that tree.
 
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TOOL="${QX_CLOUD_ENV_TOOL:-$ROOT/plugins/quetrex-setup/bin/quetrex-cloud-env}"
 COMMAND="${QX_INIT_COMMAND:-$ROOT/plugins/quetrex-setup/commands/init.md}"
 FIXTURE="$ROOT/test/fixtures/remote-triggers.json"
 
@@ -38,35 +42,42 @@ ok()    { PASS=$((PASS+1)); printf 'ok - %s\n' "$1"; }
 notok() { FAIL=$((FAIL+1)); printf 'NOT OK - %s\n' "$1"; }
 
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 unavailable"; exit 0; }
+command -v node >/dev/null 2>&1 || { echo "SKIP: node unavailable"; exit 0; }
 [ -f "$COMMAND" ]  || { echo "NOT OK - init.md not found at $COMMAND"; exit 1; }
 [ -f "$FIXTURE" ]  || { echo "NOT OK - fixture not found at $FIXTURE"; exit 1; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/init-cloud-env.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-# --- extract the shipped exec-block ------------------------------------------
-awk -v name="qx_env_candidates" '
-  $0 ~ ("quetrex:exec-block " name "([^A-Za-z0-9_]|$)") && $0 !~ ("end quetrex:exec-block") { inb=1 }
-  inb { print }
-  $0 ~ ("end quetrex:exec-block " name "([^A-Za-z0-9_]|$)") { inb=0 }
-' "$COMMAND" > "$WORK/block.sh"
-
-if [ ! -s "$WORK/block.sh" ] || ! grep -q '^[[:space:]]*qx_env_candidates()' "$WORK/block.sh"; then
-  notok "init.md has no executable block 'qx_env_candidates' — the derivation is prose again, and this file can only check prose"
+# --- AC0: the shipped executable exists and parses --------------------------
+if [ ! -f "$TOOL" ]; then
+  notok "AC0: $TOOL does not exist — the derivation has no single shipped home"
   printf '\n%s\n' "init-cloud-env.test.sh: $PASS passed, $FAIL failed"
   exit 1
 fi
-if ERR="$(bash -n "$WORK/block.sh" 2>&1)"; then
-  ok "extracted the shipped qx_env_candidates block from init.md and it parses"
+if ERR="$(bash -n "$TOOL" 2>&1)"; then
+  ok "AC0: quetrex-cloud-env exists and parses"
 else
-  notok "the qx_env_candidates block is not valid shell: $ERR"
+  notok "AC0: quetrex-cloud-env is not valid shell: $ERR"
   printf '\n%s\n' "init-cloud-env.test.sh: $PASS passed, $FAIL failed"
   exit 1
 fi
-# shellcheck source=/dev/null
-. "$WORK/block.sh"
 
-cand() { qx_env_candidates "$1" < "${2:-$FIXTURE}"; }
+# A fixture repo per origin URL: `candidates` reads the origin off the repo
+# itself (git remote get-url origin), exactly as init and doctor call it.
+repo_for() {  # repo_for <origin-url> -> path
+  local d="$WORK/repo-$(printf '%s' "$1" | shasum | cut -c1-10)"
+  if [ ! -d "$d" ]; then
+    mkdir -p "$d"
+    git -C "$d" init -q
+    git -C "$d" remote add origin "$1"
+  fi
+  printf '%s' "$d"
+}
+cand() {  # cand <origin-url> [json-file] [shell]
+  local r; r="$(repo_for "$1")"
+  "${3:-bash}" "$TOOL" candidates "$r" < "${2:-$FIXTURE}"
+}
 
 # --- AC1: SHAPE ASSERTION on the captured payload ----------------------------
 # The two field paths the derivation depends on must still exist in a real
@@ -101,8 +112,6 @@ else
 fi
 
 # --- AC3: distinct environments only, never one row per routine --------------
-# 20 routines share 2 environments. A per-routine list would present the same
-# environment ten times in an AskUserQuestion panel.
 DUPES=$(printf '%s\n' "$OUT" | awk -F'\t' 'NF{print $1}' | sort | uniq -d | grep -c . || true)
 if [ "$DUPES" -eq 0 ]; then
   ok "AC3: environments are de-duplicated — 20 routines collapse to distinct ids"
@@ -111,8 +120,6 @@ else
 fi
 
 # --- AC4: a repo used by exactly one environment resolves UNAMBIGUOUSLY ------
-# quetrex-plugins ran under one environment only: init must write it silently,
-# with no question. This is the case that removes the partner stall.
 OUT3=$(cand "https://github.com/Glori-Holdings/quetrex-plugins")
 ONLY=$(printf '%s\n' "$OUT3" | awk -F'\t' '$2=="repo"{print $1}')
 if [ "$(printf '%s\n' "$ONLY" | grep -c .)" -eq 1 ] && [ "$ONLY" = "env_011CUpkAEM4fzsAD6dx1zW3r" ]; then
@@ -122,8 +129,6 @@ else
 fi
 
 # --- AC5: repo-first ordering ------------------------------------------------
-# An unknown repo still gets the account's environments offered, all 'other'.
-# For a known repo the 'repo' ones must sort ahead of the rest.
 OUT4=$(cand "https://github.com/Someone-Else/never-seen")
 OTHER_N=$(printf '%s\n' "$OUT4" | awk -F'\t' '$2=="other"' | grep -c . || true)
 FIRST=$(printf '%s\n' "$OUT3" | head -1 | cut -f2)
@@ -134,9 +139,6 @@ else
 fi
 
 # --- AC6: URL normalisation — SSH, .git, and trailing slash all match --------
-# The binding is derived from `git remote get-url origin`, which is commonly an
-# SSH URL, while the API records the https form. Matching them literally would
-# mark every environment 'other' and turn a silent derivation into a question.
 NORM_OK=1
 for U in \
   "git@github.com:Glori-Holdings/quetrex-plugins.git" \
@@ -149,16 +151,16 @@ for U in \
 done
 [ "$NORM_OK" -eq 1 ] && ok "AC6: SSH, .git, trailing-slash, scheme and case variants of the origin URL all match the recorded https URL"
 
-# --- AC7: the genuinely-new user — empty in, empty out, no crash -------------
+# --- AC7: the genuinely-new user — empty in, empty out, exit 0, no crash -----
 NEW_OK=1
-for BAD in '{"data":[]}' '{}' 'not json at all' ''; do
+for BAD in '{"data":[]}' '{}' 'not json at all' '' '[]'; do
   printf '%s' "$BAD" > "$WORK/bad.json"
   R=$(cand "https://github.com/x/y" "$WORK/bad.json" 2>&1); RC=$?
   if [ "$RC" -ne 0 ] || [ -n "$R" ]; then
-    NEW_OK=0; notok "AC7: input '${BAD:0:20}' gave rc=$RC out='$R' — expected clean empty output so init can fall back"
+    NEW_OK=0; notok "AC7: input '${BAD:0:20}' gave rc=$RC out='$R' — expected clean empty output, exit 0, so a caller can fall back"
   fi
 done
-[ "$NEW_OK" -eq 1 ] && ok "AC7: no routines, malformed JSON, and empty input all yield clean empty output (init falls back, never crashes)"
+[ "$NEW_OK" -eq 1 ] && ok "AC7: no routines, malformed JSON, a non-object and empty input all yield empty output with exit 0 (init/doctor fall back, never crash)"
 
 # --- AC8: a routine with no environment_id is skipped, not emitted as blank --
 python3 - "$FIXTURE" "$WORK/partial.json" <<'PY'
@@ -176,9 +178,6 @@ else
 fi
 
 # --- AC9: task-build no longer tells the operator to hand-edit the binding ---
-# Scoped to the qx_cloud_env_id block itself, not the whole file: init is named
-# in a dozen unrelated places, so a file-wide grep would pass on a coincidence
-# and assert nothing. Extract the shipped block and read ITS message.
 TB="${QX_TASK_BUILD_COMMAND:-$ROOT/.claude/commands/task-build.md}"
 awk -v name="qx_cloud_env_id" '
   $0 ~ ("quetrex:exec-block " name "([^A-Za-z0-9_]|$)") && $0 !~ ("end quetrex:exec-block") { inb=1 }
@@ -193,6 +192,63 @@ elif grep -q 'quetrex-setup:init' "$WORK/envblock.sh"; then
   ok "AC9: the missing-environment message sends the operator to /quetrex-setup:init and no longer prints a hand-run node -e"
 else
   notok "AC9: the missing-environment message does not name /quetrex-setup:init"
+fi
+
+# --- AC10: ONE COPY — init.md calls the executable and carries no inline copy -
+if grep -q 'job_config.ccr.environment_id' <(awk '/^```bash$/{inb=1;next} /^```$/{inb=0} inb' "$COMMAND") \
+   || grep -qE '^[[:space:]]*qx_env_candidates\(\)' "$COMMAND" \
+   || grep -q 'python3 -c' "$COMMAND"; then
+  notok "AC10: init.md still carries an inline copy of the environment ranking (qx_env_candidates / python3) — two copies drift; the ONE copy is bin/quetrex-cloud-env"
+else
+  ok "AC10: init.md carries no inline ranking python — one copy, in bin/quetrex-cloud-env"
+fi
+if grep -q 'quetrex-cloud-env candidates "\$REPO_ROOT"' "$COMMAND" && grep -q 'quetrex-cloud-env set "\$REPO_ROOT"' "$COMMAND"; then
+  ok "AC10: init.md step 3e derives with 'quetrex-cloud-env candidates' and writes with 'quetrex-cloud-env set'"
+else
+  notok "AC10: init.md step 3e does not call quetrex-cloud-env candidates/set by name"
+fi
+DOCTOR="${QX_DOCTOR_COMMAND:-$ROOT/plugins/quetrex-setup/commands/doctor.md}"
+if [ -f "$DOCTOR" ] && grep -q 'quetrex-cloud-env candidates "\$REPO_ROOT"' "$DOCTOR"; then
+  ok "AC10: doctor.md's Cloud environment check calls the SAME executable"
+else
+  notok "AC10: doctor.md does not call quetrex-cloud-env candidates (missing at $DOCTOR, or its own copy)"
+fi
+
+# --- AC11: `set` writes the field, preserves the rest, refuses garbage -------
+SR="$WORK/set-repo"; mkdir -p "$SR/.quetrex"
+node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({projectCode:"QDM",kanbanUrl:"https://dash.example",branchPrefix:"claude/"},null,2)+"\n")' "$SR/.quetrex/project.json"
+SET_OUT="$("$TOOL" set "$SR" env_011CUpkAEM4fzsAD6dx1zW3r 2>&1)"; SET_RC=$?
+GOT="$(node -e 'const o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write([o.cloudEnvironmentId,o.projectCode,o.kanbanUrl,o.branchPrefix].join("|"))' "$SR/.quetrex/project.json")"
+if [ "$SET_RC" -eq 0 ] && [ "$GOT" = "env_011CUpkAEM4fzsAD6dx1zW3r|QDM|https://dash.example|claude/" ] && printf '%s' "$SET_OUT" | grep -q 'cloud environment: env_011CUpkAEM4fzsAD6dx1zW3r'; then
+  ok "AC11: set writes cloudEnvironmentId and preserves every other binding field"
+else
+  notok "AC11: set rc=$SET_RC got='$GOT' out='$SET_OUT'"
+fi
+BEFORE="$(cat "$SR/.quetrex/project.json")"
+if "$TOOL" set "$SR" 'not-an-id;rm -rf /' >/dev/null 2>&1; then
+  notok "AC11: set accepted a non-env_ id"
+elif [ "$(cat "$SR/.quetrex/project.json")" = "$BEFORE" ]; then
+  ok "AC11: set refuses an id that is not env_<alnum> and leaves the binding untouched"
+else
+  notok "AC11: set refused the bad id but still changed the binding"
+fi
+NB="$WORK/no-binding"; mkdir -p "$NB"
+if "$TOOL" set "$NB" env_abc >/dev/null 2>&1 || [ -e "$NB/.quetrex/project.json" ]; then
+  notok "AC11: set created a binding where none existed — init owns creation"
+else
+  ok "AC11: set refuses to create a binding (no .quetrex/project.json → error, nothing written)"
+fi
+
+# --- AC12: identical output under zsh (the operator's shell) -----------------
+if command -v zsh >/dev/null 2>&1; then
+  Z="$(cand "https://github.com/Glori-Holdings/quetrex-plugins" "$FIXTURE" zsh)"
+  if [ "$Z" = "$OUT3" ]; then
+    ok "AC12: candidates prints byte-identical rows under zsh and bash"
+  else
+    notok "AC12: zsh output differs from bash: $(printf '%s' "$Z" | tr '\n' '|')"
+  fi
+else
+  ok "AC12: zsh not present, skipped"
 fi
 
 printf '\n%s\n' "init-cloud-env.test.sh: $PASS passed, $FAIL failed"

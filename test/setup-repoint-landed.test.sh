@@ -18,7 +18,7 @@ FILES=(
   ".claude/skills/quetrex-pipeline/SKILL.md"
   "docs/onboarding/quetrex-onboarding.html"
   "GOLDEN.md"
-  ".claude/commands/doctor.md"
+  "plugins/quetrex-setup/commands/doctor.md"
   ".claude/commands/merge.md"
   ".claude/lib/dev-pipeline.md"
   "plugins/quetrex-setup/bin/quetrex-api"

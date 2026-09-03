@@ -366,7 +366,7 @@ written by exactly one code path, and it is a human decision, not an inference:
   surfaced candidates and a human has answered a scannable confirmation question for each one; an
   unattended run that skips that question calls `declare` with nothing to write and nothing gets
   written.
-- `quetrex-env-derive missing <repo-root>` — report-only, used by `/quetrex:doctor` Check 5.
+- `quetrex-env-derive missing <repo-root>` — report-only, used by `/quetrex-setup:doctor` Check 5.
   Never writes anything.
 - `quetrex-env-derive plan <plan.json> <repo-root>` — stamps Contract A `required_env[]` entries
   into a plan artifact by reading the SAME committed `requiredEnv` map `declare` wrote — never

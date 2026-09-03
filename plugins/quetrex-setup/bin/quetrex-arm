@@ -34,7 +34,7 @@
 #                   "command":"bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/statusline-command.sh\""}
 #       WHY ARMING OWNS THIS. Nothing is version-pinned anywhere, so config
 #       carries no engine version at all — /quetrex-setup:update and
-#       /quetrex:doctor both tell the operator the running version "lives in
+#       /quetrex-setup:doctor both tell the operator the running version "lives in
 #       the status bar".
 #       A Claude Code plugin CANNOT register a statusLine, so if arming does
 #       not write it into the TARGET repo, the one place the product points at

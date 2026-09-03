@@ -17,7 +17,7 @@
 #   - the same snippet's extraKnownMarketplaces entry had no autoUpdate key,
 #     which freezes a third-party marketplace catalog so a published fix
 #     never reaches anyone (bin/quetrex-arm calls this required, and
-#     /quetrex:doctor Check 2 fails a repo for exactly it);
+#     /quetrex-setup:doctor Check 2 fails a repo for exactly it);
 #   - it said the marketplace is private; it is public, deliberately, so a
 #     credential-less cloud routine can install the engine;
 #   - it taught the retired unprefixed npm-era command names and told the
@@ -100,7 +100,7 @@ req "cmd-merge"             "/quetrex:merge"
 req "cmd-deploy"            "/quetrex:deploy"
 req "cmd-task-complete"     "/quetrex:task-complete"
 req "cmd-update"            "/quetrex-setup:update"
-req "cmd-doctor"            "/quetrex:doctor"
+req "cmd-doctor"            "/quetrex-setup:doctor"
 # The build transport and the evidence a merge is gated on.
 req "build-spec-branch"     "quetrex-spec/"
 req "gate-merge-manual"     "Merging is not automatic."

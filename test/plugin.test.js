@@ -73,11 +73,14 @@ const LEGACY_CMD_RE = '/' + 'q-' + '(' + VERBS.join('|') + ')';
 
 // The de-prefixed command set that STAYS in `quetrex` (.claude/commands/)
 // after the setup-plugin split. login/init/update git-mv'd OUT to
-// plugins/quetrex-setup/commands/ — see SETUP_COMMANDS below and AC2.
-const CORE_COMMANDS = ['deploy', 'doctor', 'merge', 'task-build',
+// plugins/quetrex-setup/commands/ — see SETUP_COMMANDS below and AC2 — and
+// doctor followed them (user scope, so it exists on a repo BEFORE its
+// project plugins are enabled — a diagnostic that needs the thing it
+// diagnoses to be armed first is no diagnostic).
+const CORE_COMMANDS = ['deploy', 'merge', 'task-build',
   'task-complete', 'task-new', 'task-refine', 'task-rework'].map((n) => `${n}.md`);
-// The three commands quetrex-setup owns exclusively.
-const SETUP_COMMANDS = ['login.md', 'init.md', 'update.md'];
+// The four commands quetrex-setup owns exclusively.
+const SETUP_COMMANDS = ['login.md', 'init.md', 'update.md', 'doctor.md'];
 
 // Guards that quetrex-factory owns; quetrex must NOT re-register them (enabling
 // quetrex depends_on quetrex-factory, so a copy here would double-register).
@@ -159,7 +162,7 @@ check('no shipped command reads from a process substitution (read returns non-ze
   );
 });
 
-// AC18/AC27: covers BOTH command directories — the three moved commands are
+// AC18/AC27: covers BOTH command directories — the four moved commands are
 // no less load-bearing than the eight that stayed.
 function checkBashBlocksIn(dirRel) {
   const dir = path.join(REPO_ROOT, dirRel);
@@ -193,7 +196,7 @@ check('every bash block embedded in every command is syntactically valid', () =>
 });
 
 // --- AC2: the command split is exact, and the moved files carry real history
-check('the command split is exact: quetrex-setup owns login/init/update, quetrex keeps the pipeline eight', () => {
+check('the command split is exact: quetrex-setup owns login/init/update/doctor, quetrex keeps the pipeline seven', () => {
   const setupDir = path.join(REPO_ROOT, 'plugins/quetrex-setup/commands');
   const coreDir = path.join(REPO_ROOT, '.claude/commands');
   const setupFiles = fs.readdirSync(setupDir).filter((f) => f.endsWith('.md')).sort();
@@ -350,7 +353,7 @@ check('.claude-plugin/plugin.json parses and carries the v2 identity', () => {
 // even while the factory itself showed ✔ enabled, because a pinned entry does not
 // count as enabled for dependency resolution. So NO /quetrex:* command existed in
 // any armed repo. Verified: deleting the field loads cleanly even with a pin
-// present. The engine is still installed by the marketplace; /quetrex:doctor
+// present. The engine is still installed by the marketplace; /quetrex-setup:doctor
 // reports it if it is missing. The inverted assertion lives in section 5b.
 check('plugin.json still declares the paths and identity the marketplace needs', () => {
   const p = readJson('.claude-plugin/plugin.json');
@@ -487,7 +490,7 @@ check('plugins/quetrex-setup/hooks/hooks.json wires exactly the setup-owned hook
 });
 
 // --- 4. no command sources a lib the way the retired installer required ----
-// AC27: scans BOTH command directories — the three moved commands are no less
+// AC27: scans BOTH command directories — the four moved commands are no less
 // load-bearing than the eight that stayed in `quetrex`.
 const COMMAND_DIRS = ['.claude/commands', 'plugins/quetrex-setup/commands'];
 check('no command sources a lib from ~/.claude (the plugin ships bin/quetrex-api on PATH)', () => {

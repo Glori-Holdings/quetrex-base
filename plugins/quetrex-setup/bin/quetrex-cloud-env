@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+#
+# quetrex-cloud-env — the ONE place a repo's cloudEnvironmentId is derived
+# from the operator's own routines, and the one place it is written into
+# .quetrex/project.json. Called by BOTH /quetrex-setup:init (step 3e) and
+# /quetrex-setup:doctor (Check 11); neither carries its own copy any more.
+#
+# WHY A bin/ EXECUTABLE. This derivation used to live as inline python in
+# init.md, and doctor needed the same logic — two copies of a ranking
+# function drift. It is a pure function of (routine list JSON on stdin,
+# origin URL) — no network, no tool calls: the caller obtains the JSON with
+# the RemoteTrigger tool (`action: "list"`, the OAuth token is added
+# in-process, nothing a shell can curl) and pipes it in.
+#
+# usage:
+#   quetrex-cloud-env candidates <repo-root>      (routine-list JSON on stdin)
+#       Emits one TSV row per DISTINCT environment, best candidate first:
+#           <env_id>\t<repo|other>\t<last-used ISO8601>\t<example routine name>
+#       "repo" means that environment has actually run against THIS repo
+#       (matched on `git -C <repo-root> remote get-url origin`, normalised
+#       across ssh/https/.git/trailing-slash/case). Sorted repo-first, then
+#       most-recently-used first. Empty output, exit 0 = no routine anywhere
+#       names an environment (the genuinely-new-user case) — also for empty
+#       or malformed stdin, so a caller can always fall back, never crash.
+#
+#       WHY THIS RANKS RATHER THAN MATCHES. Measured over 20 real routines:
+#       an environment is NOT one-per-repo. Two environments had both run
+#       against quetrex-base AND quetrex-demo, and a third repo shared one
+#       of them. So "the environment for this repo" is not always a
+#       well-defined thing — this narrows honestly and lets the caller ask
+#       (init) or list the candidates with a Fix line each (doctor).
+#
+#   quetrex-cloud-env set <repo-root> <env-id>
+#       Writes cloudEnvironmentId=<env-id> into <repo-root>/.quetrex/
+#       project.json (every other field preserved). Refuses an id that is
+#       not `env_<alnum>`, and refuses when the binding does not exist —
+#       this never CREATES a binding, /quetrex-setup:init owns that.
+#
+# Requires python3 (candidates) and node (set), plus git.
+
+set -uo pipefail
+
+die() { printf 'quetrex-cloud-env: %s\n' "$1" >&2; exit 1; }
+
+SUB="${1:-}"
+[ -n "$SUB" ] || die "usage: quetrex-cloud-env <candidates|set> <repo-root> [env-id]"
+shift
+
+case "$SUB" in
+  candidates)
+    REPO_ROOT="${1:-}"
+    [ -n "$REPO_ROOT" ] || die "usage: quetrex-cloud-env candidates <repo-root>  (routine-list JSON on stdin)"
+    [ -d "$REPO_ROOT" ] || die "repo root not found: $REPO_ROOT"
+    command -v python3 >/dev/null 2>&1 || die "python3 is required for candidates"
+    ORIGIN="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+    # Pure function of (JSON on stdin, origin URL). Every failure mode of the
+    # input (empty, not JSON, no data[]) is a clean empty output with exit 0.
+    python3 -c '
+import json, sys, re
+
+def norm(u):
+    if not u:
+        return ""
+    u = u.strip().lower()
+    u = re.sub(r"^git\+", "", u)
+    u = re.sub(r"^ssh://", "", u)
+    u = re.sub(r"^git@([^:/]+)[:/]", r"https://\1/", u)
+    u = re.sub(r"^http://", "https://", u)
+    u = re.sub(r"\.git$", "", u)
+    return u.rstrip("/")
+
+want = norm(sys.argv[1] if len(sys.argv) > 1 else "")
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if not isinstance(doc, dict):
+    sys.exit(0)
+
+envs = {}
+for t in (doc.get("data") or []):
+    if not isinstance(t, dict):
+        continue
+    ccr = ((t.get("job_config") or {}).get("ccr")) or {}
+    eid = ccr.get("environment_id")
+    if not eid:
+        continue
+    urls = set()
+    for s in (((ccr.get("session_context") or {}).get("sources")) or []):
+        urls.add(norm(((s or {}).get("git_repository") or {}).get("url")))
+    when = t.get("last_fired_at") or t.get("created_at") or ""
+    e = envs.setdefault(eid, {"repo": False, "when": "", "name": ""})
+    if want and want in urls:
+        e["repo"] = True
+    if when > e["when"]:
+        e["when"] = when
+        e["name"] = t.get("name") or ""
+
+# Two stable passes: most-recently-used first, then this-repo-first on top of
+# that. Timestamps are ISO8601 so a plain string compare orders them.
+rows = sorted(envs.items(), key=lambda kv: kv[1]["when"], reverse=True)
+rows.sort(key=lambda kv: 0 if kv[1]["repo"] else 1)
+for eid, e in rows:
+    name = (e["name"] or "-").splitlines()[0][:60] or "-"
+    print("%s\t%s\t%s\t%s" % (eid, "repo" if e["repo"] else "other", e["when"] or "-", name))
+' "$ORIGIN"
+    ;;
+
+  set)
+    REPO_ROOT="${1:-}"
+    ENV_ID="${2:-}"
+    [ -n "$REPO_ROOT" ] && [ -n "$ENV_ID" ] || die "usage: quetrex-cloud-env set <repo-root> <env-id>"
+    [ -d "$REPO_ROOT" ] || die "repo root not found: $REPO_ROOT"
+    command -v node >/dev/null 2>&1 || die "node (>=18) is required for set"
+    case "$ENV_ID" in
+      env_*) ;;
+      *) die "refusing '$ENV_ID' — a cloud environment id looks like env_…" ;;
+    esac
+    printf '%s' "$ENV_ID" | grep -Eq '^env_[A-Za-z0-9]+$' || die "refusing '$ENV_ID' — a cloud environment id is env_ followed by letters/digits only"
+    BIND="$REPO_ROOT/.quetrex/project.json"
+    [ -f "$BIND" ] || die "no binding at $BIND — run /quetrex-setup:init first (this tool never creates a binding)"
+    node -e '
+      const fs=require("fs"); const [f,id]=process.argv.slice(1);
+      let o; try { o=JSON.parse(fs.readFileSync(f,"utf8")); } catch (e) { process.stderr.write("quetrex-cloud-env: "+f+" is not valid JSON\n"); process.exit(1); }
+      if (o===null || typeof o!=="object" || Array.isArray(o)) { process.stderr.write("quetrex-cloud-env: "+f+" is not a JSON object\n"); process.exit(1); }
+      const prev=o.cloudEnvironmentId;
+      o.cloudEnvironmentId=id;
+      fs.writeFileSync(f, JSON.stringify(o,null,2)+"\n");
+      console.log("cloud environment: "+id+(prev && prev!==id ? " (was "+prev+")" : ""));
+    ' "$BIND" "$ENV_ID"
+    ;;
+
+  *)
+    die "unknown subcommand: $SUB (expected candidates|set)"
+    ;;
+esac

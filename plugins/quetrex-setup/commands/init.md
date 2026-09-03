@@ -75,6 +75,58 @@ quetrex-api GET "/api/projects/$CODE" >/dev/null || exit 1   # helper prints 401
 ```
 
 A non-zero `quetrex-api` exit means the helper already printed the correct message — stop.
+
+**Then decide, before adoption, whether the verify chain is already in place — and if it
+is, do NOT ask the "Confirm the verification chain" question again.** An already-linked
+repo commonly carries a committed `.quetrex/verify.json` AND a `## Verification` block in
+`.claude/CLAUDE.md` that already says exactly the same thing; measured on a re-run of init
+over such a repo, the operator was still asked to confirm a chain he had already confirmed
+and committed. Compare the two line-for-line in `node` (never by shell word-splitting —
+this block runs in the operator's zsh as well as bash):
+
+```bash
+# ── quetrex:exec-block qx_verify_block_in_place ────────────────────────────────
+# VERIF_CHAIN_IN_PLACE=1 ⇔ .quetrex/verify.json exists with a non-empty .verify[]
+# AND the fenced block under `## Verification` in .claude/CLAUDE.md equals it,
+# line for line (trimmed, blank lines dropped). Anything else — no verify.json,
+# no block, a drifted block — leaves it 0 and step 4b runs exactly as before.
+VERIF_CHAIN_IN_PLACE="$(node -e '
+  const fs=require("fs");
+  const [vfile, rules]=process.argv.slice(1);
+  let chain=null;
+  try { const o=JSON.parse(fs.readFileSync(vfile,"utf8")); if (o && Array.isArray(o.verify) && o.verify.length) chain=o.verify.map(String); } catch {}
+  if (!chain) { process.stdout.write("0"); process.exit(0); }
+  let md=""; try { md=fs.readFileSync(rules,"utf8"); } catch { process.stdout.write("0"); process.exit(0); }
+  const lines=md.split(/\r?\n/);
+  const FENCE=String.fromCharCode(96,96,96);
+  let i=lines.findIndex(l=>/^##\s+Verification\s*$/.test(l));
+  if (i<0) { process.stdout.write("0"); process.exit(0); }
+  let block=null;
+  for (let j=i+1;j<lines.length;j++){
+    if (/^##\s/.test(lines[j])) break;
+    if (lines[j].trim().startsWith(FENCE)) {
+      block=[];
+      for (let k=j+1;k<lines.length;k++){ if (lines[k].trim().startsWith(FENCE)) break; block.push(lines[k]); }
+      break;
+    }
+  }
+  if (!block) { process.stdout.write("0"); process.exit(0); }
+  const got=block.map(s=>s.trim()).filter(Boolean);
+  const want=chain.map(s=>s.trim()).filter(Boolean);
+  const same = got.length===want.length && got.every((s,n)=>s===want[n]);
+  process.stdout.write(same ? "1" : "0");
+' "$REPO_ROOT/.quetrex/verify.json" "$REPO_ROOT/.claude/CLAUDE.md" 2>/dev/null || echo 0)"
+if [ "$VERIF_CHAIN_IN_PLACE" = "1" ]; then
+  echo "verify chain already in place — .claude/CLAUDE.md ## Verification matches .quetrex/verify.json; not asking to confirm it again."
+fi
+# ── end quetrex:exec-block qx_verify_block_in_place ───────────────────────────
+```
+
+When `VERIF_CHAIN_IN_PLACE=1`, step 4b is already satisfied: print that one line and never
+present the *"Detected these verification commands — correct?"* question. Every other
+question in this command is unchanged — in particular the requiredEnv pairing question in
+step 5c is doctrine (F2) and is never skipped on this basis.
+
 On success, proceed to **step 4 (adoption)** so re-runs still clean stale refs and
 can open a PR if anything changed.
 
@@ -200,78 +252,22 @@ So list the routines and read the answer off them.
 
 **Call `RemoteTrigger` with `action: "list"`** — the OAuth token is added in-process, so this
 is not something a shell script can do with `curl`; it is a tool call you make. Write the raw
-JSON to a temp file, then hand it to the pure function below. If the call fails, skip to the
-fallback at the end of this step — never block `init` on it.
+JSON to a temp file, then hand it to `quetrex-cloud-env` — shipped on the plugin's `bin/`
+(on PATH here, exactly like `quetrex-arm`; call it by name), the ONE copy of the ranking
+logic, shared with `/quetrex-setup:doctor` Check 11 and executed by
+`test/init-cloud-env.test.sh` against a fixture captured from a REAL `GET /v1/code/triggers`
+response. If the call fails, skip to the fallback at the end of this step — never block
+`init` on it.
 
 ```bash
-# ── quetrex:exec-block qx_env_candidates ───────────────────────────────────────
-# Executable, and executed: test/init-cloud-env.test.sh sources this exact block
-# and drives the function against a fixture captured from a REAL
-# GET /v1/code/triggers response. Pure function of (JSON on stdin, origin URL) —
-# no network, no tool calls.
-#
+# TRIGGERS_JSON = the temp file holding the raw RemoteTrigger list response.
 # Emits one TSV row per DISTINCT environment, best candidate first:
 #     <env_id>\t<repo|other>\t<last-used ISO8601>\t<example routine name>
-# "repo" means that environment has actually run against THIS repository.
-# Sorted repo-first, then most-recently-used first. Empty output = no routine
-# anywhere names an environment, which is the genuinely-new-user case.
-#
-# WHY THIS RANKS RATHER THAN MATCHES. Measured over 20 real routines: an
-# environment is NOT one-per-repo. Two environments had both run against
-# quetrex-base AND quetrex-demo, and a third repo shared one of them. So
-# "the environment for this repo" is not always a well-defined thing — the
-# function narrows honestly and lets the caller ask when it must.
-qx_env_candidates() {          # qx_env_candidates <origin-url>  (JSON on stdin)
-  python3 -c '
-import json, sys, re
-
-def norm(u):
-    if not u:
-        return ""
-    u = u.strip().lower()
-    u = re.sub(r"^git\+", "", u)
-    u = re.sub(r"^ssh://", "", u)
-    u = re.sub(r"^git@([^:/]+)[:/]", r"https://\1/", u)
-    u = re.sub(r"^http://", "https://", u)
-    u = re.sub(r"\.git$", "", u)
-    return u.rstrip("/")
-
-want = norm(sys.argv[1] if len(sys.argv) > 1 else "")
-try:
-    doc = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-
-envs = {}
-for t in (doc.get("data") or []):
-    ccr = ((t.get("job_config") or {}).get("ccr")) or {}
-    eid = ccr.get("environment_id")
-    if not eid:
-        continue
-    urls = set()
-    for s in (((ccr.get("session_context") or {}).get("sources")) or []):
-        urls.add(norm(((s or {}).get("git_repository") or {}).get("url")))
-    when = t.get("last_fired_at") or t.get("created_at") or ""
-    e = envs.setdefault(eid, {"repo": False, "when": "", "name": ""})
-    if want and want in urls:
-        e["repo"] = True
-    if when > e["when"]:
-        e["when"] = when
-        e["name"] = t.get("name") or ""
-
-# Two stable passes: most-recently-used first, then this-repo-first on top of
-# that. Timestamps are ISO8601 so a plain string compare orders them.
-rows = sorted(envs.items(), key=lambda kv: kv[1]["when"], reverse=True)
-rows.sort(key=lambda kv: 0 if kv[1]["repo"] else 1)
-for eid, e in rows:
-    name = (e["name"] or "-").splitlines()[0][:60] or "-"
-    print("%s\t%s\t%s\t%s" % (eid, "repo" if e["repo"] else "other", e["when"] or "-", name))
-' "$1"
-}
-# ── end quetrex:exec-block qx_env_candidates ──────────────────────────────────
-
-ORIGIN="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
-CANDIDATES="$(qx_env_candidates "$ORIGIN" < "$TRIGGERS_JSON" 2>/dev/null || true)"
+# "repo" = that environment has actually run against THIS repository (matched
+# on the origin remote). Empty output = no routine anywhere names an
+# environment, the genuinely-new-user case. See bin/quetrex-cloud-env for why
+# it RANKS rather than matches (an environment is not one-per-repo).
+CANDIDATES="$(quetrex-cloud-env candidates "$REPO_ROOT" < "$TRIGGERS_JSON" 2>/dev/null || true)"
 ```
 
 Then decide, in this order:
@@ -289,15 +285,11 @@ Then decide, in this order:
   > environment this repo should build in, then re-run `/quetrex-setup:init` — or paste its
   > `env_…` id here and I will record it.
 
-Write the chosen value into the binding, next to `branchPrefix`:
+Write the chosen value into the binding, next to `branchPrefix` — the same writer
+`/quetrex-setup:doctor` names in its Fix line, so an operator can run it by hand:
 
 ```bash
-node -e '
-  const fs=require("fs"); const [f,id]=process.argv.slice(1);
-  const o=JSON.parse(fs.readFileSync(f,"utf8"));
-  o.cloudEnvironmentId=id; fs.writeFileSync(f, JSON.stringify(o,null,2)+"\n");
-  console.log("cloud environment: "+id);
-' "$BIND" "$CHOSEN_ENV_ID"
+quetrex-cloud-env set "$REPO_ROOT" "$CHOSEN_ENV_ID"
 ```
 
 On an **already-linked** repo (step 2a) with no `cloudEnvironmentId`, run this same step and
@@ -424,9 +416,10 @@ PROJ_RULES="$REPO_ROOT/.claude/CLAUDE.md"
 Use this exact `$REPO_ROOT`-anchored path — never a bare/CWD-relative `.claude/CLAUDE.md`
 and **never** the user's global `~/.claude/CLAUDE.md` (same hard-pin guardrail as step 4).
 
-**1. Idempotent check.** If `$PROJ_RULES` already contains a `## Verification` heading,
-leave it untouched and report *"Verification rules already present."* Detect with `node`
-(do not `cat`):
+**1. Idempotent check.** If step 2a set `VERIF_CHAIN_IN_PLACE=1`, this step is already
+satisfied — it printed its one line there; do not ask anything here. Otherwise, if
+`$PROJ_RULES` already contains a `## Verification` heading, leave it untouched and report
+*"Verification rules already present."* Detect with `node` (do not `cat`):
 
 ```bash
 if [ -f "$PROJ_RULES" ] && node -e '
@@ -563,15 +556,24 @@ engine ever was. The fix is not a better guess; it is never guessing.
 
 ### 5c. Confirm with the human, then write only the confirmed pairs
 
-When `${QUETREX_ENV_DERIVE_PROPOSAL}` has zero `.candidates`, there is nothing to
+Ask ONLY about `.outstanding[]` — the candidates covered by neither a committed
+`requiredEnv` entry nor `requiredEnvDeclined`. `propose` computes that list itself from the
+committed `.quetrex/verify.json`, so a name the human already paired, or already answered
+*"No — leave undeclared"* to, is never asked about again: on a re-run over an already-adopted
+repo whose whole candidate set was answered last time, `.outstanding` is empty and the
+question is not asked at all. (`.candidates[]` stays the full committed evidence set —
+`declare` validates against it — but it is not the question list.)
+
+When `${QUETREX_ENV_DERIVE_PROPOSAL}` has zero `.outstanding`, there is nothing to
 confirm — skip straight to step 6. Otherwise, render two things BEFORE asking — never ask
 cold, and never render a column with no data behind it:
 
-**1. The candidates**, name and read_at only — both are real, from `.candidates[]`:
+**1. The outstanding candidates**, name and read_at only — both are real, from
+`.outstanding[]`:
 
 | name | read_at |
 |------|---------|
-| `.candidates[].name` | `.candidates[].read_at` |
+| `.outstanding[].name` | `.outstanding[].read_at` |
 
 **2. The real verify chain**, verbatim from `.chain` (never re-typed, never summarized):
 
@@ -584,7 +586,7 @@ cold, and never render a column with no data behind it:
 If `.chain` is empty, there is nothing any candidate could ever gate — skip straight to
 step 6 for the same reason zero candidates does.
 
-Then ask with `AskUserQuestion`, **one question per candidate**, options built from the
+Then ask with `AskUserQuestion`, **one question per OUTSTANDING candidate**, options built from the
 real chain list above: first option always **"No — leave undeclared"**, followed by one
 option per chain command, **"Yes — gate `<chain[i]>`"**, `AskUserQuestion`'s multi-select
 so a human can pick more than one command for the same name when that is genuinely true.
@@ -659,7 +661,7 @@ carries this write into a reviewed commit; nothing further is needed here.
 **re-running `/quetrex-setup:init`** is the complete remediation for a repo whose
 `.quetrex/verify.json` predates this field — it re-proposes and, once the human
 confirms, merges into whatever is already committed, without touching a command, a
-name, or anything a human already wrote by hand. `/quetrex:doctor` Check 5 detects
+name, or anything a human already wrote by hand. `/quetrex-setup:doctor` Check 5 detects
 exactly this state (a committed candidate covered by neither `requiredEnv` nor
 `requiredEnvDeclined`) and points back here.
 
@@ -858,7 +860,7 @@ call, for a reason worth recording so nobody adds it back as a convenience:
   none of it anyway.
 
 If an operator wants GitHub-side review on a repo real people push to, that is their decision
-to make outside Quetrex. Init does not raise it, `/quetrex:doctor` does not check for it, and
+to make outside Quetrex. Init does not raise it, `/quetrex-setup:doctor` does not check for it, and
 neither reports it as outstanding.
 
 ---
@@ -936,7 +938,7 @@ fi
   `{"type":"command","command":"bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/statusline-command.sh\""}`.
   **A Claude Code plugin cannot register a `statusLine`**, so the repo has to carry it or
   the running engine version is displayed nowhere: nothing is version-pinned, so config
-  names no version, and both `/quetrex-setup:update` and `/quetrex:doctor` tell the operator the
+  names no version, and both `/quetrex-setup:update` and `/quetrex-setup:doctor` tell the operator the
   version "lives in the status bar." Before this, that bar was empty in every armed repo,
   and a teammate silently stranded on an old engine had no on-screen signal at all. The
   renderer reads the version at runtime via `quetrex-version`, so the committed copy never
@@ -1324,7 +1326,7 @@ anything else, in these words:
 
 > **Restart Claude Code before doing anything else.** This session cannot see the commands
 > init just enabled — `/quetrex:*` will not exist until you restart, even though the plugin
-> shows as installed. Quit and reopen, then run `/quetrex:doctor` to confirm.
+> shows as installed. Quit and reopen, then run `/quetrex-setup:doctor` to confirm.
 
 Print it whenever `enabledPlugins` was written or changed. Skip it ONLY when step 4h reported
 *"already current"* and nothing else in `.claude/settings.json` changed — in that case the

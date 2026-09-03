@@ -85,7 +85,7 @@ if [ -f "$INIT" ]; then
 fi
 
 # --- ASSERTION 3: doctor must not report it as outstanding --------------------
-DOC="$CMDS/doctor.md"
+DOC="$SETUP_CMDS/doctor.md"   # doctor ships in quetrex-setup (user scope)
 if [ -f "$DOC" ]; then
   if grep -qiE 'github app' "$DOC"; then
     notok "ASSERTION 3: doctor.md still checks the Claude GitHub App — it would nag forever for something Quetrex does not use"
