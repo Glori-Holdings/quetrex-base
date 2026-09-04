@@ -108,6 +108,27 @@ slice() {
   ' "$1"
 }
 
+# slice_fence <file> <start-substring> > stdout
+# The ```-fenced block containing the first line matching <start-substring>,
+# from that line up to (but not including) the closing fence.
+#
+# WHY THIS EXISTS. ASSERTION 6 used `slice "$MERGE_MD" ... 'fi'` — bounded by a
+# GUARD LINE. The moment merge.md's §2 grew a second `if` above its transport
+# (the local-evidence precedence check), the slice stopped at that guard's `fi`
+# and the fetch under test never ran at all: the assertion inverted, reporting
+# that /quetrex:merge had "kept the locally produced verdict" when in fact it
+# had never been executed. That is precisely the truncation
+# test/shipped-blocks-shell-portable.test.sh documents at the top of its own
+# extractor — a fence is the block's real boundary, a repeated guard line is
+# not.
+slice_fence() {
+  awk -v s="$2" '
+    index($0, s) > 0 && !inb && !done { inb=1 }
+    inb && /^```/ { inb=0; done=1; next }
+    inb { print }
+  ' "$1"
+}
+
 # ==========================================================================
 # ASSERTION 0 — the blocks are executable, and they are what they claim
 # ==========================================================================
@@ -616,10 +637,19 @@ check_payload 'the second note is the current one'                         '/HEA
 check_payload 'the pre-existing note still survives a second rework'        'plan.notes.some(n=>/pre-existing note/.test(String(n)))'
 
 # ==========================================================================
-# ASSERTION 6 — WHY there is no local-gate fast path: /quetrex:merge overwrites
-# locally produced evidence with whatever the gates BRANCH carries.
+# ASSERTION 6 — WHY there is no local-gate fast path FOR A REWORK: when a gates
+# BRANCH exists, /quetrex:merge overwrites bare locally produced evidence with
+# whatever that branch carries.
+#
+# SCOPE, since §2 now has a local route too: that route is entered only when §1
+# DISCOVERED a local evidence set and pinned it to the PR head (it sets
+# LOCAL_EVIDENCE_DIR). Loose artifacts left in .quetrex/ by a local gate re-run
+# — which is what this fixture writes, and what the "just re-run the gates
+# locally" shortcut would produce — authorize nothing, and a published gates
+# branch still wins. That is why task-rework re-dispatches to cloud rather than
+# re-gating in place. test/merge-local-evidence.test.sh owns the local route.
 # ==========================================================================
-slice "$MERGE_MD" 'rev-parse --show-toplevel)/.quetrex/merge-facts.env' 'fi' > "$WORK/merge-fetch.sh"
+slice_fence "$MERGE_MD" 'rev-parse --show-toplevel)/.quetrex/merge-facts.env' > "$WORK/merge-fetch.sh"
 if [ -s "$WORK/merge-fetch.sh" ] && grep -q 'GATES_BRANCH' "$WORK/merge-fetch.sh"; then
   pass "6: sliced /quetrex:merge's gate-evidence fetch out of the shipped merge.md"
 else
