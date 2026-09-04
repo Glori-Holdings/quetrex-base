@@ -24,7 +24,7 @@ notok() { FAIL=$((FAIL+1)); echo "NOT OK - $1"; }
 
 # Every helper the lib duplicates from the CLI. Adding a shared helper to either file
 # without adding it here is itself drift, so ASSERTION 3 checks for that too.
-SHARED="qx_create_child qx_add_dep qx_is_unblocked qx_task_status qx_task_type qx_task_ainote qx_task_comment qx_binding_path qx_env_scan qx_secret_put_from_env _qx_trim _qx_task_json _qx_task_uuid _qx_json_get _qx_require_ref"
+SHARED="_qx_node qx_create_child qx_add_dep qx_is_unblocked qx_task_status qx_task_type qx_task_ainote qx_task_comment qx_binding_path qx_env_scan qx_secret_put_from_env _qx_trim _qx_task_json _qx_task_uuid _qx_json_get _qx_require_ref"
 
 for f in "$BIN" "$LIB"; do
   [ -f "$f" ] || { echo "NOT OK - missing $f"; exit 1; }
