@@ -297,6 +297,13 @@ local build's are copied out of the `.quetrex/` §1 found them in. Either way th
 check is byte-identical between the two routes rather than a second, differently-sourced
 code path. **Copy, never trust in place.**
 
+**And one list, not two.** Both routes place their files through the same
+`qx_gate_artifacts` set and the same `qx_place_artifact` helper, differing only in where a
+byte comes from — `git show` for the remote, `cp` for the local. Two literal copies of the
+artifact list is how a seventh artifact gets added to one route and silently missed by the
+other, and the two had already drifted apart in hardening once.
+`test/merge-evidence-paths-share.test.sh` fails if the routes ever place different files.
+
 ```bash
 . "$(git rev-parse --show-toplevel)/.quetrex/merge-facts.env"
 LOCAL_EVIDENCE_DIR="${LOCAL_EVIDENCE_DIR:-}"
@@ -329,13 +336,83 @@ if [ "$GATES_OK" -eq 1 ] && [ -n "$LOCAL_EVIDENCE_DIR" ] && [ "$REMOTE_SHA" != "
   exit 1
 fi
 
-if [ "$GATES_OK" -eq 1 ]; then
+# ── quetrex:exec-block qx_place_artifacts ──────────────────────────────────
+# ONE artifact set and ONE placement helper, consumed by BOTH routes.
+#
+# WHY THIS IS SHARED RATHER THAN WRITTEN TWICE. The two routes used to carry
+# the same six-name list literally, forty lines apart, with `plan/$TASK.json`
+# appended by a separate statement in each — and nothing pinned them equal.
+# They had already diverged inside a single commit: the local route unlinked
+# its destination before writing, the remote route still used a bare `>`
+# redirect. Add a seventh artifact to one loop and the other silently omits
+# it; for an artifact merge-gate.sh REQUIRES that fails closed, but
+# security-findings.json is absent-legal, so that direction would not.
+# test/merge-evidence-paths-share.test.sh now fails if the two routes ever
+# place different files.
+#
+# qx_gate_artifacts EMITS ONE NAME PER LINE, and callers read it with
+# `while IFS= read -r`. It is deliberately NOT a space-separated string: zsh
+# does not word-split an unquoted `$VAR`, so `for f in $LIST` would collapse
+# all six names into one iteration in the operator's own shell and copy
+# nothing. A shipped block runs under zsh; the list has to survive it.
+qx_gate_artifacts() {
+  printf '%s\n' \
+    verify-ledger.jsonl \
+    review-verdict.json \
+    qa-report.json \
+    security-findings.json \
+    gates-head \
+    state.json
+}
+
+# qx_place_artifact <remote|local> <relative-path>
+#
+# UNLINK THE DESTINATION FIRST, ALWAYS — on BOTH routes. Neither `cp -f` nor a
+# `>` redirect replaces a symlink it finds at the destination: both open it
+# O_TRUNC and write THROUGH it, so a link planted at
+# $REPO_ROOT/.quetrex/<artifact> makes the copy clobber a file outside the
+# artifact directory entirely. `rm -f` removes the LINK, not its target, so
+# every write then lands on a fresh regular file inside .quetrex/ and can never
+# escape. It also makes the `|| rm -f` mean what it says instead of leaving a
+# stale link behind. (The remote route carried this weakness before local
+# evidence existed; it is fixed here only as a consequence of sharing one
+# helper, which is the argument for sharing it.)
+#
+# AND REFUSE A SYMLINKED SOURCE, on the local route. §1 already refuses a
+# linked `.quetrex` and a linked artifact among the four it READS, but this
+# helper also carries three it does not — qa-report.json, state.json and the
+# plan — and `cp` follows a source link just as happily. state.json names the
+# task whose plan GATE 5 enforces, so a redirect there chooses which contract
+# governs the diff. Same rule for all seven: an artifact is the file the build
+# wrote, or it is not evidence. The remote route has no filesystem source, so
+# the check is inapplicable there rather than skipped.
+qx_place_artifact() {
+  local mode="$1" rel="$2" dst="$REPO_ROOT/.quetrex/$2" src
+  rm -f "$dst"
+  if [ "$mode" = local ]; then
+    src="$LOCAL_EVIDENCE_DIR/.quetrex/$rel"
+    [ -L "$src" ] && { echo "  REFUSED $rel — it is a symlink, not the build's own artifact." >&2; return 0; }
+    cp -f "$src" "$dst" 2>/dev/null || rm -f "$dst"
+  else
+    git -C "$REPO_ROOT" show "FETCH_HEAD:.quetrex/$rel" > "$dst" 2>/dev/null || rm -f "$dst"
+  fi
+}
+
+# qx_place_all <remote|local> — the whole set, plus this task's plan, in the
+# one order both routes share. The plan goes through the SAME helper rather
+# than a trailing special case, because a special case is exactly what drifts.
+qx_place_all() {
+  local mode="$1" f
   mkdir -p "$REPO_ROOT/.quetrex/plan"
-  for f in verify-ledger.jsonl review-verdict.json qa-report.json security-findings.json gates-head state.json; do
-    git -C "$REPO_ROOT" show "FETCH_HEAD:.quetrex/$f" > "$REPO_ROOT/.quetrex/$f" 2>/dev/null || rm -f "$REPO_ROOT/.quetrex/$f"
+  qx_gate_artifacts | while IFS= read -r f; do
+    [ -n "$f" ] && qx_place_artifact "$mode" "$f"
   done
-  git -C "$REPO_ROOT" show "FETCH_HEAD:.quetrex/plan/$TASK.json" > "$REPO_ROOT/.quetrex/plan/$TASK.json" 2>/dev/null \
-    || rm -f "$REPO_ROOT/.quetrex/plan/$TASK.json"
+  qx_place_artifact "$mode" "plan/$TASK.json"
+}
+# ── end quetrex:exec-block qx_place_artifacts ──────────────────────────────
+
+if [ "$GATES_OK" -eq 1 ]; then
+  qx_place_all remote
   GATES_SHA="$(tr -d '[:space:]' < "$REPO_ROOT/.quetrex/gates-head" 2>/dev/null || echo "")"
   echo "Fetched gate evidence from $GATES_BRANCH (pinned to ${GATES_SHA:0:12})"
   if [ -n "$LOCAL_EVIDENCE_DIR" ]; then
@@ -345,36 +422,13 @@ if [ "$GATES_OK" -eq 1 ]; then
     && echo "  plan/$TASK.json present — GATE 5 (ownership) and the plan's security_review_required are live" \
     || echo "  NOTE: no plan/$TASK.json on the gates branch — merge-gate.sh will skip GATE 5 (ownership)."
 elif [ -n "$LOCAL_EVIDENCE_DIR" ]; then
-  mkdir -p "$REPO_ROOT/.quetrex/plan"
   # Copying onto itself would `cp: same file` and the `|| rm -f` would then
   # DELETE the very evidence being used — so the already-home case copies
   # nothing and simply says where it is.
-  # UNLINK THE DESTINATION FIRST, ALWAYS. `cp -f` does not replace a symlink it
-  # finds at the destination — it opens it O_TRUNC and writes THROUGH it, so a
-  # link planted at $REPO_ROOT/.quetrex/<artifact> makes this loop clobber a
-  # file outside the artifact directory entirely. `rm -f` removes the LINK (not
-  # its target), so every copy then lands on a fresh regular file inside
-  # .quetrex/ and the write can never escape. It also makes the `|| rm -f`
-  # below mean what it says instead of leaving a stale link behind.
-  #
-  # AND REFUSE A SYMLINKED SOURCE. §1 already refuses a linked `.quetrex` and a
-  # linked artifact among the four it READS, but this loop also carries three
-  # it does not — qa-report.json, state.json and the plan — and `cp` follows a
-  # source link just as happily. state.json names the task whose plan GATE 5
-  # enforces, so a redirect there chooses which contract governs the diff. Same
-  # rule for all seven: an artifact is the file the build wrote, or it is not
-  # evidence.
-  copy_artifact() {   # copy_artifact <relative-path>
-    local rel="$1" src="$LOCAL_EVIDENCE_DIR/.quetrex/$1" dst="$REPO_ROOT/.quetrex/$1"
-    rm -f "$dst"
-    [ -L "$src" ] && { echo "  REFUSED $rel — it is a symlink, not the build's own artifact." >&2; return 0; }
-    cp -f "$src" "$dst" 2>/dev/null || rm -f "$dst"
-  }
   if [ "$LOCAL_EVIDENCE_DIR" != "$REPO_ROOT" ]; then
-    for f in verify-ledger.jsonl review-verdict.json qa-report.json security-findings.json gates-head state.json; do
-      copy_artifact "$f"
-    done
-    copy_artifact "plan/$TASK.json"
+    qx_place_all local
+  else
+    mkdir -p "$REPO_ROOT/.quetrex/plan"
   fi
   echo "Using LOCAL gate evidence from $LOCAL_EVIDENCE_DIR/.quetrex (pinned to ${PR_SHA:0:12}) — nothing published a gates branch for this head."
   [ -s "$REPO_ROOT/.quetrex/plan/$TASK.json" ] \
