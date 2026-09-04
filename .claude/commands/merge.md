@@ -210,10 +210,25 @@ qx_find_local_evidence() {   # qx_find_local_evidence <repo-root> <pr-sha> -> pr
   { printf '%s\n' "$root"
     git -C "$root" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p'
   } | awk 'NF && !seen[$0]++' | while IFS= read -r d; do
+    # A DISCOVERED DIRECTORY MUST BE THE WORKTREE'S OWN. `-d` FOLLOWS symlinks,
+    # so a `.quetrex` that is a LINK answers for a checkout that never produced
+    # it: the evidence would be read from a directory the worktree does not own
+    # and that `git worktree list` never showed the operator. `-L` first, and
+    # refuse — a link is not a build's output.
+    [ -L "$d/.quetrex" ] && continue
     [ -d "$d/.quetrex" ] || continue
     node -e '
       const fs = require("fs"), dir = process.argv[1], want = process.argv[2];
-      const rd = f => { try { return fs.readFileSync(dir + "/.quetrex/" + f, "utf8") } catch { return null } };
+      const P = f => dir + "/.quetrex/" + f;
+      // THE SAME RULE ONE LEVEL DOWN. A symlinked ARTIFACT redirects a single
+      // read back out of the directory just validated, so it is refused too —
+      // and refused HARD (exit 1), never resolved and never softened into
+      // "missing". That distinction is the whole point: security-findings.json
+      // is absent-legal, so reporting a planted link as absence would turn a
+      // redirect into a silent pass. lstat, so the LINK is stat-ed, not target.
+      const link = f => { try { return fs.lstatSync(P(f)).isSymbolicLink() } catch { return false } };
+      const rd = f => { if (link(f)) process.exit(1);
+                        try { return fs.readFileSync(P(f), "utf8") } catch { return null } };
       const js = f => { const t = rd(f); if (t === null) return null; try { return JSON.parse(t) } catch { return false } };
       const gh = rd("gates-head");
       if (gh !== null && gh.trim() !== want) process.exit(1);
@@ -334,12 +349,32 @@ elif [ -n "$LOCAL_EVIDENCE_DIR" ]; then
   # Copying onto itself would `cp: same file` and the `|| rm -f` would then
   # DELETE the very evidence being used — so the already-home case copies
   # nothing and simply says where it is.
+  # UNLINK THE DESTINATION FIRST, ALWAYS. `cp -f` does not replace a symlink it
+  # finds at the destination — it opens it O_TRUNC and writes THROUGH it, so a
+  # link planted at $REPO_ROOT/.quetrex/<artifact> makes this loop clobber a
+  # file outside the artifact directory entirely. `rm -f` removes the LINK (not
+  # its target), so every copy then lands on a fresh regular file inside
+  # .quetrex/ and the write can never escape. It also makes the `|| rm -f`
+  # below mean what it says instead of leaving a stale link behind.
+  #
+  # AND REFUSE A SYMLINKED SOURCE. §1 already refuses a linked `.quetrex` and a
+  # linked artifact among the four it READS, but this loop also carries three
+  # it does not — qa-report.json, state.json and the plan — and `cp` follows a
+  # source link just as happily. state.json names the task whose plan GATE 5
+  # enforces, so a redirect there chooses which contract governs the diff. Same
+  # rule for all seven: an artifact is the file the build wrote, or it is not
+  # evidence.
+  copy_artifact() {   # copy_artifact <relative-path>
+    local rel="$1" src="$LOCAL_EVIDENCE_DIR/.quetrex/$1" dst="$REPO_ROOT/.quetrex/$1"
+    rm -f "$dst"
+    [ -L "$src" ] && { echo "  REFUSED $rel — it is a symlink, not the build's own artifact." >&2; return 0; }
+    cp -f "$src" "$dst" 2>/dev/null || rm -f "$dst"
+  }
   if [ "$LOCAL_EVIDENCE_DIR" != "$REPO_ROOT" ]; then
     for f in verify-ledger.jsonl review-verdict.json qa-report.json security-findings.json gates-head state.json; do
-      cp -f "$LOCAL_EVIDENCE_DIR/.quetrex/$f" "$REPO_ROOT/.quetrex/$f" 2>/dev/null || rm -f "$REPO_ROOT/.quetrex/$f"
+      copy_artifact "$f"
     done
-    cp -f "$LOCAL_EVIDENCE_DIR/.quetrex/plan/$TASK.json" "$REPO_ROOT/.quetrex/plan/$TASK.json" 2>/dev/null \
-      || rm -f "$REPO_ROOT/.quetrex/plan/$TASK.json"
+    copy_artifact "plan/$TASK.json"
   fi
   echo "Using LOCAL gate evidence from $LOCAL_EVIDENCE_DIR/.quetrex (pinned to ${PR_SHA:0:12}) — nothing published a gates branch for this head."
   [ -s "$REPO_ROOT/.quetrex/plan/$TASK.json" ] \

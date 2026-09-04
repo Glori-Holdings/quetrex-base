@@ -503,4 +503,120 @@ else
   notok "AC7: could not read merge.md at $BASE_SHA — the fail-first baseline is unavailable"
 fi
 
+# ---------------------------------------------------------------------------
+# AC8 — SYMLINKS. Discovery walks directories it does not own and the transport
+# copies into a directory anything on the machine may have touched, so both
+# ends have to distinguish "the file the build wrote" from "a link standing
+# where that file should be". Two separate holes, both found by execution
+# against 8a17394 and both fixed here; the baseline is 8a17394 (not $BASE_SHA)
+# because that is the revision where local discovery first existed AND followed
+# links.
+# ---------------------------------------------------------------------------
+SYM_SHA="8a17394"
+SYM_MD="$WORK/merge-sym-base.md"
+if git -C "$ROOT" show "$SYM_SHA:.claude/commands/merge.md" > "$SYM_MD" 2>/dev/null && [ -s "$SYM_MD" ]; then
+  ok "AC8: fetched merge.md at $SYM_SHA — the revision that shipped discovery before it refused links"
+  SYM_DISCOVER="$WORK/discover-sym.sh"
+  SYM_TRANSPORT="$WORK/transport-sym.sh"
+  exec_block "$SYM_MD" qx_find_local_evidence > "$SYM_DISCOVER"
+  fence_after "$SYM_MD" '## 2. Bring the gate evidence home' 1 > "$SYM_TRANSPORT"
+  if [ -s "$SYM_DISCOVER" ] && [ -s "$SYM_TRANSPORT" ]; then
+    ok "AC8: extracted $SYM_SHA's discovery block and §2 fence"
+  else
+    notok "AC8: could not extract $SYM_SHA's blocks — the fail-first proof would be vacuous"
+  fi
+
+  # --- 8a: a symlink at the COPY DESTINATION must not be written through -----
+  # cp -f opens the destination O_TRUNC. On a symlink that writes the TARGET,
+  # so a link planted at .quetrex/<artifact> turns the transport into a
+  # write primitive aimed anywhere the operator can write.
+  for SH in $SHELLS; do
+    OUTSIDE="$WORK/outside-$SH"; mkdir -p "$OUTSIDE"
+    VICTIM="$OUTSIDE/victim.txt"
+    write_evidence "$WT" "$PR_SHA" "local" "$PR_SHA"
+
+    reset_dest; facts "" "$WT"
+    printf 'ORIGINAL\n' > "$VICTIM"
+    ln -s "$VICTIM" "$REPO/.quetrex/review-verdict.json"
+    run_transport "$SH" "$SYM_TRANSPORT" >/dev/null 2>&1
+    if [ "$(cat "$VICTIM")" != "ORIGINAL" ]; then
+      ok "AC8a [$SH]: RED — $SYM_SHA's §2 wrote THROUGH the destination symlink and clobbered a file outside .quetrex/"
+    else
+      notok "AC8a [$SH]: could not reproduce the write-through at $SYM_SHA — the fix would prove nothing"
+    fi
+
+    reset_dest; facts "" "$WT"
+    printf 'ORIGINAL\n' > "$VICTIM"
+    ln -s "$VICTIM" "$REPO/.quetrex/review-verdict.json"
+    run_transport "$SH" >/dev/null 2>&1
+    if [ "$(cat "$VICTIM")" = "ORIGINAL" ]; then
+      ok "AC8a [$SH]: GREEN — the shipped §2 unlinks the destination first; the outside file is untouched"
+    else
+      notok "AC8a [$SH]: the shipped §2 STILL writes through a destination symlink — the hole is open"
+    fi
+    if [ ! -L "$REPO/.quetrex/review-verdict.json" ] && [ -s "$REPO/.quetrex/review-verdict.json" ]; then
+      ok "AC8a [$SH]: the destination is now a real regular file carrying the build's own verdict"
+    else
+      notok "AC8a [$SH]: destination is still a symlink, or the copy did not land"
+    fi
+  done
+
+  # --- 8b: a worktree whose .quetrex is a SYMLINK is not evidence ------------
+  SYMWT="$WORK/wt-symlink"
+  git -C "$REPO" worktree add -q -b feature/loc-sym "$SYMWT" >/dev/null 2>&1
+  SYMWT="$(git -C "$REPO" worktree list --porcelain | sed -n 's/^worktree //p' | grep 'wt-symlink' | head -1)"
+  PLANTED="$WORK/planted"
+  if [ -n "$SYMWT" ]; then
+    rm -rf "$PLANTED"; mkdir -p "$PLANTED"
+    write_evidence "$PLANTED" "$PR_SHA" "planted" "$PR_SHA"
+    # The worktree's .quetrex IS a link to a directory the worktree never wrote.
+    rm -rf "$SYMWT/.quetrex"
+    ln -s "$PLANTED/.quetrex" "$SYMWT/.quetrex"
+    # Nothing else on the machine may answer for this head, or 8b proves nothing.
+    rm -rf "$WT/.quetrex"; reset_dest
+    for SH in $SHELLS; do
+      OLD_HIT="$(printf '. %s\nqx_find_local_evidence %s %s\n' "'$SYM_DISCOVER'" "'$REPO'" "'$PR_SHA'" > "$WORK/rd.sh"; "$SH" "$WORK/rd.sh" 2>/dev/null)"
+      if [ "$OLD_HIT" = "$SYMWT" ]; then
+        ok "AC8b [$SH]: RED — $SYM_SHA's discovery followed the symlinked .quetrex and accepted planted evidence"
+      else
+        notok "AC8b [$SH]: could not reproduce the symlinked-.quetrex accept at $SYM_SHA (got [$OLD_HIT])"
+      fi
+      NEW_HIT="$(run_discover "$SH")"
+      if [ -z "$NEW_HIT" ]; then
+        ok "AC8b [$SH]: GREEN — the shipped discovery refuses a worktree whose .quetrex is a symlink"
+      else
+        notok "AC8b [$SH]: the shipped discovery STILL accepted the symlinked .quetrex (got [$NEW_HIT])"
+      fi
+    done
+    git -C "$REPO" worktree remove --force "$SYMWT" >/dev/null 2>&1
+  else
+    notok "AC8b: could not create the symlink fixture worktree"
+  fi
+
+  # --- 8c: a symlinked ARTIFACT is refused HARD, never softened to "absent" --
+  # security-findings.json is absent-legal, so resolving a planted link there —
+  # or reporting it as missing — would turn a redirect into a silent pass.
+  write_evidence "$WT" "$PR_SHA" "local" "$PR_SHA"
+  rm -rf "$PLANTED"; mkdir -p "$PLANTED/.quetrex"
+  printf '{"task":"LOC-1","head_sha":"%s","verdict":"PASS","findings":[]}\n' "$PR_SHA" > "$PLANTED/.quetrex/security-findings.json"
+  rm -f "$WT/.quetrex/security-findings.json"
+  ln -s "$PLANTED/.quetrex/security-findings.json" "$WT/.quetrex/security-findings.json"
+  reset_dest
+  for SH in $SHELLS; do
+    if [ -n "$(printf '. %s\nqx_find_local_evidence %s %s\n' "'$SYM_DISCOVER'" "'$REPO'" "'$PR_SHA'" > "$WORK/rd.sh"; "$SH" "$WORK/rd.sh" 2>/dev/null)" ]; then
+      ok "AC8c [$SH]: RED — $SYM_SHA's discovery read the symlinked security-findings.json straight through"
+    else
+      notok "AC8c [$SH]: could not reproduce the symlinked-artifact read at $SYM_SHA"
+    fi
+    if [ -z "$(run_discover "$SH")" ]; then
+      ok "AC8c [$SH]: GREEN — the shipped discovery refuses a symlinked artifact instead of resolving it or calling it absent"
+    else
+      notok "AC8c [$SH]: the shipped discovery STILL followed the symlinked security-findings.json"
+    fi
+  done
+  rm -f "$WT/.quetrex/security-findings.json"
+else
+  notok "AC8: could not read merge.md at $SYM_SHA — the symlink fail-first baseline is unavailable"
+fi
+
 finish
