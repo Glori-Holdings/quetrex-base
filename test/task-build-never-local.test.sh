@@ -37,10 +37,17 @@
 #       routine does (qx_publish_gates, executed against a bare remote under
 #       bash AND zsh), and Step 7 has a local branch ending in /quetrex:merge,
 #   (k) `local` + epic is refused at Step 1b in every mode (executed),
-#   (l) the publication logic exists in ONE copy (cloud-build-routine.md).
+#   (l) the publication logic exists in ONE copy (cloud-build-routine.md),
+#   (q) Step 6L's unit-branch discovery excludes ONLY the
+#       <prefix><TASK>-gates-<sha7> evidence refs, so a unit branch whose
+#       title-derived slug carries `gates` between hyphens is still adopted on a
+#       re-run instead of a second branch and a second PR being created
+#       (the shipped pipeline is extracted and executed under bash AND zsh),
+#   (r) qx_approved_base_sha is defined before every call site.
 # Fail-first: (a),(b),(c),(e),(f),(g),(h) are proven ABSENT from the pre-fix
-# baseline 85ec69c, and (j),(k) from the pre-rework head 31d6489 (literal
-# shas, never `main`) before the shipped text is checked.
+# baseline 85ec69c, (j),(k) from the pre-rework head 31d6489, and (q) from the
+# pre-fix head 199e648, whose discovery returns EMPTY for a gates-carrying slug
+# (literal shas, never `main`) before the shipped text is checked.
 
 set -uo pipefail
 
@@ -877,6 +884,160 @@ if grep -q -i 'merge it?' "$COMMAND" && [ -n "$(grep -n -i 'merge it?' "$COMMAND
   fail "(n) task-build.md asks \"merge it?\" outside a prohibition"
 else
   pass "(n) task-build.md never asks \"merge it?\""
+fi
+
+# --------------------------------------------------------------------------
+# (q) Step 6L's unit-branch DISCOVERY excludes only the evidence refs.
+#
+# The `-gates-` exclusion is there to skip <prefix><TASK>-gates-<sha7>, which is
+# evidence, not the unit. Unanchored, it ALSO discarded the unit branch whenever
+# the title-derived slug carried `gates` between hyphens: discovery came back
+# empty, the fallback invented a second name, and a re-run of a local build
+# opened a SECOND branch and a SECOND PR for one task while orphaning what the
+# first run pushed. dev-pipeline.md step 1 fixes the branch SHAPE and not the
+# slug, so the invented name is not guaranteed to reproduce the pushed one —
+# which is exactly why discovery exists and why it must not miss.
+#
+# MECHANICAL: the pipeline under test is EXTRACTED from the shipped task-build.md
+# and executed against a real bare origin, never retyped here. Fail-first runs the
+# SAME extraction over the pre-fix head 199e648 (a literal sha, never `main`) and
+# requires it to come back empty for the gates-carrying slug.
+# --------------------------------------------------------------------------
+extract_discovery() {  # extract_discovery <task-build.md> > file
+  awk '
+    /UNIT_BRANCH=/ && /ls-remote/ { inb = 1 }
+    inb { print }
+    inb && /head -1/ { exit }
+  ' "$1"
+}
+
+# <origin-dir> <prefix> <task> <branch>...  -> prints what discovery selects
+disc_run() {
+  local shell="$1" disc="$2" outdir="$3" prefix="$4" task="$5"; shift 5
+  local o="$outdir/o.git" r="$outdir/r" b
+  rm -rf "$o" "$r"
+  git init -q --bare "$o"
+  git init -q "$r"
+  git -C "$r" remote add origin "$o"
+  echo seed > "$r/f"
+  git -C "$r" add -A >/dev/null 2>&1
+  git -C "$r" -c user.email=t@t -c user.name=t commit -qm seed
+  for b in "$@"; do git -C "$r" push -q origin "HEAD:refs/heads/$b"; done
+  {
+    printf '%s\n' 'REPO_ROOT="$1"; BRANCH_PREFIX="$2"; TASK_ID="$3"'
+    cat "$disc"
+    printf '%s\n' 'printf "%s\n" "$UNIT_BRANCH"'
+  } > "$outdir/drive.sh"
+  "$shell" "$outdir/drive.sh" "$r" "$prefix" "$task" 2>/dev/null
+}
+
+DISC_NOW="$WORK/discovery-now.sh"
+extract_discovery "$COMMAND" > "$DISC_NOW"
+if grep -q 'ls-remote' "$DISC_NOW" && grep -q 'head -1' "$DISC_NOW"; then
+  pass "(q) extracted Step 6L's discovery pipeline from the shipped command ($(wc -l < "$DISC_NOW" | tr -d ' ') lines)"
+else
+  fail "(q) could not extract Step 6L's discovery pipeline from $COMMAND — the assertions below would prove nothing"
+fi
+
+# FAIL-FIRST against the pre-fix head. Same extractor, same cases.
+PRE_SHA="199e648"
+PRE_TB="$WORK/pre-task-build.md"
+if git -C "$REPO_ROOT" cat-file -e "$PRE_SHA^{commit}" 2>/dev/null; then
+  git -C "$REPO_ROOT" show "$PRE_SHA:.claude/commands/task-build.md" > "$PRE_TB"
+  DISC_PRE="$WORK/discovery-pre.sh"
+  extract_discovery "$PRE_TB" > "$DISC_PRE"
+  if grep -q "grep -v -- '-gates-'" "$DISC_PRE"; then
+    pass "(q) FAIL-FIRST: pre-fix $PRE_SHA carries the unanchored \`grep -v -- '-gates-'\`"
+  else
+    fail "(q) FAIL-FIRST: pre-fix $PRE_SHA does NOT carry the unanchored exclusion — the baseline is wrong, refusing to claim a fix"
+  fi
+  PRE_GOT="$(disc_run bash "$DISC_PRE" "$WORK/ff" "claude/" "QUE-7" \
+      "claude/QUE-7-merge-gates-hardening" "claude/QUE-7-gates-a1b2c3d" "claude/QUE-7-gates-9f8e7d6")"
+  if [ -z "$PRE_GOT" ]; then
+    pass "(q) FAIL-FIRST: pre-fix discovery returned EMPTY for a gates-carrying slug — the defect was real and reachable"
+  else
+    fail "(q) FAIL-FIRST: pre-fix discovery returned '$PRE_GOT' — it did NOT reproduce the defect, so the assertions below prove nothing"
+  fi
+else
+  fail "(q) FAIL-FIRST: pre-fix commit $PRE_SHA is not reachable in this checkout — refusing to report a pass having compared against nothing"
+fi
+
+for SH in bash zsh; do
+  if ! command -v "$SH" >/dev/null 2>&1; then
+    echo "SKIP: $SH not installed — (q) discovery cases"
+    continue
+  fi
+
+  # THE REGRESSION. A unit branch whose slug carries `gates` between hyphens is
+  # discovered, so a re-run adopts it instead of inventing a second one.
+  GOT="$(disc_run "$SH" "$DISC_NOW" "$WORK/o-$SH-a" "claude/" "QUE-7" \
+      "claude/QUE-7-merge-gates-hardening" "claude/QUE-7-gates-a1b2c3d" "claude/QUE-7-gates-9f8e7d6")"
+  if [ "$GOT" = "claude/QUE-7-merge-gates-hardening" ]; then
+    pass "$SH: (q) a unit branch whose slug carries 'gates' is discovered — a re-run adopts it, no second branch and no second PR"
+  else
+    fail "$SH: (q) gates-carrying unit branch NOT discovered: got '${GOT:-<empty>}', want claude/QUE-7-merge-gates-hardening"
+  fi
+  # And it is genuinely a DIFFERENT name from the one the fallback would invent,
+  # so the assertion above is about adoption, not a coincidence.
+  INVENTED="claude/QUE-7-$(printf '%s' "Harden the merge gates for epic children" \
+    | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//; s/-$//' | cut -c1-40)"
+  if [ "$GOT" != "$INVENTED" ]; then
+    pass "$SH: (q) the discovered branch differs from the name the fallback would invent ($INVENTED)"
+  else
+    fail "$SH: (q) discovered branch equals the invented fallback — the case cannot distinguish adoption from re-creation"
+  fi
+
+  # CONTROL. A gates-free slug still discovers correctly (not vacuously broken).
+  GOT="$(disc_run "$SH" "$DISC_NOW" "$WORK/o-$SH-b" "claude/" "QUE-8" \
+      "claude/QUE-8-add-status-command" "claude/QUE-8-gates-a1b2c3d")"
+  if [ "$GOT" = "claude/QUE-8-add-status-command" ]; then
+    pass "$SH: (q) CONTROL: a gates-free unit branch is still discovered"
+  else
+    fail "$SH: (q) CONTROL: gates-free unit branch not discovered: got '${GOT:-<empty>}'"
+  fi
+
+  # The evidence refs are STILL excluded — that is what the exclusion is for.
+  GOT="$(disc_run "$SH" "$DISC_NOW" "$WORK/o-$SH-c" "claude/" "QUE-9" \
+      "claude/QUE-9-gates-a1b2c3d" "claude/QUE-9-gates-9f8e7d6")"
+  if [ -z "$GOT" ]; then
+    pass "$SH: (q) evidence refs alone discover nothing — <prefix><TASK>-gates-<sha7> is still excluded"
+  else
+    fail "$SH: (q) an evidence ref was selected as the unit branch: '$GOT'"
+  fi
+
+  # Evidence refs are excluded even when they sort ahead of the unit branch.
+  GOT="$(disc_run "$SH" "$DISC_NOW" "$WORK/o-$SH-d" "claude/" "QUE-10" \
+      "claude/QUE-10-gates-0000abc" "claude/QUE-10-aaa-first-alphabetically")"
+  if [ "$GOT" = "claude/QUE-10-aaa-first-alphabetically" ]; then
+    pass "$SH: (q) the unit branch wins over an evidence ref that sorts ahead of it"
+  else
+    fail "$SH: (q) evidence ref sorting ahead broke selection: got '${GOT:-<empty>}'"
+  fi
+done
+
+# --------------------------------------------------------------------------
+# (r) qx_approved_base_sha is DEFINED before it is CALLED.
+# It used to live in Step 6A, 154 lines after Step 6L's call — the one backward
+# reference in the file. An agent running 6L's block verbatim got
+# `qx_approved_base_sha: command not found`, which fails closed but reads to the
+# operator as a failed build.
+# --------------------------------------------------------------------------
+DEF_LINE="$(grep -n 'quetrex:exec-block qx_approved_base_sha' "$COMMAND" | grep -v 'end quetrex' | head -1 | cut -d: -f1)"
+if [ -n "$DEF_LINE" ]; then
+  BAD_CALL=""
+  while IFS=: read -r L _; do
+    [ -n "$L" ] || continue
+    [ "$L" -lt "$DEF_LINE" ] && BAD_CALL="$BAD_CALL $L"
+  done <<EOF
+$(grep -n 'qx_approved_base_sha "' "$COMMAND" || true)
+EOF
+  if [ -z "$BAD_CALL" ]; then
+    pass "(r) qx_approved_base_sha is defined at line $DEF_LINE, before every call site"
+  else
+    fail "(r) qx_approved_base_sha is called at line(s)$BAD_CALL, before its definition at $DEF_LINE"
+  fi
+else
+  fail "(r) no qx_approved_base_sha exec block found in $COMMAND"
 fi
 
 echo

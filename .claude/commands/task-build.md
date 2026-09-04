@@ -1109,6 +1109,65 @@ qx_payload_prefix() {          # qx_payload_prefix <payload> <fallback-prefix>
 }
 # ── end quetrex:exec-block qx_payload_prefix ──────────────────────────────────
 BRANCH_PREFIX="$(qx_payload_prefix "$PAYLOAD" "$BRANCH_PREFIX")" || exit 1
+
+# THE APPROVED BASE IS RESOLVED HERE, above BOTH dispatch paths, because BOTH
+# call it: Step 6L (a local build) and Step 6A (a cloud dispatch). It used to be
+# defined inside 6A, 154 lines after 6L's call — the one backward reference in
+# this file, and an agent running 6L's block verbatim got `qx_approved_base_sha:
+# command not found`. It failed closed, but a raw interpreter error reads to the
+# operator as a failed build. Definition before first call removes the hazard.
+# ── quetrex:exec-block qx_approved_base_sha ────────────────────────────────────
+# Executable, and executed: test/task-build-guards.test.sh drives this function
+# against a real origin+clone across a moving base branch.
+#
+# THE APPROVED BASE IS A CONSTANT, NOT A LOOKUP. It is resolved from
+# origin/<base> exactly ONCE — at the first dispatch — and then pinned into the
+# payload. Every later dispatch of the same task REUSES it.
+#
+# WHY. `quetrex-cloud-prep sync` resumes the unit branch if it already exists on
+# origin (dispatch #1 always leaves one) and then asserts the approved base is an
+# ANCESTOR of that resume point. Re-resolving origin/<base> on a re-dispatch
+# stamps whatever main has advanced to since — a sha the existing branch cannot
+# possibly contain — so sync exits 3 `transport_failure` and does so FOREVER.
+# That dead end sits directly under two documented recovery paths: merge.md tells
+# the operator to re-run `--build-only` when the gates are stale, and the routine
+# promises to "resume from committed work on transport death". Both are unusable
+# on any repo where another task merged in the meantime — i.e. any active repo.
+# Reusing the approved sha is also the CORRECT semantics: the human approved a
+# scope against a specific snapshot, and a resume must not silently re-target.
+qx_approved_base_sha() {       # qx_approved_base_sha <payload> <repo-root> <base-branch>
+  local payload="$1" root="$2" base="$3" sha=""
+  sha="$(quetrex-api json-get "$payload" approvedBaseSha 2>/dev/null || true)"
+  if [ -n "$sha" ]; then
+    # RE-DISPATCH. Make sure the object is present locally (a prune or a fresh
+    # clone can drop it), but never re-resolve the ref.
+    if ! git -C "$root" cat-file -e "$sha^{commit}" 2>/dev/null; then
+      git -C "$root" fetch --quiet origin "$base" 2>/dev/null || true
+      git -C "$root" cat-file -e "$sha^{commit}" 2>/dev/null || \
+        git -C "$root" fetch --quiet origin "$sha" 2>/dev/null || true
+    fi
+    if ! git -C "$root" cat-file -e "$sha^{commit}" 2>/dev/null; then
+      echo "The approved base commit $sha is no longer in this repo (force-push, or a fresh clone)." >&2
+      echo "The scope was approved against a snapshot that no longer exists, so resuming would silently re-target it." >&2
+      echo "Re-run the plan half: /quetrex:task-build $TASK_ID" >&2
+      return 1
+    fi
+    printf '%s\n' "$sha"
+    return 0
+  fi
+  # FIRST DISPATCH. Resolve once, pin it.
+  git -C "$root" fetch --quiet origin "$base" || { echo "cannot fetch origin/$base" >&2; return 1; }
+  sha="$(git -C "$root" rev-parse --verify --quiet "refs/remotes/origin/$base^{commit}" 2>/dev/null)" || sha=""
+  [ -n "$sha" ] || { echo "cannot resolve refs/remotes/origin/$base — refusing to dispatch against an unknown base" >&2; return 1; }
+  node -e '
+    const fs=require("fs"); const [f,s]=process.argv.slice(1);
+    const p=JSON.parse(fs.readFileSync(f,"utf8"));
+    p.approvedBaseSha=s;
+    fs.writeFileSync(f, JSON.stringify(p,null,2)+"\n");
+  ' "$payload" "$sha" || return 1
+  printf '%s\n' "$sha"
+}
+# ── end quetrex:exec-block qx_approved_base_sha ───────────────────────────────
 ```
 
 **Refusing to build an unapproved payload is a gate, not a convenience check.** Never
@@ -1140,8 +1199,8 @@ from the same approved snapshot and publishes the same gate evidence — `/quetr
 cannot tell the two apart, and must not have to.
 
 **1. Fork from the approved base, not from whatever the base branch is now.** Same pin as
-6A — `qx_approved_base_sha` is the exec block in 6A below; include it verbatim above this
-block, it is the ONE place `approvedBaseSha` is resolved and stored — and the same sync the
+6A — `qx_approved_base_sha` is the exec block at **Step 5 above**, already in scope by the
+time you are here, and it is the ONE place `approvedBaseSha` is resolved and stored — and the same sync the
 cloud routine runs at its step 2b (`quetrex-cloud-prep sync`: proceeds when the live base
 contains the approved sha, resumes a unit branch already on origin, refuses a base the
 approver never saw):
@@ -1158,8 +1217,19 @@ else
   # task (a re-run — the `-gates-` refs are evidence, not the unit), else
   # <prefix><TASK>-<slug> as dev-pipeline.md step 1 names it. Create it DETACHED AT THE
   # APPROVED SHA so nothing here ever forks from a moving branch name.
+  # THE EXCLUSION IS ANCHORED TO THE EVIDENCE-REF SHAPE, and it has to be. An
+  # unanchored `grep -v -- '-gates-'` also discards the UNIT branch whenever the
+  # title-derived slug happens to carry `gates` between hyphens — a
+  # `-merge-gates-hardening` branch is dropped, discovery comes back empty, the
+  # fallback below invents a second name, and a re-run opens a SECOND branch and a
+  # SECOND PR for one task while orphaning what the first run pushed. Only
+  # `<prefix><TASK>-gates-<sha7>` is evidence; everything else under this glob is
+  # the unit. dev-pipeline.md step 1 fixes the branch SHAPE and not the slug, so
+  # the invented name is not guaranteed to reproduce the pushed one — which is the
+  # whole reason this discovery exists and why it must not miss.
   UNIT_BRANCH="$(git -C "$REPO_ROOT" ls-remote --heads origin "${BRANCH_PREFIX}${TASK_ID}-*" 2>/dev/null \
-    | awk '{sub("refs/heads/","",$2); print $2}' | grep -v -- '-gates-' | head -1)"
+    | awk '{sub("refs/heads/","",$2); print $2}' \
+    | grep -v -E "^${BRANCH_PREFIX}${TASK_ID}-gates-[0-9a-f]+$" | head -1)"
   [ -n "$UNIT_BRANCH" ] || UNIT_BRANCH="${BRANCH_PREFIX}${TASK_ID}-$(printf '%s' "$TASK_TITLE" \
     | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//; s/-$//' | cut -c1-40)"
   WT="$(mktemp -d)"
@@ -1303,58 +1373,8 @@ PLAN_JSON="$(node -e '
 ' "$PAYLOAD")" || exit 1
 BASE_BRANCH_FOR_SPEC="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).baseBranch)' "$PAYLOAD")"
 
-# ── quetrex:exec-block qx_approved_base_sha ────────────────────────────────────
-# Executable, and executed: test/task-build-guards.test.sh drives this function
-# against a real origin+clone across a moving base branch.
-#
-# THE APPROVED BASE IS A CONSTANT, NOT A LOOKUP. It is resolved from
-# origin/<base> exactly ONCE — at the first dispatch — and then pinned into the
-# payload. Every later dispatch of the same task REUSES it.
-#
-# WHY. `quetrex-cloud-prep sync` resumes the unit branch if it already exists on
-# origin (dispatch #1 always leaves one) and then asserts the approved base is an
-# ANCESTOR of that resume point. Re-resolving origin/<base> on a re-dispatch
-# stamps whatever main has advanced to since — a sha the existing branch cannot
-# possibly contain — so sync exits 3 `transport_failure` and does so FOREVER.
-# That dead end sits directly under two documented recovery paths: merge.md tells
-# the operator to re-run `--build-only` when the gates are stale, and the routine
-# promises to "resume from committed work on transport death". Both are unusable
-# on any repo where another task merged in the meantime — i.e. any active repo.
-# Reusing the approved sha is also the CORRECT semantics: the human approved a
-# scope against a specific snapshot, and a resume must not silently re-target.
-qx_approved_base_sha() {       # qx_approved_base_sha <payload> <repo-root> <base-branch>
-  local payload="$1" root="$2" base="$3" sha=""
-  sha="$(quetrex-api json-get "$payload" approvedBaseSha 2>/dev/null || true)"
-  if [ -n "$sha" ]; then
-    # RE-DISPATCH. Make sure the object is present locally (a prune or a fresh
-    # clone can drop it), but never re-resolve the ref.
-    if ! git -C "$root" cat-file -e "$sha^{commit}" 2>/dev/null; then
-      git -C "$root" fetch --quiet origin "$base" 2>/dev/null || true
-      git -C "$root" cat-file -e "$sha^{commit}" 2>/dev/null || \
-        git -C "$root" fetch --quiet origin "$sha" 2>/dev/null || true
-    fi
-    if ! git -C "$root" cat-file -e "$sha^{commit}" 2>/dev/null; then
-      echo "The approved base commit $sha is no longer in this repo (force-push, or a fresh clone)." >&2
-      echo "The scope was approved against a snapshot that no longer exists, so resuming would silently re-target it." >&2
-      echo "Re-run the plan half: /quetrex:task-build $TASK_ID" >&2
-      return 1
-    fi
-    printf '%s\n' "$sha"
-    return 0
-  fi
-  # FIRST DISPATCH. Resolve once, pin it.
-  git -C "$root" fetch --quiet origin "$base" || { echo "cannot fetch origin/$base" >&2; return 1; }
-  sha="$(git -C "$root" rev-parse --verify --quiet "refs/remotes/origin/$base^{commit}" 2>/dev/null)" || sha=""
-  [ -n "$sha" ] || { echo "cannot resolve refs/remotes/origin/$base — refusing to dispatch against an unknown base" >&2; return 1; }
-  node -e '
-    const fs=require("fs"); const [f,s]=process.argv.slice(1);
-    const p=JSON.parse(fs.readFileSync(f,"utf8"));
-    p.approvedBaseSha=s;
-    fs.writeFileSync(f, JSON.stringify(p,null,2)+"\n");
-  ' "$payload" "$sha" || return 1
-  printf '%s\n' "$sha"
-}
-# ── end quetrex:exec-block qx_approved_base_sha ───────────────────────────────
+# qx_approved_base_sha is defined ONCE, at Step 5, above both dispatch paths —
+# 6L calls it too, and it used to be defined here, 154 lines AFTER that call.
 
 APPROVED_BASE_SHA="$(qx_approved_base_sha "$PAYLOAD" "$REPO_ROOT" "$BASE_BRANCH_FOR_SPEC")" || exit 1
 
