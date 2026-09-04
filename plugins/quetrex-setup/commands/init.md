@@ -1001,8 +1001,17 @@ operator's zsh as well as bash: no unquoted `$VAR` splitting, no `$var:` modifie
 ```bash
 # ── quetrex:exec-block qx_register_webhook ─────────────────────────────────────
 # Owner/repo from the origin remote — skip silently when there is no GitHub origin.
+# `remote.origin.url` can carry an embedded NEWLINE (git config accepts a \n
+# escape) and the `grep -Eq` below matches per LINE, so an anchored slug pattern
+# succeeds when ANY one line matches while the others flow into what this block
+# prints. Refuse a multi-line origin outright — truncating to line 1 would just
+# hand the attacker the owner/repo halves.
 QX_ORIGIN="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null)"
-QX_SLUG="$(printf '%s' "$QX_ORIGIN" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##')"
+if [ "$(printf '%s' "$QX_ORIGIN" | wc -l | tr -d ' ')" != 0 ]; then
+  echo "webhook: origin remote is not a single-line URL — refusing to read a repo slug from it" >&2
+  QX_ORIGIN=""
+fi
+QX_SLUG="$(printf '%s' "$QX_ORIGIN" | sed -E 's#^(git@github\.com:|(https?|ssh|git)://(git@)?github\.com/)##; s#/+$##; s#\.git$##; s#/+$##')"
 QX_HOOK_URL="${QX_KANBAN_URL%/}/api/webhooks/github"
 
 if ! printf '%s' "$QX_SLUG" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
@@ -1054,21 +1063,172 @@ fi
 # ── end quetrex:exec-block qx_register_webhook ─────────────────────────────────
 ```
 
-**The project must also record its repo.** The webhook refuses a delivery whose repository
-does not match `project.githubRepo` — the identifier alone is not authorisation, since
-`QDM-5` means something in every project coded QDM. If that field is unset, no card moves:
+**The project must also record its repo — both halves.** The webhook refuses a delivery
+whose repository does not match the project's stored repo — the identifier alone is not
+authorisation, since `QDM-5` means something in every project coded QDM. And the board
+shows the repository as **linked** only when BOTH `githubOwner` and `githubRepo` are set
+(`RepoLink` checks the pair); a project with only `githubRepo` reads "repository not
+linked" on every card. So this block derives `owner` and `repo` from the origin slug and
+writes the pair whenever either is missing. It never overwrites a non-empty value that
+differs — that project belongs to another repo, and init says so, names BOTH stored
+halves (never a dangling `Someone-Else/`), and leaves it. Two things the comparison has
+to get right. A **failed** board GET is not an unset field: `jq -r '… // empty'` on empty
+stdin exits 0 printing nothing, so an outage would otherwise read as "nothing recorded"
+and PATCH over another repo's link — the block takes the GET's exit status and proves the
+body is a JSON object before it compares anything. And a stored owner/repo is compared **the way the board compares it**. That is four
+operations, not one: `repoMatchesProject` in `branch-ref.ts` trims, lowercases, strips a
+trailing `.git`, then strips trailing slashes. Lowercasing alone left a stored
+`dealerq.git` reading as a different repo from an origin `dealerq`, which refused the link
+forever and printed a fix for a problem the board did not have. `quetrex-api repo-norm`
+holds that shape in one place and **both** sides of **every** comparison go through it, in
+init and in doctor alike, so the two cannot drift from each other or from the board. One
+shared helper on the comparison path is also a single point of failure, so its result is
+**checked**: a `repo-norm` that is missing from `PATH`, exits non-zero, or hands back
+nothing for a non-empty value returns no value at all, and the block says the comparison
+could not be made and touches nothing. Unchecked it would fail *silent* rather than
+closed — all four normalized values collapse to the empty string, `""` compares equal to
+`""`, and a link pointing at a genuinely different repository reads as a match with nothing
+printed. An empty input normalizing to empty is still a success, so "unset on the board"
+stays distinguishable from "could not be normalized".
+Runs in the operator's zsh as well as bash: `${SLUG%%/*}` / `${SLUG##*/}` only and no
+`$var:` modifiers (`${v,,}` is bash-4-only and `${v:l}` zsh-only, and neither does the
+other three steps anyway).
+
+**Two hostile inputs are refused before anything is compared or printed**, because a cloned
+repo carries both. An **origin remote spanning more than one line** is refused unread: `git
+config` accepts a `\n` escape in `remote.origin.url`, `grep -Eq` matches per *line*, so an
+anchored slug pattern would pass on any one line and the other lines would print as advice
+in this block's own voice. Truncating to line 1 is not the fix — that just hands the
+attacker the owner and repo halves. And the **project code** is interpolated into the
+copy-paste `quetrex-api PATCH` line, so it is offered only for a code the board could have
+issued: `deriveCode` mints exactly three `A-Z` letters and `assignUniqueCode` appends a
+decimal collision suffix (`quetrex-kanban src/lib/code.ts`) into a `varchar(8)` column, and
+`PATCH /api/projects/:code` cannot rename it. That check lives in `resolve_project`, so
+every consumer that resolves the project **through `resolve_project`** inherits it and no
+future advisory line reached that way has to remember to guard itself; this block asks the
+same question through `quetrex-api code-ok`. It is **not** universal, and saying so would
+be false: five sites in this file and in `doctor.md` still read the binding with
+`json-get`, which does not validate, and interpolate the code into a request path. Those
+lines are unchanged from base and out of scope here, but a new consumer must either go
+through `resolve_project` or call `code-ok` itself — inheriting the check is a property of
+the call path, never of the binding. Anything
+else — a hand-written `.quetrex/project.json` — gets a plain instruction naming the board
+dialog and no runnable command. Every value rendered into a printed line has its control
+characters stripped whatever its source, so an `ESC` byte can never rewrite the operator's
+terminal.
 
 ```bash
-QX_LINKED="$(quetrex-api GET "/api/projects/$QX_PROJECT_CODE" 2>/dev/null | jq -r '.githubRepo // empty')"
-if [ -z "$QX_LINKED" ] && [ -n "$QX_SLUG" ]; then
-  # BARE repo name only. The API validates githubRepo against ^[A-Za-z0-9._-]+$,
-  # so sending "owner/repo" is rejected outright — and the webhook's repo check
-  # is written to match a bare stored name against the delivered owner/repo.
-  QX_REPO_NAME="${QX_SLUG##*/}"
-  quetrex-api PATCH "/api/projects/$QX_PROJECT_CODE" "$(jq -cn --arg r "$QX_REPO_NAME" '{githubRepo:$r}')" >/dev/null 2>&1 \
-    && echo "project $QX_PROJECT_CODE linked to $QX_REPO_NAME" \
-    || echo "could not link project $QX_PROJECT_CODE to $QX_REPO_NAME — the webhook will ignore its deliveries" >&2
+# ── quetrex:exec-block qx_link_project_repo ────────────────────────────────────
+# Owner and repo are the two halves of the origin slug. The API validates each
+# against ^[A-Za-z0-9._-]+$ — bare halves, never "owner/repo" in one field.
+#
+# Two inputs here are attacker-controllable in a cloned repo, and both are
+# handled before anything is compared, printed or PATCHed:
+#   * `remote.origin.url` can carry an embedded NEWLINE (git config accepts a \n
+#     escape) and `grep -Eq` matches per LINE, so an anchored pattern succeeds on
+#     ANY one line while the remaining lines flow straight into the advice below.
+#     Refuse a multi-line origin outright; truncating to line 1 would just hand
+#     the attacker the owner/repo halves.
+#   * the project code comes from ./.quetrex/project.json, which nothing
+#     validates, and it is interpolated into a `quetrex-api PATCH` one-liner the
+#     operator is invited to paste. Only a code shaped the way the BOARD mints
+#     one gets that treatment. `quetrex-api code-ok` is the single definition of
+#     that shape and resolve_project already enforces it, so this block asks
+#     rather than re-implementing the pattern next to the line it prints.
+# Every value rendered into a printed line also has its control characters
+# stripped, whatever its source — an ESC byte rewrites the operator's terminal.
+# LC_ALL=C so `tr` deletes bytes 0x00-0x1F and 0x7F and leaves UTF-8 intact.
+qx_ctl() { printf '%s' "$1" | LC_ALL=C tr -d '[:cntrl:]'; }
+QX_ORIGIN="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null)"
+if [ "$(printf '%s' "$QX_ORIGIN" | wc -l | tr -d ' ')" != 0 ]; then
+  echo "origin remote is not a single-line URL — refusing to read a repo slug from it" >&2
+  QX_ORIGIN=""
 fi
+QX_SLUG="$(printf '%s' "$QX_ORIGIN" | sed -E 's#^(git@github\.com:|(https?|ssh|git)://(git@)?github\.com/)##; s#/+$##; s#\.git$##; s#/+$##')"
+QX_CODE_SHOWN="$(qx_ctl "$QX_PROJECT_CODE")"
+if printf '%s' "$QX_SLUG" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+  QX_OWNER_NAME="${QX_SLUG%%/*}"
+  QX_REPO_NAME="${QX_SLUG##*/}"
+  # A board OUTAGE must never read as "nothing recorded yet". `jq -r '… // empty'`
+  # on empty stdin exits 0 printing nothing, so an unread GET would fall into the
+  # PATCH arm below and overwrite a link belonging to a different repo. Take the
+  # GET's exit status AND prove the body is a JSON object; anything else says so
+  # and touches nothing.
+  QX_LINKED_JSON="$(quetrex-api GET "/api/projects/$QX_PROJECT_CODE" 2>/dev/null)"; QX_GET_RC=$?
+  if [ "$QX_GET_RC" -ne 0 ] || ! printf '%s' "$QX_LINKED_JSON" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    echo "could not read project $QX_CODE_SHOWN from the board — leaving the repo link alone" >&2
+  else
+    QX_LINKED_OWNER="$(printf '%s' "$QX_LINKED_JSON" | jq -r '.githubOwner // empty' 2>/dev/null)"
+    QX_LINKED_REPO="$(printf '%s' "$QX_LINKED_JSON" | jq -r '.githubRepo // empty' 2>/dev/null)"
+    # Compare the way the BOARD compares (quetrex-kanban src/lib/branch-ref.ts
+    # repoMatchesProject): trim, lowercase, strip a trailing `.git`, then strip
+    # trailing slashes. Lowercasing alone was only one of the four — a stored
+    # `dealerq.git` against an origin `dealerq` read as a different repo and
+    # refused the link forever, the same way `DealerQ` used to. `quetrex-api
+    # repo-norm` holds that shape once, and BOTH sides of every comparison go
+    # through it, so init and doctor cannot drift from each other or from the
+    # board. (It is also why there is no ${v,,}/${v:l} here — neither is
+    # portable across bash and zsh, and neither does the other three steps.)
+    # qx_norm <value> — the shared normalization behind a contract: PRINT a
+    # value and return 0, or return NON-ZERO having asserted nothing. Every
+    # comparison below is an equality test between two normalized values, so a
+    # helper that quietly hands back "" for both sides makes a link pointing at
+    # a DIFFERENT repository compare EQUAL: no PATCH, but no warning either, and
+    # the operator is told nothing at all. All three failure shapes are failures
+    # and never a value — a non-zero exit, quetrex-api missing from PATH (127),
+    # and an empty or whitespace-only result from a NON-EMPTY input. An empty
+    # input normalizing to empty is legitimate and stays a success, so "unset on
+    # the board" is still distinguishable from "could not be normalized".
+    # This wrapper is byte-identical in doctor.md's Check 14; both files call it
+    # rather than the bare helper, so a call site cannot forget the check.
+    qx_norm() {
+      local _qn_in="$1" _qn_out
+      _qn_out="$(quetrex-api repo-norm "$_qn_in" 2>/dev/null)" || return 1
+      [ -z "$_qn_in" ] || [ -n "$(printf '%s' "$_qn_out" | LC_ALL=C tr -d '[:space:]')" ] || return 1
+      printf '%s' "$_qn_out"
+    }
+    QX_NORM_RC=0
+    QX_OWNER_LC="$(qx_norm "$QX_OWNER_NAME")"          || QX_NORM_RC=1
+    QX_REPO_LC="$(qx_norm "$QX_REPO_NAME")"            || QX_NORM_RC=1
+    QX_LINKED_OWNER_LC="$(qx_norm "$QX_LINKED_OWNER")" || QX_NORM_RC=1
+    QX_LINKED_REPO_LC="$(qx_norm "$QX_LINKED_REPO")"   || QX_NORM_RC=1
+    if [ "$QX_NORM_RC" -ne 0 ]; then
+      # Fail CLOSED and SAY SO. Never PATCH, never claim a match.
+      echo "could not compare project $QX_CODE_SHOWN's repo link against $QX_SLUG — 'quetrex-api repo-norm' returned no usable value (missing from PATH, or failing). The board was not changed and the link state is unverified." >&2
+      echo "  Fix: check quetrex-api runs (quetrex-api repo-norm dealerq), then re-run /quetrex-setup:init." >&2
+    elif { [ -n "$QX_LINKED_OWNER" ] && [ "$QX_LINKED_OWNER_LC" != "$QX_OWNER_LC" ]; } \
+       || { [ -n "$QX_LINKED_REPO" ] && [ "$QX_LINKED_REPO_LC" != "$QX_REPO_LC" ]; }; then
+      # Name BOTH halves. A half-set link rendered as "Someone-Else/" reads as a
+      # repository nobody owns.
+      if [ -n "$QX_LINKED_OWNER" ] && [ -n "$QX_LINKED_REPO" ]; then
+        QX_LINKED_SHOWN="$(qx_ctl "$QX_LINKED_OWNER")/$(qx_ctl "$QX_LINKED_REPO")"
+      elif [ -n "$QX_LINKED_OWNER" ]; then
+        QX_LINKED_SHOWN="owner $(qx_ctl "$QX_LINKED_OWNER"), repo unset"
+      else
+        QX_LINKED_SHOWN="owner unset, repo $(qx_ctl "$QX_LINKED_REPO")"
+      fi
+      echo "project $QX_CODE_SHOWN is linked to a different repo ($QX_LINKED_SHOWN), not $QX_SLUG — left alone" >&2
+      # The one-liner is offered ONLY for a code the board could have issued.
+      if quetrex-api code-ok "$QX_PROJECT_CODE"; then
+        echo "  re-running init will not change it. Set the pair on the board's repo-link dialog, or as a project admin: quetrex-api PATCH \"/api/projects/$QX_PROJECT_CODE\" '{\"githubOwner\":\"$QX_OWNER_NAME\",\"githubRepo\":\"$QX_REPO_NAME\"}'" >&2
+      else
+        echo "  re-running init will not change it. Set the pair on the board's repo-link dialog. (This repo's .quetrex/project.json holds a project code the board could not have issued, so there is no command to offer — fix the binding with /quetrex-setup:init first.)" >&2
+      fi
+      unset QX_LINKED_SHOWN
+    elif [ -z "$QX_LINKED_OWNER" ] || [ -z "$QX_LINKED_REPO" ]; then
+      quetrex-api PATCH "/api/projects/$QX_PROJECT_CODE" \
+        "$(jq -cn --arg o "$QX_OWNER_NAME" --arg r "$QX_REPO_NAME" '{githubOwner:$o,githubRepo:$r}')" >/dev/null 2>&1 \
+        && echo "project $QX_CODE_SHOWN linked to $QX_OWNER_NAME/$QX_REPO_NAME" \
+        || echo "could not link project $QX_CODE_SHOWN to $QX_OWNER_NAME/$QX_REPO_NAME — the board shows it unlinked and the webhook will ignore its deliveries" >&2
+    fi
+    unset QX_LINKED_OWNER QX_LINKED_REPO QX_LINKED_OWNER_LC QX_LINKED_REPO_LC QX_OWNER_LC QX_REPO_LC QX_NORM_RC
+    unset -f qx_norm
+  fi
+  unset QX_LINKED_JSON QX_GET_RC
+fi
+unset QX_CODE_SHOWN
+unset -f qx_ctl
+# ── end quetrex:exec-block qx_link_project_repo ────────────────────────────────
 ```
 
 ## 4j. One-time legacy cleanup (guarded, reversible, per-machine)

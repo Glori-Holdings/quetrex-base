@@ -53,13 +53,39 @@
 # package `engines`). No jq / python3 dependency — JSON + date math use node.
 # ---------------------------------------------------------------------------
 
+# _qx_node <script> [value...]
+#   Run a node one-liner with every UNTRUSTED value passed through the
+#   ENVIRONMENT — as process.env.QX_A1 .. QX_A4, in the order given — instead of
+#   argv. THE ONLY way this file is allowed to hand node a caller-controlled
+#   value.
+#
+#   WHY. `node -e '<script>' "$v"` hands $v to NODE's own CLI parser, which
+#   inspects that first trailing token for flags it recognises BEFORE the eval'd
+#   script ever runs. v="--version" or v="-v" makes node print its version banner
+#   and exit 0; v="--help" prints its usage and exits 0. Every one of those was
+#   read by qx_code_is_board_shaped as "exit 0 = this IS a code the board could
+#   have issued" — a total bypass of the predicate resolve_project and init's
+#   advisory line both depend on, for a value that never reached the regex.
+#
+#   WHY NOT `--`. A `node -e '<script>' -- "$v"` terminator does close the
+#   parse, but it leaves the value on argv (so it is visible in `ps aux`, which
+#   this file's token-safety invariant exists to prevent) and it leaves every
+#   future call site one forgotten `--` away from the same bug. The environment
+#   is not parsed by anything, so it cannot be mis-parsed — the failure mode is
+#   removed rather than guarded against. All four slots are always set, so an
+#   ambient QX_A* in the operator's environment can never leak into a script.
+_qx_node() {
+  local _qx_script="$1"
+  QX_A1="${2-}" QX_A2="${3-}" QX_A3="${4-}" QX_A4="${5-}" node -e "$_qx_script"
+}
+
 # _qx_json_get <file> <dot.path>
 #   Print one field value from a JSON file. Exit 1 if the file is unreadable,
 #   not valid JSON, or the path resolves to null/undefined.
 _qx_json_get() {
-  node -e '
+  _qx_node '
     const fs = require("fs");
-    const [f, p] = process.argv.slice(1);
+    const f = process.env.QX_A1, p = process.env.QX_A2;
     let o;
     try { o = JSON.parse(fs.readFileSync(f, "utf8")); } catch { process.exit(1); }
     const v = p.split(".").reduce((a, k) => (a == null ? a : a[k]), o);
@@ -86,7 +112,7 @@ resolve_auth() {
   exp="$(_qx_json_get "$f" expiresAt)" || { echo "Run /quetrex-setup:login" >&2; return 1; }
 
   # Expired? node date math, no jq dependency. exit 0 = still valid.
-  if ! node -e 'process.exit(new Date(process.argv[1]) > new Date() ? 0 : 1)' "$exp"; then
+  if ! _qx_node 'process.exit(new Date(process.env.QX_A1) > new Date() ? 0 : 1)' "$exp"; then
     echo "Run /quetrex-setup:login" >&2
     return 1
   fi
@@ -113,6 +139,28 @@ qx_binding_path() {
   return 1
 }
 
+# qx_code_is_board_shaped <code>
+#   Is this a project code the BOARD could have issued? deriveCode() yields
+#   exactly three A-Z letters and assignUniqueCode() appends a decimal collision
+#   suffix (quetrex-kanban src/lib/code.ts), into a varchar(8) column, and
+#   PATCH /api/projects/:code deliberately cannot rename it (updateProjectSchema
+#   omits `code`) — so nothing else can ever mint one, and a code outside this
+#   shape cannot resolve against the board either (the route matches on
+#   eq(projects.code, code)).
+#
+#   THE single definition of that shape. resolve_project enforces it below so
+#   every consumer inherits it, rather than each command guarding the one line
+#   it happens to print — a project code out of a cloned repo's
+#   .quetrex/project.json used to be interpolated straight into a copy-paste
+#   `quetrex-api PATCH` one-liner, and guarding the print site would only have
+#   waited for the next message someone added.
+#
+#   node, not `grep -Eq`: grep is line-oriented and would accept a code whose
+#   first line is "QUE"; JS ^...$ without /m is anchored to the whole string.
+qx_code_is_board_shaped() {
+  _qx_node 'const c = process.env.QX_A1; process.exit(/^[A-Z]{3}[0-9]*$/.test(c) && c.length <= 8 ? 0 : 1)' "$1" 2>/dev/null
+}
+
 # resolve_project
 #   Walk up from $PWD to find .quetrex/project.json. Sets QX_PROJECT_CODE.
 #   Keeps auth.json's kanbanUrl as the source of truth, falling back to the
@@ -133,9 +181,17 @@ resolve_project() {
     return 1
   fi
 
-  # consumed by skill callers, not internally — hence the disable.
-  # shellcheck disable=SC2034
   QX_PROJECT_CODE="$(_qx_json_get "$f" projectCode)" || { echo "Run /quetrex-setup:init" >&2; return 1; }
+
+  # Validate HERE, once, so every consumer inherits it. A binding file is
+  # attacker-supplied in a cloned repo and nothing else checks it; a code the
+  # board could not have issued resolves to no project anyway, so refusing is
+  # both safer and more honest than carrying it forward.
+  if ! qx_code_is_board_shaped "$QX_PROJECT_CODE"; then
+    echo "quetrex-api: $f holds a projectCode the board could not have issued (it mints three A-Z letters plus an optional collision suffix). Re-run /quetrex-setup:init to rebind this repo." >&2
+    QX_PROJECT_CODE=""
+    return 1
+  fi
 
   # auth's kanbanUrl wins; only fall back to the binding if auth set nothing.
   if [ -z "${QX_KANBAN_URL:-}" ]; then
@@ -177,11 +233,11 @@ qapi() {
     code="$(curl -sS -K "$cfg" \
       -H 'Content-Type: application/json' \
       -X "$method" --data "$body" \
-      -o "$bodyf" -w '%{http_code}' "$url")"
+      -o "$bodyf" -w '%{http_code}' --url "$url")"
   else
     code="$(curl -sS -K "$cfg" \
       -X "$method" \
-      -o "$bodyf" -w '%{http_code}' "$url")"
+      -o "$bodyf" -w '%{http_code}' --url "$url")"
   fi
 
   # Token's on-disk copy is no longer needed — wipe it before doing anything else.
@@ -222,7 +278,7 @@ qapi() {
 # shellcheck disable=SC2329
 qx_task_status() {
   local body
-  body="$(node -e 'process.stdout.write(JSON.stringify({status:process.argv[1]}))' "$2")" || return 1
+  body="$(_qx_node 'process.stdout.write(JSON.stringify({status:process.env.QX_A1}))' "$2")" || return 1
   _qx_require_ref "$1" || return 1
   qapi PATCH "/api/tasks/$1" "$body" >/dev/null
 }
@@ -231,7 +287,7 @@ qx_task_status() {
 # shellcheck disable=SC2329
 qx_task_ainote() {
   local body
-  body="$(node -e 'process.stdout.write(JSON.stringify({aiNotes:process.argv[1]}))' "$2")" || return 1
+  body="$(_qx_node 'process.stdout.write(JSON.stringify({aiNotes:process.env.QX_A1}))' "$2")" || return 1
   _qx_require_ref "$1" || return 1
   qapi PATCH "/api/tasks/$1" "$body" >/dev/null
 }
@@ -240,7 +296,7 @@ qx_task_ainote() {
 # shellcheck disable=SC2329
 qx_task_comment() {
   local body
-  body="$(node -e 'process.stdout.write(JSON.stringify({body:process.argv[1]}))' "$2")" || return 1
+  body="$(_qx_node 'process.stdout.write(JSON.stringify({body:process.env.QX_A1}))' "$2")" || return 1
   _qx_require_ref "$1" || return 1
   qapi POST "/api/tasks/$1/comments" "$body" >/dev/null
 }
@@ -249,7 +305,7 @@ qx_task_comment() {
 # shellcheck disable=SC2329
 qx_task_type() {
   local body
-  body="$(node -e 'process.stdout.write(JSON.stringify({type:process.argv[1]}))' "$2")" || return 1
+  body="$(_qx_node 'process.stdout.write(JSON.stringify({type:process.env.QX_A1}))' "$2")" || return 1
   _qx_require_ref "$1" || return 1
   qapi PATCH "/api/tasks/$1" "$body" >/dev/null
 }
@@ -314,8 +370,8 @@ _qx_task_uuid() {
     echo "quetrex-api: could not read task '$ref'" >&2
     return 1
   }
-  node -e '
-    let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(1); }
+  _qx_node '
+    let o; try { o = JSON.parse(process.env.QX_A1); } catch { process.exit(1); }
     const id = typeof o.id === "string" ? o.id : "";
     if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id)) {
       process.exit(1);
@@ -359,8 +415,8 @@ qx_create_child() {
   # childNumber) would shift `identifier` into `parent_child` and trip the
   # grandchild guard on every single valid parent. \037 is non-whitespace, so
   # every field position is preserved exactly, empty or not.
-  parent_meta="$(node -e '
-    let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(1); }
+  parent_meta="$(_qx_node '
+    let o; try { o = JSON.parse(process.env.QX_A1); } catch { process.exit(1); }
     const id = typeof o.id === "string" ? o.id : "";
     if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(id)) {
       process.exit(2);
@@ -391,8 +447,9 @@ qx_create_child() {
   fi
 
   # parentTaskId is the parent's UUID — never its human identifier.
-  body="$(node -e '
-    const [parentTaskId, projectCode, title, description] = process.argv.slice(1);
+  body="$(_qx_node '
+    const parentTaskId = process.env.QX_A1, projectCode = process.env.QX_A2;
+    const title = process.env.QX_A3, description = process.env.QX_A4;
     const b = { parentTaskId, projectCode, title };
     if (description) { b.description = description; }
     process.stdout.write(JSON.stringify(b));
@@ -402,10 +459,10 @@ qx_create_child() {
 
   # Trust nothing: a 201 proves a task was created, not that it was created as
   # a CHILD. Print the identifier only if the link is really there.
-  node -e '
-    let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(1); }
-    const parentUuid = process.argv[2];
-    const parentRef = process.argv[3];
+  _qx_node '
+    let o; try { o = JSON.parse(process.env.QX_A1); } catch { process.exit(1); }
+    const parentUuid = process.env.QX_A2;
+    const parentRef = process.env.QX_A3;
     const code = o.projectCode || o.code || "";
     const ident = o.identifier
       || (code && o.number != null
@@ -458,7 +515,7 @@ qx_add_dep() {
   fi
 
   # shellcheck disable=SC2016
-  body="$(node -e 'process.stdout.write(JSON.stringify({dependsOnTaskId:process.argv[1]}))' "$dep_uuid")" || return 1
+  body="$(_qx_node 'process.stdout.write(JSON.stringify({dependsOnTaskId:process.env.QX_A1}))' "$dep_uuid")" || return 1
   qapi POST "/api/tasks/$task_uuid/dependencies" "$body" >/dev/null
 }
 
@@ -480,8 +537,8 @@ qx_is_unblocked() {
     echo "quetrex-api is-unblocked: could not read '$ref' — readiness UNDETERMINED (do not dispatch)." >&2
     return 2
   }
-  node -e '
-    let o; try { o = JSON.parse(process.argv[1]); } catch { process.exit(2); }
+  _qx_node '
+    let o; try { o = JSON.parse(process.env.QX_A1); } catch { process.exit(2); }
     if (o == null || typeof o !== "object") { process.exit(2); }
     const DONE = new Set(["merged", "deployed", "complete"]);
     if (typeof o.isBlocked === "boolean") { process.exit(o.isBlocked ? 1 : 0); }
@@ -523,9 +580,9 @@ qx_is_unblocked() {
 #   and the variant is skipped. Later definitions win (mirrors dotenv).
 # shellcheck disable=SC2329,SC2016
 qx_env_scan() {
-  node -e '
+  _qx_node '
     const fs=require("fs"), path=require("path");
-    const dir=process.argv[1];
+    const dir=process.env.QX_A1;
     const NORM={FLY_TOKEN:"FLY_API_TOKEN"};
     const isRelevant=(k)=>
       /(_API_KEY|_SECRET|_TOKEN|_KEY|_PASSWORD|_DSN)$/.test(k)
@@ -579,9 +636,9 @@ qx_env_scan() {
 # shellcheck disable=SC2329
 qx_secret_put_from_env() {
   local body rc
-  body="$(node -e '
+  body="$(_qx_node '
     const fs=require("fs");
-    const [file,raw,canon]=process.argv.slice(1);
+    const file=process.env.QX_A1, raw=process.env.QX_A2, canon=process.env.QX_A3;
     let txt; try { txt=fs.readFileSync(file,"utf8"); } catch { process.exit(1); }
     let val=null;
     for (let line of txt.split(/\r?\n/)) {

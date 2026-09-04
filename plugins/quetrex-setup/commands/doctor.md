@@ -734,15 +734,60 @@ GitHub webhook the board verifies against THIS project's vault entry
 `GITHUB_WEBHOOK_SECRET` (generated and stored by `/quetrex-setup:init` 4i — never typed
 by the operator, never needed by an agent). Four things must all hold: the origin is a
 GitHub repo; that repo carries a hook pointed at the board; the vault lists the name
-(names-only collection GET — never the export endpoint); and the project records its
-`githubRepo`, or the board drops the delivery. Report which is missing; the one writer
-for all four is init:
+(names-only collection GET — never the export endpoint); and the project records BOTH
+halves of the origin slug — `githubOwner` and `githubRepo` — equal to it. The two halves
+fail differently and the report must not blur them: the webhook matches a delivery on
+`githubRepo` alone, so only that half stops cards moving, while `githubOwner` is what
+makes the board render the pair as **linked** (`RepoLink` checks both). Comparison is
+done the way the board itself compares (`branch-ref.ts` trims, lowercases, strips a
+trailing `.git`, then strips trailing slashes — all four, through the one shared
+`quetrex-api repo-norm` that init uses). Because that one helper carries every
+comparison, its result is **checked**: a `repo-norm` missing from `PATH`, exiting
+non-zero, or returning nothing for a non-empty value makes the half read *could not be
+verified* and draws a ✗, never a ✓. Unchecked it would fail silent rather than closed —
+both sides collapse to the empty string, the halves compare equal, and a link pointing at
+another repository passes as green. A board that does not answer is reported as
+*unverified*, never as unset. Init
+writes the missing halves, but it deliberately leaves a **differing** one alone — so a
+mismatch gets the fix that actually resolves it, not another "re-run init".
+
+Both attacker-controllable inputs are refused the same way init refuses them: an origin
+remote spanning more than one line is refused unread (`grep -Eq` matches per *line*, so an
+anchored slug pattern would otherwise pass on any one line and the rest would print inside
+this report), and the `quetrex-api PATCH` one-liner is offered only for a project code the
+board could have issued — three `A-Z` letters plus an optional decimal collision suffix,
+per `quetrex-kanban src/lib/code.ts` — the check `resolve_project` enforces, asked here
+through `quetrex-api code-ok` rather than re-implemented. Anything else gets the dialog and
+no command. Every rendered value is stripped of control characters whatever its source.
 
 ```bash
+# Two inputs to this check are attacker-controllable in a cloned repo.
+# (1) `remote.origin.url` can carry an embedded NEWLINE (git config accepts a \n
+#     escape) and `grep -Eq` matches per LINE, so an anchored pattern succeeds on
+#     ANY one line while the remaining lines flow into what this check prints.
+#     Refuse a multi-line origin outright; truncating to line 1 would just hand
+#     the attacker the owner/repo halves.
+# (2) the project code is read out of ./.quetrex/project.json, which nothing
+#     validates, and the mismatch Fix interpolates it into a `quetrex-api PATCH`
+#     one-liner the operator is invited to paste. Offer that command ONLY for a
+#     code shaped the way the BOARD mints one. `quetrex-api code-ok` is the
+#     single definition of that shape and resolve_project already enforces it,
+#     so this check asks rather than carrying its own copy of the pattern.
+#     Otherwise name the board dialog and offer nothing runnable.
+# Every value this check renders is stripped of control characters whatever its
+# source — an ESC byte rewrites this report. LC_ALL=C so `tr` deletes bytes
+# 0x00-0x1F and 0x7F and leaves UTF-8 intact.
+qx_ctl() { printf '%s' "$1" | LC_ALL=C tr -d '[:cntrl:]'; }
 QX_ORIGIN="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null)"
-QX_SLUG="$(printf '%s' "$QX_ORIGIN" | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##')"
+QX_ORIGIN_MULTILINE=""
+if [ "$(printf '%s' "$QX_ORIGIN" | wc -l | tr -d ' ')" != 0 ]; then
+  QX_ORIGIN_MULTILINE=1
+  QX_ORIGIN=""
+fi
+QX_SLUG="$(printf '%s' "$QX_ORIGIN" | sed -E 's#^(git@github\.com:|(https?|ssh|git)://(git@)?github\.com/)##; s#/+$##; s#\.git$##; s#/+$##')"
 if ! printf '%s' "$QX_SLUG" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
   echo "✗ Webhook registered — origin is not a GitHub repo, so no hook can move cards to pr_ready."
+  [ -z "$QX_ORIGIN_MULTILINE" ] || echo "    remote.origin.url spans more than one line — refused unread, and nothing from it is shown here."
   echo "    Fix: add a GitHub origin remote, then re-run /quetrex-setup:init"
 elif ! command -v gh >/dev/null 2>&1; then
   echo "✗ Webhook registered — gh CLI not installed, so the hook on $QX_SLUG could not be checked."
@@ -755,10 +800,19 @@ elif ! KANBAN="$(quetrex-api kanban-url 2>/dev/null)" || [ -z "$KANBAN" ]; then
   echo "    Fix: run /quetrex-setup:login, then re-run /quetrex-setup:init"
 else
   HOOK_URL="${KANBAN%/}/api/webhooks/github"
-  WH_MISSING=""
+  CODE_SHOWN="$(qx_ctl "$CODE")"   # never render the raw binding value
+  WH_MISSING=""    # every unmet condition, each named on its own
+  WH_MOVE=""       # something here stops cards auto-moving to pr_ready
+  WH_DISPLAY=""    # something here only changes what the board DISPLAYS
+  WH_INIT=""       # something here is a thing init will actually write
+  WH_MISMATCH=""   # a stored half DIFFERS — init leaves those alone by design
+  WH_UNREAD=""     # the board did not answer; the link state is UNKNOWN
+  WH_NOCOMPARE=""  # repo-norm gave no value; the halves could not be COMPARED
   # (b) a hook on the repo whose config.url is the board's endpoint
   HOOK_ID="$(gh api "repos/$QX_SLUG/hooks" --jq '.[] | select(.config.url=="'"$HOOK_URL"'") | .id' 2>/dev/null | head -1)"
-  [ -n "$HOOK_ID" ] || WH_MISSING="$WH_MISSING GitHub hook on $QX_SLUG -> $HOOK_URL;"
+  if [ -z "$HOOK_ID" ]; then
+    WH_MISSING="$WH_MISSING GitHub hook on $QX_SLUG -> $HOOK_URL;"; WH_MOVE=1; WH_INIT=1
+  fi
   # (c) the vault lists the NAME — masked collection GET, never a value
   if ! quetrex-api GET "/api/projects/$CODE/secrets" 2>/dev/null | node -e '
     let d=""; process.stdin.on("data",c=>{d+=c;}).on("end",()=>{
@@ -766,20 +820,103 @@ else
       const list = Array.isArray(a) ? a : (Array.isArray(a.secrets) ? a.secrets : Object.keys(a).map(k=>({name:k})));
       process.exit(list.some(x=>(typeof x==="string"?x:(x&&(x.name||x.key||x.id)))==="GITHUB_WEBHOOK_SECRET") ? 0 : 1);
     });' 2>/dev/null; then
-    WH_MISSING="$WH_MISSING GITHUB_WEBHOOK_SECRET in project $CODE's vault;"
+    WH_MISSING="$WH_MISSING GITHUB_WEBHOOK_SECRET in project $CODE_SHOWN's vault;"; WH_MOVE=1; WH_INIT=1
   fi
-  # (d) the project records its repo, or the board refuses the delivery
-  LINKED_REPO="$(quetrex-api GET "/api/projects/$CODE" 2>/dev/null | node -e '
+  # (d) the project records BOTH halves of the origin slug. They do DIFFERENT
+  # jobs: the webhook matches a delivery on githubRepo alone, so only that half
+  # gates card movement; githubOwner is what makes the board render the pair as
+  # linked. Report each with its own consequence, never one blanket claim.
+  # A board OUTAGE is not an unset field — take the GET's exit status and prove
+  # the body is a JSON object, or say the link could not be read and assert
+  # nothing about it.
+  LINKED_JSON="$(quetrex-api GET "/api/projects/$CODE" 2>/dev/null)"; LINKED_RC=$?
+  linked_field() { printf '%s' "$LINKED_JSON" | node -e '
     let d=""; process.stdin.on("data",c=>{d+=c;}).on("end",()=>{
       let p; try { p=JSON.parse(d); } catch { process.exit(0); }
-      process.stdout.write(String((p && p.githubRepo) || ""));
-    });' 2>/dev/null)"
-  [ -n "$LINKED_REPO" ] || WH_MISSING="$WH_MISSING project $CODE githubRepo;"
-  if [ -z "$WH_MISSING" ]; then
-    echo "✓ Webhook registered — $QX_SLUG hook $HOOK_ID -> $HOOK_URL, GITHUB_WEBHOOK_SECRET in project $CODE's vault, project linked to $LINKED_REPO."
+      process.stdout.write(String((p && p[process.argv[1]]) || ""));
+    });' "$1" 2>/dev/null; }
+  # Compare the way the BOARD compares (branch-ref.ts repoMatchesProject): trim,
+  # lowercase, strip a trailing `.git`, then strip trailing slashes. Lowercasing
+  # alone was only one of the four, so a stored `dealerq.git` against origin
+  # `dealerq` drew a cross here and a fix line that resolved nothing — the board
+  # had considered them the same repo all along. `quetrex-api repo-norm` holds
+  # that shape once and init uses the identical call, so the two cannot drift.
+  # qx_norm <value> — the shared normalization behind a contract: PRINT a
+  # value and return 0, or return NON-ZERO having asserted nothing. Every
+  # comparison below is an equality test between two normalized values, so a
+  # helper that quietly hands back "" for both sides makes a link pointing at
+  # a DIFFERENT repository compare EQUAL: no PATCH, but no warning either, and
+  # the operator is told nothing at all. All three failure shapes are failures
+  # and never a value — a non-zero exit, quetrex-api missing from PATH (127),
+  # and an empty or whitespace-only result from a NON-EMPTY input. An empty
+  # input normalizing to empty is legitimate and stays a success, so "unset on
+  # the board" is still distinguishable from "could not be normalized".
+  # This wrapper is byte-identical in init.md's qx_link_project_repo block;
+  # both files call it rather than the bare helper, so a call site cannot
+  # forget the check.
+  qx_norm() {
+    local _qn_in="$1" _qn_out
+    _qn_out="$(quetrex-api repo-norm "$_qn_in" 2>/dev/null)" || return 1
+    [ -z "$_qn_in" ] || [ -n "$(printf '%s' "$_qn_out" | LC_ALL=C tr -d '[:space:]')" ] || return 1
+    printf '%s' "$_qn_out"
+  }
+  SLUG_OWNER="${QX_SLUG%%/*}"; SLUG_REPO="${QX_SLUG##*/}"
+  LINKED_OWNER=""; LINKED_REPO=""
+  if [ "$LINKED_RC" -ne 0 ] || ! printf '%s' "$LINKED_JSON" | node -e '
+    let d=""; process.stdin.on("data",c=>{d+=c;}).on("end",()=>{
+      let p; try { p=JSON.parse(d); } catch { process.exit(1); }
+      process.exit(p && typeof p === "object" && !Array.isArray(p) ? 0 : 1);
+    });' 2>/dev/null; then
+    WH_MISSING="$WH_MISSING project $CODE_SHOWN's repo link (could not read project $CODE_SHOWN from the board — unverified);"
+    WH_UNREAD=1
   else
-    echo "✗ Webhook registered — missing:$WH_MISSING cards will not auto-move to pr_ready."
-    echo "    Fix: re-run /quetrex-setup:init"
+    LINKED_OWNER="$(linked_field githubOwner)"; LINKED_REPO="$(linked_field githubRepo)"
+    # Each comparison takes qx_norm's EXIT STATUS. A normalization that fails
+    # is not a match: unchecked, both sides collapse to "" and the half reads
+    # EQUAL, which is a silent ✓ over a link that may point somewhere else.
+    # WH_NOCOMPARE keeps this out of WH_MISMATCH deliberately — no mismatch was
+    # established, so no PATCH one-liner is offered, and out of WH_MOVE/
+    # WH_DISPLAY, whose consequences were never demonstrated either. It still
+    # lands in WH_MISSING, so the check prints ✗, never ✓.
+    if [ -z "$LINKED_OWNER" ]; then
+      WH_MISSING="$WH_MISSING project $CODE_SHOWN githubOwner (unset; origin is $SLUG_OWNER);"; WH_DISPLAY=1; WH_INIT=1
+    elif ! NORM_LINKED_OWNER="$(qx_norm "$LINKED_OWNER")" || ! NORM_SLUG_OWNER="$(qx_norm "$SLUG_OWNER")"; then
+      WH_MISSING="$WH_MISSING project $CODE_SHOWN githubOwner (could not be verified — repo-norm returned no value);"; WH_NOCOMPARE=1
+    elif [ "$NORM_LINKED_OWNER" != "$NORM_SLUG_OWNER" ]; then
+      WH_MISSING="$WH_MISSING project $CODE_SHOWN githubOwner (is $(qx_ctl "$LINKED_OWNER"), origin is $SLUG_OWNER);"; WH_DISPLAY=1; WH_MISMATCH=1
+    fi
+    if [ -z "$LINKED_REPO" ]; then
+      WH_MISSING="$WH_MISSING project $CODE_SHOWN githubRepo (unset; origin is $SLUG_REPO);"; WH_MOVE=1; WH_DISPLAY=1; WH_INIT=1
+    elif ! NORM_LINKED_REPO="$(qx_norm "$LINKED_REPO")" || ! NORM_SLUG_REPO="$(qx_norm "$SLUG_REPO")"; then
+      WH_MISSING="$WH_MISSING project $CODE_SHOWN githubRepo (could not be verified — repo-norm returned no value);"; WH_NOCOMPARE=1
+    elif [ "$NORM_LINKED_REPO" != "$NORM_SLUG_REPO" ]; then
+      WH_MISSING="$WH_MISSING project $CODE_SHOWN githubRepo (is $(qx_ctl "$LINKED_REPO"), origin is $SLUG_REPO);"; WH_MOVE=1; WH_DISPLAY=1; WH_MISMATCH=1
+    fi
+  fi
+  if [ -z "$WH_MISSING" ]; then
+    echo "✓ Webhook registered — $QX_SLUG hook $HOOK_ID -> $HOOK_URL, GITHUB_WEBHOOK_SECRET in project $CODE_SHOWN's vault, project linked to $(qx_ctl "$LINKED_OWNER")/$(qx_ctl "$LINKED_REPO") — board shows the repository as linked."
+  else
+    echo "✗ Webhook registered — missing:$WH_MISSING"
+    [ -z "$WH_MOVE" ]    || echo "    Cards will not auto-move to pr_ready."
+    [ -z "$WH_DISPLAY" ] || echo "    The board will show the repository as not linked."
+    if [ -n "$WH_UNREAD" ]; then
+      echo "    Fix: the board did not answer for project $CODE_SHOWN — check it is reachable and the login is current (/quetrex-setup:login), then re-run /quetrex-setup:doctor."
+    fi
+    if [ -n "$WH_NOCOMPARE" ]; then
+      echo "    Fix: the stored halves could not be compared with the origin — 'quetrex-api repo-norm' returned no value (missing from PATH, or failing), so this check asserts nothing about the link. Check quetrex-api runs (quetrex-api repo-norm dealerq), then re-run /quetrex-setup:doctor."
+    fi
+    if [ -n "$WH_MISMATCH" ]; then
+      echo "    Fix: init never overwrites a differing repo link, so re-running it changes nothing here. Set the pair on the board's repo-link dialog, or as a project admin run:"
+      if quetrex-api code-ok "$CODE"; then
+        echo "         quetrex-api PATCH \"/api/projects/$CODE\" '{\"githubOwner\":\"$SLUG_OWNER\",\"githubRepo\":\"$SLUG_REPO\"}'"
+        echo "         (admin-gated: a plain member gets \"No access — contact your administrator\" and must ask an admin to change it.)"
+      else
+        echo "         (no command is offered: this repo's .quetrex/project.json holds a project code the board could not have issued. Fix the binding with /quetrex-setup:init, then use the dialog.)"
+      fi
+    fi
+    if [ -n "$WH_INIT" ]; then
+      echo "    Fix: re-run /quetrex-setup:init"
+    fi
   fi
 fi
 ```
