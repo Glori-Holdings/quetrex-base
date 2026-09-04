@@ -54,7 +54,9 @@ architect → developer(s) → QA → reviewer → git-workflow
 
 A task build (`/quetrex:task-build`, `/quetrex:task-rework`) executes on Anthropic's cloud
 via `RemoteTrigger` by default; `/quetrex:task-build <TASK> local` runs the same pipeline on
-this machine, and only that typed argument ever selects it. Local execution of a task build
+this machine, and only that typed argument ever selects it. A local build forks from the same
+approved base sha, publishes the same `<prefix><TASK>-gates-<sha7>` evidence branch, and ends
+the same way: an open PR that `/quetrex:merge <TASK>` merges. Local execution of a task build
 without the literal `local` argument is a violation, never a fallback: when no cloud
 environment is bound, the environment binding is the fix, and the command stops.
 

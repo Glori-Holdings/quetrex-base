@@ -31,10 +31,16 @@
 #       never inferred — and the qx_parse_args exec block, driven under bash
 #       AND zsh, defaults to cloud, honours the typed word, and rejects any
 #       other location with one line,
-#   (i) task-rework.md cross-references the same stop rule.
+#   (i) task-rework.md cross-references the same stop rule,
+#   (j) the typed `local` path does not dead-end: Step 6L forks from the
+#       pinned approved base and publishes the SAME gates branch the cloud
+#       routine does (qx_publish_gates, executed against a bare remote under
+#       bash AND zsh), and Step 7 has a local branch ending in /quetrex:merge,
+#   (k) `local` + epic is refused at Step 1b in every mode (executed),
+#   (l) the publication logic exists in ONE copy (cloud-build-routine.md).
 # Fail-first: (a),(b),(c),(e),(f),(g),(h) are proven ABSENT from the pre-fix
-# baseline 85ec69c (a literal sha, never `main`) before the shipped text is
-# checked.
+# baseline 85ec69c, and (j),(k) from the pre-rework head 31d6489 (literal
+# shas, never `main`) before the shipped text is checked.
 
 set -uo pipefail
 
@@ -290,6 +296,273 @@ present "(e) SKILL.md: the binding is the fix"                           "$SKILL
 present "(e) SKILL.md command map names the run location"                "$SKILL"  "[cloud\\|local]"
 present "(i) task-rework.md carries the same stop line"                  "$REWORK" "Build not dispatched: no cloud environment is bound to this repo"
 present "(i) task-rework.md: if this fails, the command is over"         "$REWORK" "$OVER"
+
+# --------------------------------------------------------------------------
+# (j)–(l): REWORK of PR #145 — the local path must not dead-end at the merge.
+#   (j) Step 6L forks from the payload's pinned approved base (same pin and
+#       the same `quetrex-cloud-prep sync` as the cloud routine's step 2b) and
+#       publishes the SAME gates branch the routine publishes at its step 5b,
+#       via the qx_publish_gates exec block — EXECUTED here under bash and zsh
+#       against a real bare remote; and Step 7 has a local branch that names
+#       /quetrex:merge, no monitor URL, and no "needs no session" contradiction.
+#   (k) qx_reject_local_epic refuses `local` for an epic at Step 1b — in every
+#       mode, before the plan half — EXECUTED under bash and zsh.
+#   (l) ONE COPY: the publication block exists exactly once, between the
+#       sentinels in cloud-build-routine.md; task-build.md calls it by name and
+#       carries no second GATES_BRANCH= assignment.
+# Fail-first: every phrase is proven ABSENT from 31d6489, the pre-rework head
+# of PR #145 (a literal sha, never `main`).
+# --------------------------------------------------------------------------
+LOCAL_S7="**Single unit, \`local\` (Step 6L).**"
+NO_CONTRADICTION="neither cloud dispatch needs this session"
+RW_SHA="31d6489"
+if git -C "$REPO_ROOT" cat-file -e "$RW_SHA^{commit}" 2>/dev/null || { git -C "$REPO_ROOT" fetch --quiet --depth=1 origin "$RW_SHA" 2>/dev/null && git -C "$REPO_ROOT" cat-file -e "$RW_SHA^{commit}" 2>/dev/null; }; then
+  RW_TB="$WORK/rework-base-task-build.md"; git -C "$REPO_ROOT" show "$RW_SHA:.claude/commands/task-build.md" > "$RW_TB"
+  if [ -s "$RW_TB" ]; then
+    pass "FAIL-FIRST (j-l): rework baseline $RW_SHA task-build.md extracted"
+    absent "(j) 6L publishes the gates"     "$RW_TB" "quetrex:exec-block qx_publish_gates"
+    absent "(j) 6L runs the routine's block" "$RW_TB" "QUETREX GATE PUBLICATION"
+    absent "(j) Step 7 local branch"        "$RW_TB" "$LOCAL_S7"
+    absent "(j) Step 7 contradiction fixed" "$RW_TB" "$NO_CONTRADICTION"
+    absent "(k) parse-time epic guard"      "$RW_TB" "quetrex:exec-block qx_reject_local_epic"
+  else
+    fail "FAIL-FIRST (j-l): baseline task-build.md came back empty from git show $RW_SHA"
+  fi
+else
+  fail "FAIL-FIRST (j-l): rework baseline $RW_SHA is not reachable even after a depth-1 fetch — refusing to report a pass having compared against nothing"
+fi
+
+# (j) Step 6L text — scoped to the 6L section, not the whole file.
+L_6L="$(grep -n '^### L) Single unit' "$COMMAND" | head -1 | cut -d: -f1)"
+L_6A="$(grep -n '^### A) Single unit' "$COMMAND" | head -1 | cut -d: -f1)"
+if [ -n "$L_6L" ] && [ -n "$L_6A" ] && [ "$L_6L" -lt "$L_6A" ]; then
+  SEC6L="$WORK/6L.md"; sed -n "${L_6L},${L_6A}p" "$COMMAND" > "$SEC6L"
+  present "(j) 6L pins the approved base with the 6A function"        "$SEC6L" 'APPROVED_BASE_SHA="$(qx_approved_base_sha "$PAYLOAD"'
+  present "(j) 6L creates a re-made worktree AT the approved sha"      "$SEC6L" 'worktree add --detach --quiet "$WT" "$APPROVED_BASE_SHA"'
+  present "(j) 6L syncs like the routine's step 2b"                    "$SEC6L" 'quetrex-cloud-prep sync "$BASE_BRANCH" "$APPROVED_BASE_SHA" "$UNIT_BRANCH" --repo "$WT"'
+  present "(j) 6L stops before the engine's teardown"                  "$SEC6L" "stop before step 10's teardown"
+  present "(j) 6L names the routine's sentinel block"                  "$SEC6L" "# >>> QUETREX GATE PUBLICATION >>>"
+  present "(j) 6L calls qx_publish_gates from the unit worktree"       "$SEC6L" 'qx_publish_gates "$WT" "$TASK_ID" "$BRANCH_PREFIX" || exit 1'
+  present "(j) 6L still hands off to Step 7"                           "$SEC6L" "Then go to **Step 7**"
+else
+  fail "(j) could not locate Step 6L..6A in task-build.md (6L=${L_6L:-?} 6A=${L_6A:-?})"
+fi
+
+# (j) Step 7 — a local branch, and the cloud-only claims no longer unconditional.
+L_S7="$(grep -n '^## Step 7' "$COMMAND" | head -1 | cut -d: -f1)"
+L_S8="$(awk -v s="${L_S7:-0}" 'NR>s && /^## /{print NR; exit}' "$COMMAND")"
+if [ -n "$L_S7" ] && [ -n "$L_S8" ] && [ "$L_S7" -lt "$L_S8" ]; then
+  SEC7="$WORK/step7.md"; sed -n "${L_S7},${L_S8}p" "$COMMAND" > "$SEC7"
+  present "(j) Step 7 has a local branch"                              "$SEC7" "$LOCAL_S7"
+  present "(j) Step 7: only the CLOUD dispatches need no live session"  "$SEC7" "$NO_CONTRADICTION"
+  if grep -qF "neither one needs this session to stay alive" "$SEC7"; then
+    fail "(j) Step 7 still asserts unconditionally that no run needs this session — contradicts 6L"
+  else
+    pass "(j) Step 7 no longer contradicts 6L's session-must-stay-alive"
+  fi
+  L_LOC="$(grep -nF "$LOCAL_S7" "$SEC7" | head -1 | cut -d: -f1)"
+  L_CLD="$(grep -nF '**Single unit, cloud.**' "$SEC7" | head -1 | cut -d: -f1)"
+  if [ -n "$L_LOC" ] && [ -n "$L_CLD" ] && [ "$L_LOC" -lt "$L_CLD" ]; then
+    LOCPARA="$WORK/step7-local.md"; sed -n "${L_LOC},$((L_CLD-1))p" "$SEC7" > "$LOCPARA"
+    present "(j) Step 7 local branch names /quetrex:merge <TASK-ID>"    "$LOCPARA" '/quetrex:merge <TASK-ID>'
+    present "(j) Step 7 local branch names the gates branch shape"       "$LOCPARA" '<prefix><TASK>-gates-<sha7>'
+    present "(j) Step 7 local branch reports the worktree path"          "$LOCPARA" 'worktree path'
+    present "(j) Step 7 local branch reports the PR URL"                 "$LOCPARA" 'PR URL'
+    present "(j) Step 7 local branch says the session had to stay alive" "$LOCPARA" 'session had to stay alive'
+    if grep -qF 'claude.ai/code/routines' "$LOCPARA"; then
+      fail "(j) Step 7's local branch still points at a routine monitor URL a local run never has"
+    else
+      pass "(j) Step 7's local branch reports no monitor URL"
+    fi
+  else
+    fail "(j) Step 7: local branch (${L_LOC:-?}) must come before the cloud branch (${L_CLD:-?})"
+  fi
+else
+  fail "(j) could not locate Step 7 in task-build.md (7=${L_S7:-?} next=${L_S8:-?})"
+fi
+
+# (j) EXECUTED: qx_publish_gates against a real bare remote, under bash and zsh.
+PUB="$WORK/qx_publish_gates.sh"
+extract_block qx_publish_gates > "$PUB"
+if [ -s "$PUB" ] && grep -q '^qx_publish_gates()' "$PUB"; then
+  pass "(j) extracted the qx_publish_gates exec block ($(wc -l < "$PUB" | tr -d ' ') lines)"
+else
+  fail "(j) task-build.md has no executable qx_publish_gates block — the local merge path is prose only"
+fi
+gates_fixture() {   # gates_fixture <name> <task> [no-plan] -> echoes the clone path
+  local bare="$WORK/$1.git" work="$WORK/$1"
+  git init -q --bare "$bare"
+  git init -q -b main "$work"
+  git -C "$work" config user.email t@example.com
+  git -C "$work" config user.name  Tester
+  printf '.quetrex/\n' > "$work/.gitignore"
+  printf 'console.log(1);\n' > "$work/build.js"
+  git -C "$work" add -A && git -C "$work" commit -q -m "seed"
+  git -C "$work" remote add origin "$bare" && git -C "$work" push -q origin main
+  git -C "$work" checkout -q -b "claude/$2-unit"
+  mkdir -p "$work/.quetrex/plan"
+  printf '{"verdict":"AUTO_MERGE"}\n'    > "$work/.quetrex/review-verdict.json"
+  printf '{"cmd":"npm test","exit":0}\n' > "$work/.quetrex/verify-ledger.jsonl"
+  printf '{"task":"%s","review_iter":0}\n' "$2" > "$work/.quetrex/state.json"
+  [ "${3:-}" = "no-plan" ] || printf '{"task":"%s","ownership":{"build.js":"ws1"}}\n' "$2" > "$work/.quetrex/plan/$2.json"
+  echo "$work"
+}
+# drive_publish <shell> <wt> <task> — the SAME bytes the model is told to run,
+# with the routine located the way the shipped block locates it (bin/ on PATH).
+drive_publish() {
+  PATH="$REPO_ROOT/bin:$PATH" "$1" -c '. "$1"; qx_publish_gates "$2" "$3" "claude/"' _ "$PUB" "$2" "$3"
+}
+for sh in bash zsh; do
+  if ! command -v "$sh" >/dev/null 2>&1; then pass "(j) $sh not present, skipped"; continue; fi
+  T="QXL${$}${sh}"; rm -f "/tmp/plan-$T.json"
+  WTX="$(gates_fixture "pub-$sh" "$T")"
+  HEADX="$(git -C "$WTX" rev-parse HEAD)"
+  OUT="$(drive_publish "$sh" "$WTX" "$T" 2>&1)"; RC=$?
+  REF="$(git -C "$WORK/pub-$sh.git" for-each-ref --format='%(refname:short)' "refs/heads/claude/$T-gates-*" | head -1)"
+  if [ "$RC" -eq 0 ] && [ -n "$REF" ]; then
+    pass "(j) $sh: qx_publish_gates exits 0 and origin now has $REF"
+  else
+    fail "(j) $sh: qx_publish_gates rc=$RC gates-ref='${REF:-none}' out=[$OUT]"
+  fi
+  GH="$(git -C "$WORK/pub-$sh.git" show "$REF:.quetrex/gates-head" 2>/dev/null | tr -d '[:space:]')"
+  if [ -n "$REF" ] && [ "$GH" = "$HEADX" ]; then
+    pass "(j) $sh: the published gates-head IS the unit head (${HEADX:0:12}) — /quetrex:merge selects it by content"
+  else
+    fail "(j) $sh: gates-head on $REF is '${GH:-missing}', unit head is $HEADX"
+  fi
+  for f in review-verdict.json verify-ledger.jsonl state.json "plan/$T.json"; do
+    if [ -n "$REF" ] && git -C "$WORK/pub-$sh.git" show "$REF:.quetrex/$f" >/dev/null 2>&1; then
+      pass "(j) $sh: .quetrex/$f rode the gates branch home"
+    else
+      fail "(j) $sh: .quetrex/$f is NOT on the gates branch — the merge gate would read it as missing"
+    fi
+  done
+  # Negative: a required artifact missing must FAIL the wrapper and push nothing.
+  T2="${T}x"; rm -f "/tmp/plan-$T2.json"
+  WTN="$(gates_fixture "nopub-$sh" "$T2" no-plan)"
+  OUT="$(drive_publish "$sh" "$WTN" "$T2" 2>&1)"; RC=$?
+  REFN="$(git -C "$WORK/nopub-$sh.git" for-each-ref --format='%(refname:short)' "refs/heads/claude/$T2-gates-*" | head -1)"
+  if [ "$RC" -ne 0 ] && [ -z "$REFN" ] && printf '%s' "$OUT" | grep -q 'transport_failure'; then
+    pass "(j) $sh: with the plan missing the wrapper fails (rc=$RC), names transport_failure, and pushes nothing"
+  else
+    fail "(j) $sh: missing plan → rc=$RC ref='${REFN:-none}' out=[$OUT] — a swallowed failure would publish incomplete evidence"
+  fi
+done
+
+# (k) EXECUTED: qx_reject_local_epic under bash and zsh, and it sits in Step 1
+# (before Step 2), where every mode passes through.
+EPIC_LINE="local builds a single unit; an epic's children are always cloud routines — re-run without local."
+REJ="$WORK/qx_reject_local_epic.sh"
+extract_block qx_reject_local_epic > "$REJ"
+if [ -s "$REJ" ] && grep -q '^qx_reject_local_epic()' "$REJ"; then
+  pass "(k) extracted the qx_reject_local_epic exec block ($(wc -l < "$REJ" | tr -d ' ') lines)"
+else
+  fail "(k) task-build.md has no executable qx_reject_local_epic block — the epic guard is prose only"
+fi
+L_REJ="$(grep -nF 'qx_reject_local_epic "$KIND" "$RUN_WHERE" || exit 1' "$COMMAND" | head -1 | cut -d: -f1)"
+L_S2="$(grep -n '^## Step 2' "$COMMAND" | head -1 | cut -d: -f1)"
+if [ -n "$L_REJ" ] && [ -n "$L_S2" ] && [ "$L_REJ" -lt "$L_S2" ]; then
+  pass "(k) the guard call sits in Step 1 (line $L_REJ < Step 2 @ $L_S2) — every mode passes through it"
+else
+  fail "(k) the guard call is not in Step 1 (call=${L_REJ:-?} step2=${L_S2:-?})"
+fi
+reject() { "$1" -c '. "$1"; qx_reject_local_epic "$2" "$3"' _ "$REJ" "$2" "$3"; }
+for sh in bash zsh; do
+  if ! command -v "$sh" >/dev/null 2>&1; then pass "(k) $sh not present, skipped"; continue; fi
+  OUT="$(reject "$sh" epic local 2>&1)"; RC=$?
+  if [ "$RC" -ne 0 ] && [ "$OUT" = "$EPIC_LINE" ]; then
+    pass "(k) $sh: epic + local → rejected with exactly the one line"
+  else
+    fail "(k) $sh: epic + local → rc=$RC out=[$OUT]"
+  fi
+  for pair in "single local" "epic cloud" "single cloud"; do
+    # shellcheck disable=SC2086
+    OUT="$(reject "$sh" $pair 2>&1)"; RC=$?
+    [ "$RC" -eq 0 ] && [ -z "$OUT" ] && pass "(k) $sh: $pair → allowed, silent" || fail "(k) $sh: $pair → rc=$RC out=[$OUT]"
+  done
+done
+
+# (l) ONE COPY of the publication logic.
+N_SENT="$(git -C "$REPO_ROOT" grep -l -E '^[[:space:]]*# >>> QUETREX GATE PUBLICATION >>>[[:space:]]*$' -- . 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$N_SENT" = "1" ] && git -C "$REPO_ROOT" grep -q -E '^[[:space:]]*# >>> QUETREX GATE PUBLICATION >>>[[:space:]]*$' -- .claude/lib/cloud-build-routine.md; then
+  pass "(l) exactly one tracked file carries the publication block, and it is cloud-build-routine.md"
+else
+  fail "(l) the publication block's start sentinel is in $N_SENT tracked file(s) — must be exactly one (cloud-build-routine.md)"
+fi
+if grep -qE '^[[:space:]]*GATES_BRANCH=' "$COMMAND"; then
+  fail "(l) task-build.md assigns GATES_BRANCH= itself — a second copy of the publication logic"
+else
+  pass "(l) task-build.md carries no GATES_BRANCH= assignment — it runs the routine's block, it does not restate it"
+fi
+present "(l) task-build.md names the routine's block by its sentinel"       "$COMMAND" "QUETREX GATE PUBLICATION" 3
+present "(l) task-build.md says the extracted bytes are routine-transport-tested" "$COMMAND" "test/routine-transport.test.sh"
+present "(l) the doctrine skill says a local build publishes the same gates branch" "$SKILL" '<prefix><TASK>-gates-<sha7>'
+
+# (m) Security runs BEFORE the reviewer. Measured 2026-09-03 on a local run:
+# the reviewer ran first, found no security-findings.json, and wrote
+# ESCALATE_HUMAN mechanically. Both the engine and 6L must state the order.
+ORDER_LINE="qa → security-reviewer (when required) → reviewer → git-workflow"
+NOT_UNTIL="must not run until"
+present "(m) dev-pipeline.md states the stage order"                    "$REPO_ROOT/.claude/lib/dev-pipeline.md" "$ORDER_LINE"
+present "(m) dev-pipeline.md: reviewer waits for the security artifact" "$REPO_ROOT/.claude/lib/dev-pipeline.md" "$NOT_UNTIL"
+if [ -n "${SEC6L:-}" ] && [ -f "$SEC6L" ]; then
+  present "(m) Step 6L states the same stage order"                     "$SEC6L" "$ORDER_LINE"
+  present "(m) Step 6L: reviewer waits for security-findings.json"      "$SEC6L" "$NOT_UNTIL"
+fi
+
+# (n) A merge is NEVER automated (operator ruling 2026-09-03). Step 7 — both
+# the cloud and the local branch — and the closing bullets end on the single
+# next step; no AskUserQuestion about merging, no `gh pr merge`.
+NEXT_STEP='run /quetrex:merge <TASK-ID> when you are ready'
+NEVER_AUTO="The merge is never automated"
+if [ -n "${SEC7:-}" ] && [ -f "$SEC7" ]; then
+  present "(n) Step 7: the merge is never automated"                     "$SEC7" "$NEVER_AUTO"
+  present "(n) Step 7: the single next step, local + cloud + the rule"   "$SEC7" "$NEXT_STEP" 3
+  present "(n) Step 7 names /quetrex:merge <TASK-ID>"                     "$SEC7" '/quetrex:merge <TASK-ID>' 3
+  present "(n) Step 7: an earlier yes is not merge authorization"        "$SEC7" "merge authorization"
+fi
+L_RULES="$(grep -n '^## Error-handling rules' "$COMMAND" | head -1 | cut -d: -f1)"
+if [ -n "$L_RULES" ]; then
+  RULES="$WORK/rules.md"; sed -n "${L_RULES},\$p" "$COMMAND" > "$RULES"
+  present "(n) closing bullets: a merge is never automated"              "$RULES" "A merge is never automated"
+  present "(n) closing bullets carry the single next step"               "$RULES" "$NEXT_STEP"
+else
+  fail "(n) could not locate the Error-handling rules section"
+fi
+# Every AskUserQuestion mention in task-build.md must be a PROHIBITION about
+# merging (a `never` on the same line), never an instruction — and none may
+# sit inside a fenced block, where it would be an invocation.
+N_ASK="$(grep -c 'AskUserQuestion' "$COMMAND" || true)"
+BAD_ASK="$(grep -n 'AskUserQuestion' "$COMMAND" | grep -v -i 'never' || true)"
+if [ "$N_ASK" -gt 0 ] && [ -z "$BAD_ASK" ]; then
+  pass "(n) all $N_ASK AskUserQuestion mention(s) are prohibitions (each line says never)"
+else
+  fail "(n) an AskUserQuestion mention is not a prohibition: ${BAD_ASK:-none found at all (need the rule, x$N_ASK)}"
+fi
+FENCED_ASK="$(awk '/^```/{inf=!inf; next} inf && /AskUserQuestion/{print NR": "$0}' "$COMMAND")"
+if [ -z "$FENCED_ASK" ]; then
+  pass "(n) no fenced block in task-build.md invokes AskUserQuestion"
+else
+  fail "(n) AskUserQuestion inside a fenced block (an invocation, not a rule): $FENCED_ASK"
+fi
+for L in $(grep -n 'AskUserQuestion' "$COMMAND" | cut -d: -f1); do
+  CTX="$(sed -n "$((L>3?L-3:1)),$((L+3))p" "$COMMAND" | tr '\n' ' ')"
+  case "$CTX" in
+    *merge*) printf '%s' "$CTX" | grep -q -i 'never' && pass "(n) AskUserQuestion@$L: merge context is a never-rule" || fail "(n) AskUserQuestion@$L asks about merging: $CTX" ;;
+    *) pass "(n) AskUserQuestion@$L: not about merging" ;;
+  esac
+done
+BAD_GH="$(grep -n 'gh pr merge' "$COMMAND" | grep -v -i 'never' || true)"
+if [ -z "$BAD_GH" ]; then
+  pass "(n) task-build.md never runs gh pr merge (every mention is a prohibition)"
+else
+  fail "(n) task-build.md runs or instructs gh pr merge: $BAD_GH"
+fi
+if grep -q -i 'merge it?' "$COMMAND" && [ -n "$(grep -n -i 'merge it?' "$COMMAND" | grep -v -i 'never')" ]; then
+  fail "(n) task-build.md asks \"merge it?\" outside a prohibition"
+else
+  pass "(n) task-build.md never asks \"merge it?\""
+fi
 
 echo
 if [ "$FAIL" -eq 0 ]; then

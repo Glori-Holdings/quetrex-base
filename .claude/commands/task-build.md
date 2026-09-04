@@ -215,7 +215,24 @@ KIND="$(node -e '
           : Array.isArray(o.childTasks) ? o.childTasks.length : 0;
   process.stdout.write(((o.type==="project"||o.type==="epic") && n>0) ? "epic" : "single");
 ' "$TASK")" || exit 1
-echo "Task $TASK_ID: status=$STATUS kind=$KIND mode=$MODE"
+
+# ── quetrex:exec-block qx_reject_local_epic ────────────────────────────────────
+# Executable, and executed: test/task-build-never-local.test.sh drives this
+# under bash AND zsh. `local` builds ONE unit; an epic's children are always
+# cloud routines (Step 6B). The pair is refused HERE, at parse time, in EVERY
+# mode — --build-only and --tick never reach Step 4b, so a guard there alone
+# would let `<EPIC> local --build-only` through to Step 6 with no branch for it.
+qx_reject_local_epic() {       # qx_reject_local_epic <kind> <run-where>
+  if [ "$1" = "epic" ] && [ "$2" = "local" ]; then
+    echo "local builds a single unit; an epic's children are always cloud routines — re-run without local." >&2
+    return 1
+  fi
+  return 0
+}
+# ── end quetrex:exec-block qx_reject_local_epic ───────────────────────────────
+qx_reject_local_epic "$KIND" "$RUN_WHERE" || exit 1
+
+echo "Task $TASK_ID: status=$STATUS kind=$KIND mode=$MODE where=$RUN_WHERE"
 ```
 
 **Actionability guard — it runs in `full`, `build` AND `tick` mode.**
@@ -929,9 +946,10 @@ plan — you arrived by a path that skipped the environment check; stop and say 
   `main`,
 - where every child runs, as the same literal line:
   `Runs unattended on Anthropic's cloud in environment <QX_CLOUD_ENV_ID>`. An epic's
-  children are always cloud routines (Step 6B); `local` with an epic stops here with one
-  line: `local builds a single unit; an epic's children are always cloud routines — re-run
-  without local.`
+  children are always cloud routines (Step 6B); `local` with an epic was already refused
+  at Step 1b (`qx_reject_local_epic`, every mode) with one line: `local builds a single
+  unit; an epic's children are always cloud routines — re-run without local.` If
+  `RUN_WHERE=local` somehow reaches an epic here, stop with that same line.
 
 Then ask for explicit approval of **scope**. This is the tap on Approve. Do not ask about
 implementation choices, ordering, or style — those are the pipeline's business. The approval
@@ -1039,15 +1057,125 @@ not an error. Report which happened.
 ### L) Single unit, `local` — only when the operator typed it
 
 Reached only with `RUN_WHERE=local` from Step 1's parser — never from a failed Step 1a, a
-memory, or a note. Skip 6A entirely (no spec branch, no `RemoteTrigger`): run THE DEV
-PIPELINE exactly as defined in `.claude/lib/dev-pipeline.md` on this machine, with
-`PIPELINE_RESUME_FROM` = `developers`, `PLAN_ARTIFACT` = the payload's `planPath`, `TASK_ID`,
-`TASK_TITLE`, `BASE_BRANCH` = the payload's `baseBranch`, `BRANCH_PREFIX`, `WORKFLOW_TITLE` =
-`"$TASK_ID · <title> (local build)"`, and the resolved kanban context. Same stages
-(developer(s) → qa → reviewer → git-workflow as local agents in the unit worktree), same
-gates, same `.quetrex/*` artifacts, same PR. Record no `dispatch` in the payload — there is
-no routine to probe, and a local run that dies is simply `RESUMABLE` at Step 1 next time.
-The session must stay alive for the whole run; say so in the report. Then go to **Step 7**.
+memory, or a note, and never for an epic (Step 1 refused that pair before the plan half
+ran). Skip 6A entirely (no spec branch, no `RemoteTrigger`). Three moves. The first and the
+last are the cloud routine's own steps 2b and 5b run on this machine, so a local build forks
+from the same approved snapshot and publishes the same gate evidence — `/quetrex:merge`
+cannot tell the two apart, and must not have to.
+
+**1. Fork from the approved base, not from whatever the base branch is now.** Same pin as
+6A — `qx_approved_base_sha` is the exec block in 6A below; include it verbatim above this
+block, it is the ONE place `approvedBaseSha` is resolved and stored — and the same sync the
+cloud routine runs at its step 2b (`quetrex-cloud-prep sync`: proceeds when the live base
+contains the approved sha, resumes a unit branch already on origin, refuses a base the
+approver never saw):
+
+```bash
+BASE_BRANCH="$(quetrex-api json-get "$PAYLOAD" baseBranch)" || exit 1
+UNIT_WT="$(quetrex-api json-get "$PAYLOAD" worktreePath 2>/dev/null || true)"
+APPROVED_BASE_SHA="$(qx_approved_base_sha "$PAYLOAD" "$REPO_ROOT" "$BASE_BRANCH")" || exit 1
+if [ -n "$UNIT_WT" ] && git -C "$UNIT_WT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  WT="$UNIT_WT"                                    # the plan half's worktree, still here
+  UNIT_BRANCH="$(git -C "$WT" rev-parse --abbrev-ref HEAD)"
+else
+  # Plan-half worktree gone. The unit branch is whatever origin already holds for this
+  # task (a re-run — the `-gates-` refs are evidence, not the unit), else
+  # <prefix><TASK>-<slug> as dev-pipeline.md step 1 names it. Create it DETACHED AT THE
+  # APPROVED SHA so nothing here ever forks from a moving branch name.
+  UNIT_BRANCH="$(git -C "$REPO_ROOT" ls-remote --heads origin "${BRANCH_PREFIX}${TASK_ID}-*" 2>/dev/null \
+    | awk '{sub("refs/heads/","",$2); print $2}' | grep -v -- '-gates-' | head -1)"
+  [ -n "$UNIT_BRANCH" ] || UNIT_BRANCH="${BRANCH_PREFIX}${TASK_ID}-$(printf '%s' "$TASK_TITLE" \
+    | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//; s/-$//' | cut -c1-40)"
+  WT="$(mktemp -d)"
+  git -C "$REPO_ROOT" worktree add --detach --quiet "$WT" "$APPROVED_BASE_SHA" || exit 1
+fi
+quetrex-cloud-prep sync "$BASE_BRANCH" "$APPROVED_BASE_SHA" "$UNIT_BRANCH" --repo "$WT" || exit 1
+# The engine reads the plan out of the worktree. A re-created worktree has none yet, so
+# materialize the approved snapshot (embedded at 4a), then stamp the approved base into
+# it — the same base_sha 6A stamps into the spec, and what merge-gate.sh GATE 5 reads.
+mkdir -p "$WT/.quetrex/plan"
+[ -f "$WT/.quetrex/plan/$TASK_ID.json" ] || node -e '
+  const fs=require("fs"); const [payload,out]=process.argv.slice(1);
+  const p=JSON.parse(fs.readFileSync(payload,"utf8"));
+  if(!p.planSnapshot){ console.error("No embedded plan snapshot in the payload — run the plan half again."); process.exit(1); }
+  fs.writeFileSync(out, JSON.stringify(p.planSnapshot,null,2)+"\n");
+' "$PAYLOAD" "$WT/.quetrex/plan/$TASK_ID.json" || exit 1
+node -e '
+  const fs=require("fs"); const [f,s]=process.argv.slice(1);
+  const o=JSON.parse(fs.readFileSync(f,"utf8")); o.base_sha=s;
+  fs.writeFileSync(f, JSON.stringify(o,null,2)+"\n");
+' "$WT/.quetrex/plan/$TASK_ID.json" "$APPROVED_BASE_SHA" || exit 1
+echo "local build: $UNIT_BRANCH in $WT (approved base $APPROVED_BASE_SHA)"
+```
+
+**2. Run THE DEV PIPELINE on this machine**, exactly as `.claude/lib/dev-pipeline.md`
+defines it, with `PIPELINE_RESUME_FROM` = `developers`, `PLAN_ARTIFACT` =
+`$WT/.quetrex/plan/$TASK_ID.json`, `WT` / `UNIT_BRANCH` = the pair just synced (engine
+step 1 reuses them; it must not fork a second worktree off `BASE_BRANCH`), `TASK_ID`,
+`TASK_TITLE`, `BASE_BRANCH`, `BRANCH_PREFIX`, `WORKFLOW_TITLE` = `"$TASK_ID · <title> (local
+build)"`, and the resolved kanban context. Same stages (developer(s) → qa → reviewer →
+git-workflow as local agents in `$WT`), same gates, same `.quetrex/*` artifacts, same PR.
+Stage order is qa → security-reviewer (when required) → reviewer → git-workflow: when the
+plan sets `security_review_required`, the reviewer must not run until
+`.quetrex/security-findings.json` exists for HEAD — a reviewer dispatched before it finds no
+artifact and writes `ESCALATE_HUMAN` mechanically for a build nothing was wrong with.
+Run it through engine step 9 (PR open, `pr_ready`) and **stop before step 10's teardown**:
+`$WT` is still at the PR head and still holds the evidence the next move publishes.
+
+**3. Publish the gate evidence — the cloud routine's step 5b, from `$WT`.** Without it
+`/quetrex:merge` finds no `<prefix><TASK>-gates-<sha7>` branch, transports nothing, and
+`merge-gate.sh` denies with nothing to recover. The publication logic exists in ONE place —
+the bytes between the `# >>> QUETREX GATE PUBLICATION >>>` and
+`# <<< QUETREX GATE PUBLICATION <<<` sentinels in `.claude/lib/cloud-build-routine.md`,
+which `test/routine-transport.test.sh` executes — and this block runs exactly those bytes:
+
+```bash
+# ── quetrex:exec-block qx_publish_gates ────────────────────────────────────────
+# Executable, and executed: test/task-build-never-local.test.sh drives this
+# under bash AND zsh against a real bare remote. ONE COPY: it does not
+# restate the publication logic, it extracts the sentinel-delimited block from
+# cloud-build-routine.md (§5b), fills {{TASK}} / {{BRANCH_PREFIX}}, and runs
+# it inside <wt> — so a local build publishes byte-for-byte what a cloud build
+# publishes, and a fix to the routine's block is a fix here.
+qx_publish_gates() {           # qx_publish_gates <wt> <task> <branch-prefix> [routine.md]
+  local wt="$1" task="$2" prefix="$3" routine="${4:-}" bin="" script="" rc=0
+  if [ -z "$routine" ]; then
+    # The routine ships beside this command: <plugin root>/.claude/lib/. bin/ is on the
+    # plugin's PATH, so the root is one level above quetrex-cloud-prep; quetrex-base
+    # itself (bin/ in the repo) resolves the same way.
+    bin="$(command -v quetrex-cloud-prep 2>/dev/null || true)"
+    if [ -n "$bin" ]; then
+      routine="$(cd "$(dirname "$bin")/.." 2>/dev/null && pwd)/.claude/lib/cloud-build-routine.md"
+    fi
+    if [ ! -f "$routine" ]; then
+      routine="$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null)/.claude/lib/cloud-build-routine.md"
+    fi
+  fi
+  [ -f "$routine" ] || { echo "cannot publish the gates: cloud-build-routine.md not found beside quetrex-cloud-prep or in the repo" >&2; return 1; }
+  script="$(mktemp)" || return 1
+  awk '
+    /^[[:space:]]*# >>> QUETREX GATE PUBLICATION >>>[[:space:]]*$/ { inb=1; next }
+    /^[[:space:]]*# <<< QUETREX GATE PUBLICATION <<<[[:space:]]*$/ { inb=0; next }
+    inb { print }
+  ' "$routine" | sed -e 's/^    //' -e "s|{{TASK}}|$task|g" -e "s|{{BRANCH_PREFIX}}|$prefix|g" > "$script"
+  if ! grep -q 'GATES_BRANCH=' "$script" || grep -q '{{' "$script"; then
+    echo "cannot publish the gates: no usable QUETREX GATE PUBLICATION block between the sentinels in $routine" >&2
+    rm -f "$script"; return 1
+  fi
+  ( cd "$wt" && bash "$script" ); rc=$?
+  rm -f "$script"
+  return "$rc"
+}
+# ── end quetrex:exec-block qx_publish_gates ───────────────────────────────────
+qx_publish_gates "$WT" "$TASK_ID" "$BRANCH_PREFIX" || exit 1
+```
+
+The block prints nothing on success; say the gates branch name (`git -C "$WT" rev-parse
+--abbrev-ref HEAD` right after it — the branch it just created and pushed) in the report.
+Then run engine step 10 (tear `$WT` down; the unit branch, its PR and the gates branch
+remain). Record no `dispatch` in the payload — there is no routine to probe, and a local run
+that dies is simply `RESUMABLE` at Step 1 next time. The session must stay alive for the
+whole run; say so in the report. Then go to **Step 7**.
 
 ### A) Single unit
 
@@ -1829,18 +1957,37 @@ EOF
 
 ## Step 7 — Terminus + report
 
-The heavy work — every unit's DEV PIPELINE — runs unattended, out of this session, on
-Anthropic's servers: a standalone task's BUILD half as a **fired cloud Routine** (Step 6A),
-and **each epic child as its own fired cloud Routine** of the same shape (Step 6B). You never
-parse either's stdout inline, and neither one needs this session to stay alive.
+By default the heavy work — every unit's DEV PIPELINE — runs unattended, out of this
+session, on Anthropic's servers: a standalone task's BUILD half as a **fired cloud Routine**
+(Step 6A), and **each epic child as its own fired cloud Routine** of the same shape (Step
+6B). You never parse either's stdout inline, and neither cloud dispatch needs this session
+to stay alive. The one exception is the typed `local` argument (Step 6L): that run needed
+this session for its whole length, and is over by the time you are here.
 
-**Single unit.** Fire-and-forget: already reported in Step 6A — the monitor URL
+**The merge is never automated, in either mode.** This command ends by stating the PR URL,
+the gate state, and the single next step — `run /quetrex:merge <TASK-ID> when you are ready`
+— and then it is finished. It must NEVER call `AskUserQuestion` about merging, never ask
+"merge it?", never run `gh pr merge`, and never treat any answer, tap, or earlier "yes" as
+merge authorization. The scope approval at Step 4b authorized a build, not a merge; the
+merge happens only when the operator runs `/quetrex:merge` themselves.
+
+**Single unit, `local` (Step 6L).** There is no routine and no monitor URL — never report
+one. Report: the worktree path the build ran in (`$WT`, torn down at engine step 10), the
+unit branch and the **PR URL**, the gates branch the run published (`<prefix><TASK>-gates-<sha7>`),
+and that the session had to stay alive for the run. The terminus and the next step are
+**exactly** the cloud build's: the PR is open, its gate artifacts are on the gates branch,
+and the operator runs **`/quetrex:merge <TASK-ID>`** — which fetches that branch, proves the
+evidence is pinned to the PR head, and merges through `merge-gate.sh`. End the report with
+`run /quetrex:merge <TASK-ID> when you are ready` and stop; the rest of this section
+(verdicts, `needs_clarity` on `REWORK`) applies unchanged.
+
+**Single unit, cloud.** Fire-and-forget: already reported in Step 6A — the monitor URL
 (`https://claude.ai/code/routines/{id}`), the spec branch, and that the routine is building
 toward `pr_ready`. The pipeline's terminus is an open PR. Whether it then merges
 is decided by the reviewer's verdict and enforced by `merge-gate.sh` — `AUTO_MERGE` pinned
 to HEAD with a green ledger permits the squash merge; `REWORK` / `ESCALATE_HUMAN` sends the
-task to `needs_clarity` for `/quetrex:task-rework`. The merge itself is **`/quetrex:merge <TASK-ID>`**, and you should tell the user to run
-it. It is not a bypass: the cloud build publishes its gate artifacts to
+task to `needs_clarity` for `/quetrex:task-rework`. The merge itself is **`/quetrex:merge <TASK-ID>`**: end the report with
+`run /quetrex:merge <TASK-ID> when you are ready` and stop — never ask whether to merge. It is not a bypass: the cloud build publishes its gate artifacts to
 `<branchPrefix><TASK>-gates` (see `.claude/lib/cloud-build-routine.md` step 5b), and
 `/quetrex:merge` fetches them, proves they are pinned to the PR head, and then merges
 through the same `merge-gate.sh` that has always run. Without that transport step the gate
@@ -1903,6 +2050,11 @@ output inline.
 
 ## Error-handling rules
 
+- **A merge is never automated.** In every mode and both run locations this command ends
+  by stating the PR URL, the gate state, and the single next step —
+  `run /quetrex:merge <TASK-ID> when you are ready`. It never calls `AskUserQuestion` about
+  merging, never asks "merge it?", never runs `gh pr merge`, and never treats any answer as
+  merge authorization (Step 7).
 - Any `quetrex-api` or resolver non-zero exit → the helper already printed the correct
   user-facing message. Just stop; do not add your own auth/access explanation.
 - Non-actionable status, or an epic-child argument → report and stop (per Step 1). The
