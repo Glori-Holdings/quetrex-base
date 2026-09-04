@@ -962,10 +962,18 @@ EOF
 
 DISC_NOW="$WORK/discovery-now.sh"
 extract_discovery "$COMMAND" > "$DISC_NOW"
-if grep -q 'ls-remote' "$DISC_NOW" && grep -q 'head -1' "$DISC_NOW"; then
-  pass "(q) extracted Step 6L's discovery pipeline from the shipped command ($(wc -l < "$DISC_NOW" | tr -d ' ') lines)"
+# The extractor stops at the FIRST line matching its terminator, so a COMMENT
+# that merely mentions the terminating command truncates the block mid-pipeline —
+# measured: every case below then returned empty and would have read as "the
+# filter rejects everything". Require the extraction to carry the whole pipeline:
+# the listing at the top, the candidate emit in the middle, and the real closing
+# line at the bottom.
+if grep -q 'ls-remote' "$DISC_NOW" \
+   && grep -qF 'printf' "$DISC_NOW" && grep -q 'qx_ref"$' "$DISC_NOW" \
+   && [ "$(tail -1 "$DISC_NOW" | tr -d ' ')" = 'done|head-1)"' ]; then
+  pass "(q) extracted Step 6L's discovery pipeline WHOLE from the shipped command ($(wc -l < "$DISC_NOW" | tr -d ' ') lines, closing on the real pipeline tail)"
 else
-  fail "(q) could not extract Step 6L's discovery pipeline from $COMMAND — the assertions below would prove nothing"
+  fail "(q) extraction of Step 6L's discovery pipeline is missing or TRUNCATED (last line: [$(tail -1 "$DISC_NOW")]) — the assertions below would prove nothing"
 fi
 
 # FAIL-FIRST against the pre-fix head. Same extractor, same cases.
@@ -1029,6 +1037,53 @@ if git -C "$REPO_ROOT" cat-file -e "$ANCHOR_SHA^{commit}" 2>/dev/null; then
   fi
 else
   fail "(q) FAIL-FIRST: anchor-era commit $ANCHOR_SHA is not reachable in this checkout — refusing to report a pass having compared against nothing"
+fi
+
+# THIRD FAIL-FIRST BASELINE — df430d6, the literal-strip era. It fixed the two
+# residuals above but the strip is a NO-OP on a ref that does not start with the
+# expected prefix, and the ls-remote pattern is a TAIL match, so refs in foreign
+# namespaces fell through as "the unit". Reproduced here against that commit's
+# SHIPPED bytes, on a real bare origin, never a retyped pipeline.
+TAIL_SHA="df430d6"
+TAIL_TB="$WORK/tail-task-build.md"
+if git -C "$REPO_ROOT" cat-file -e "$TAIL_SHA^{commit}" 2>/dev/null; then
+  git -C "$REPO_ROOT" show "$TAIL_SHA:.claude/commands/task-build.md" > "$TAIL_TB"
+  DISC_TAIL="$WORK/discovery-tail.sh"
+  extract_discovery "$TAIL_TB" > "$DISC_TAIL"
+  if grep -q 'ls-remote' "$DISC_TAIL" && ! grep -q 'case "$qx_ref" in' "$DISC_TAIL"; then
+    pass "(s) FAIL-FIRST: $TAIL_SHA carries the discovery pipeline WITHOUT any literal-prefix guard"
+  else
+    fail "(s) FAIL-FIRST: $TAIL_SHA does not look like the pre-guard baseline — refusing to claim a fix"
+  fi
+
+  # The mundane trigger: a leftover backup ref, which sorts AHEAD of the real one.
+  TAIL_GOT="$(disc_run bash "$DISC_TAIL" "$WORK/ff-tail-a" "claude/" "QUE-13" \
+      "claude/QUE-13-real-unit" "backup/claude/QUE-13-old")"
+  if [ "$TAIL_GOT" = "backup/claude/QUE-13-old" ]; then
+    pass "(s) FAIL-FIRST: $TAIL_SHA selected the foreign ref backup/claude/QUE-13-old OVER the real unit branch — the defect was real and needed no attacker"
+  else
+    fail "(s) FAIL-FIRST: $TAIL_SHA returned '${TAIL_GOT:-<empty>}' for the backup-ref case — it did NOT reproduce, so the assertions below prove nothing"
+  fi
+
+  # The hostile shape, alone: it is selected and would be handed onward.
+  TAIL_GOT="$(disc_run bash "$DISC_TAIL" "$WORK/ff-tail-b" "claude/" "QUE-13" \
+      "evil/claude/QUE-13-hijack")"
+  if [ "$TAIL_GOT" = "evil/claude/QUE-13-hijack" ]; then
+    pass "(s) FAIL-FIRST: $TAIL_SHA selected evil/claude/QUE-13-hijack as the unit branch"
+  else
+    fail "(s) FAIL-FIRST: $TAIL_SHA returned '${TAIL_GOT:-<empty>}' for the hijack case — it did NOT reproduce"
+  fi
+
+  # And the nested shape.
+  TAIL_GOT="$(disc_run bash "$DISC_TAIL" "$WORK/ff-tail-c" "claude/" "QUE-13" \
+      "x/y/claude/QUE-13-deep")"
+  if [ "$TAIL_GOT" = "x/y/claude/QUE-13-deep" ]; then
+    pass "(s) FAIL-FIRST: $TAIL_SHA selected the deeply nested x/y/claude/QUE-13-deep"
+  else
+    fail "(s) FAIL-FIRST: $TAIL_SHA returned '${TAIL_GOT:-<empty>}' for the nested case — it did NOT reproduce"
+  fi
+else
+  fail "(s) FAIL-FIRST: baseline commit $TAIL_SHA is not reachable in this checkout — refusing to report a pass having compared against nothing"
 fi
 
 for SH in bash zsh; do
@@ -1123,16 +1178,31 @@ for SH in bash zsh; do
     fail "$SH: (q) epic-child discovery: got '${GOT:-<empty>}', want claude/SMA-1.2-add-the-thing"
   fi
 
-  # THE DOT IS NO LONGER A WILDCARD. Fed straight to the filter (the real
-  # ls-remote glob would never list this name for SMA-1.2 — see disc_run_list),
-  # a candidate with 'X' where the dot is must survive: nothing here interpolates
-  # TASK_ID into a pattern any more.
+  # THE DOT IS STILL NOT A WILDCARD — and the EXPECTATION HERE INVERTED with the
+  # literal-prefix guard, which is itself the proof. `claude/SMA-1X2-gates-deadbee`
+  # is not a branch for task SMA-1.2 at all, so adopting it was never right; the
+  # guard now drops it. That drop is only possible with a LITERAL dot: a regex-era
+  # `.` wildcard MATCHES the 'X' and would have kept the ref, which is exactly the
+  # 68ea3ef residual re-run as a fail-first two blocks above. Both directions are
+  # asserted — this one, and the literal-dot ACCEPT immediately below — so the pair
+  # still discriminates and neither passes by the filter having stopped filtering.
   GOT="$(disc_run_list "$SH" "$DISC_NOW" "$WORK/o-$SH-i" "claude/" "SMA-1.2" \
       "claude/SMA-1X2-gates-deadbee")"
-  if [ "$GOT" = "claude/SMA-1X2-gates-deadbee" ]; then
-    pass "$SH: (q) '.' in task id SMA-1.2 is a literal, not a wildcard — claude/SMA-1X2-gates-deadbee is kept"
+  if [ -z "$GOT" ]; then
+    pass "$SH: (q) '.' in task id SMA-1.2 is a literal, not a wildcard — claude/SMA-1X2-gates-deadbee does NOT match the literal prefix and is dropped"
   else
-    fail "$SH: (q) dot-as-wildcard: got '${GOT:-<empty>}', want claude/SMA-1X2-gates-deadbee"
+    fail "$SH: (q) dot-as-wildcard: got '$GOT', want <empty> — the '.' matched an 'X', so it is still behaving as a wildcard"
+  fi
+
+  # The literal-dot ACCEPT. Same task id, a candidate that really does carry the
+  # dot, and it must be selected — otherwise the assertion above would pass simply
+  # because SMA-1.2 discovers nothing at all.
+  GOT="$(disc_run_list "$SH" "$DISC_NOW" "$WORK/o-$SH-i2" "claude/" "SMA-1.2" \
+      "claude/SMA-1.2-real-work")"
+  if [ "$GOT" = "claude/SMA-1.2-real-work" ]; then
+    pass "$SH: (q) the literal-dot unit branch claude/SMA-1.2-real-work IS selected for task SMA-1.2"
+  else
+    fail "$SH: (q) literal-dot accept: got '${GOT:-<empty>}', want claude/SMA-1.2-real-work"
   fi
 
   # The literal-dot evidence ref for that same task IS still excluded, so the
@@ -1143,6 +1213,66 @@ for SH in bash zsh; do
     pass "$SH: (q) the literal-dot evidence ref claude/SMA-1.2-gates-deadbee is still excluded for task SMA-1.2"
   else
     fail "$SH: (q) literal-dot evidence ref was selected as the unit branch: '$GOT'"
+  fi
+
+  # ------------------------------------------------------------------------
+  # (s) FOREIGN-NAMESPACE TAIL MATCH. `ls-remote --heads origin "<prefix><TASK>-*"`
+  # matches the TAIL of the ref path on `/` boundaries, so every one of these is
+  # RETURNED BY THE LISTING for pattern `claude/QUE-13-*` (asserted below against
+  # a real bare origin, not assumed): the legitimate ref, an attacker-shaped
+  # `evil/claude/QUE-13-hijack`, a mundane leftover `backup/claude/QUE-13-old`,
+  # and a deeply nested `x/y/claude/QUE-13-deep`. `backup/...` sorts AHEAD of
+  # `claude/...`, so `head -1` selected it before this fix with nobody attacking
+  # anything. Only the legitimate ref may ever be selected.
+  # ------------------------------------------------------------------------
+  GOT="$(disc_run "$SH" "$DISC_NOW" "$WORK/o-$SH-s" "claude/" "QUE-13" \
+      "claude/QUE-13-real-unit" "evil/claude/QUE-13-hijack" "backup/claude/QUE-13-old" \
+      "x/y/claude/QUE-13-deep" "notclaude/QUE-13-tail" "claude/QUE-13-gates-a1b2c3d")"
+  if [ "$GOT" = "claude/QUE-13-real-unit" ]; then
+    pass "$SH: (s) the legitimate unit branch is selected with four foreign-namespace decoys on the same origin"
+  else
+    fail "$SH: (s) foreign-namespace decoy selected or discovery broken: got '${GOT:-<empty>}', want claude/QUE-13-real-unit"
+  fi
+  # Not a tautology: PROVE the listing really does hand those decoys to the filter,
+  # so the assertion above is the FILTER rejecting them, not git never offering them.
+  LISTED="$(git -C "$WORK/o-$SH-s/r" ls-remote --heads origin "claude/QUE-13-*" 2>/dev/null | awk '{print $2}')"
+  if printf '%s\n' "$LISTED" | grep -q '^refs/heads/evil/claude/QUE-13-hijack$' \
+     && printf '%s\n' "$LISTED" | grep -q '^refs/heads/backup/claude/QUE-13-old$' \
+     && printf '%s\n' "$LISTED" | grep -q '^refs/heads/x/y/claude/QUE-13-deep$'; then
+    pass "$SH: (s) the ls-remote listing DOES return all three foreign-namespace refs — the filter is what rejects them"
+  else
+    fail "$SH: (s) the listing did not return the decoys, so the case above proves nothing: [$LISTED]"
+  fi
+
+  # Each decoy ALONE must discover NOTHING, so the fallback names the real branch
+  # instead of resuming on a foreign ref. Selecting the right one out of a crowd is
+  # not enough — a decoy must never be the answer even when it is the only candidate.
+  for QX_DECOY in "evil/claude/QUE-13-hijack" "backup/claude/QUE-13-old" "x/y/claude/QUE-13-deep"; do
+    GOT="$(disc_run "$SH" "$DISC_NOW" "$WORK/o-$SH-s1" "claude/" "QUE-13" "$QX_DECOY")"
+    if [ -z "$GOT" ]; then
+      pass "$SH: (s) $QX_DECOY alone discovers nothing — it is never handed to quetrex-cloud-prep sync"
+    else
+      fail "$SH: (s) $QX_DECOY was selected as the unit branch on its own: '$GOT'"
+    fi
+  done
+
+  # A ref that merely ENDS WITH the pattern text but not on a `/` boundary
+  # (`notclaude/QUE-13-tail`) is neither listed nor selected.
+  GOT="$(disc_run "$SH" "$DISC_NOW" "$WORK/o-$SH-s2" "claude/" "QUE-13" "notclaude/QUE-13-tail")"
+  if [ -z "$GOT" ]; then
+    pass "$SH: (s) a ref that merely ends with the pattern (notclaude/QUE-13-tail) is not selected"
+  else
+    fail "$SH: (s) notclaude/QUE-13-tail was selected as the unit branch: '$GOT'"
+  fi
+
+  # And the guard is a PREFIX test, not a substring test: the prefix must be at
+  # position 0, and a ref carrying it in the middle is rejected.
+  GOT="$(disc_run_list "$SH" "$DISC_NOW" "$WORK/o-$SH-s3" "claude/" "QUE-13" \
+      "wat/claude/QUE-13-mid" "claude/QUE-13-legit")"
+  if [ "$GOT" = "claude/QUE-13-legit" ]; then
+    pass "$SH: (s) the guard anchors at position 0 — a mid-path occurrence of the prefix loses to the real unit branch"
+  else
+    fail "$SH: (s) prefix-anchoring: got '${GOT:-<empty>}', want claude/QUE-13-legit"
   fi
 
   # NO PATTERN IS BUILT FROM EITHER VALUE. Shape assertion on the shipped bytes.

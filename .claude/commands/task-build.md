@@ -1247,6 +1247,28 @@ else
     | awk '{sub("refs/heads/","",$2); print $2}' \
     | while IFS= read -r qx_ref; do
         [ -n "$qx_ref" ] || continue
+        # A ref-listing PATTERN IS NOT AN ANCHOR. `ls-remote --heads origin
+        # "<prefix><TASK>-*"` matches the TAIL of the ref path on `/` boundaries,
+        # so `refs/heads/evil/claude/SMA-1-hijack`, `refs/heads/backup/claude/
+        # SMA-1-old` and `refs/heads/x/y/claude/SMA-1-deep` are ALL returned for
+        # pattern `claude/SMA-1-*` (measured against a real bare origin). The
+        # evidence-strip below cannot catch them: stripping a prefix a ref does
+        # not start with is a NO-OP, so a foreign ref falls straight through as
+        # "the unit". `backup/...` even sorts AHEAD of `claude/...`, so the
+        # first-candidate-wins tail of this pipeline picks it with no attacker
+        # involved — a leftover personal or backup ref is enough. (Do not write
+        # the two words of that tail command in a comment here: the test
+        # extractor stops at the FIRST line carrying them, and a truncated
+        # extraction silently proves nothing.)
+        # Whatever wins here is handed to `quetrex-cloud-prep sync`,
+        # which either dead-ends the local path or resumes the build on that ref
+        # and publishes its PR and its gates branch from it.
+        # So require the LITERAL prefix, by the same quoted-comparison technique
+        # the evidence exclusion uses two lines below: the quoted expansion makes
+        # every character in BRANCH_PREFIX and TASK_ID literal (a `.` in the
+        # epic-child shape `SMA-1.2` included), so nothing is interpolated into a
+        # pattern here either. Identical under bash, zsh and dash.
+        case "$qx_ref" in "${BRANCH_PREFIX}${TASK_ID}-"*) ;; *) continue ;; esac
         qx_rest="${qx_ref#"${BRANCH_PREFIX}${TASK_ID}-gates-"}"
         if [ "$qx_rest" != "$qx_ref" ] && [ "${#qx_rest}" -eq 7 ]; then
           case "$qx_rest" in

@@ -298,12 +298,40 @@ if grep -q 'ls-remote' "$WORK/disc_head.sh"; then
       fail "$SH: (B) HEAD still mishandles the 'gates-<hex>' slug: got '${GOT:-<empty>}', want $COLLIDING_UNIT_BRANCH"
     fi
 
+    # The '.' is STILL a literal, and the EXPECTATION INVERTED when discovery
+    # gained its literal-prefix guard (the ls-remote pattern is a TAIL match, so
+    # refs in foreign namespaces reached this filter). claude/SMA-1X2-gates-deadbee
+    # is not a branch for task SMA-1.2 at all, so it is now correctly DROPPED —
+    # and only a LITERAL dot can drop it. A regex-era '.' wildcard MATCHES the 'X'
+    # and keeps the ref, which is precisely the 68ea3ef fail-first reproduced
+    # above. Both directions are asserted: this reject, and the literal-dot ACCEPT
+    # immediately below, so the pair still discriminates.
     GOT="$(head_disc "$SH" "$WORK/b2-$SH" "claude/" "$TASK_ID_DOT" \
         "claude/SMA-1X2-gates-deadbee")"
-    if [ "$GOT" = "claude/SMA-1X2-gates-deadbee" ]; then
-      pass "$SH: (B) CLOSED: with task id $TASK_ID_DOT the '.' is a literal, so claude/SMA-1X2-gates-deadbee is kept"
+    if [ -z "$GOT" ]; then
+      pass "$SH: (B) CLOSED: with task id $TASK_ID_DOT the '.' is a literal, so claude/SMA-1X2-gates-deadbee fails the literal-prefix guard and is dropped"
     else
-      fail "$SH: (B) HEAD still treats '.' as a wildcard: got '${GOT:-<empty>}', want claude/SMA-1X2-gates-deadbee"
+      fail "$SH: (B) HEAD still treats '.' as a wildcard: got '$GOT' — the '.' matched an 'X' and a foreign task's ref was adopted"
+    fi
+
+    # ACCEPT side of that pair: a candidate carrying the real dot IS selected, so
+    # the reject above cannot be passing because SMA-1.2 discovers nothing at all.
+    GOT="$(head_disc "$SH" "$WORK/b2b-$SH" "claude/" "$TASK_ID_DOT" \
+        "claude/SMA-1.2-real-work")"
+    if [ "$GOT" = "claude/SMA-1.2-real-work" ]; then
+      pass "$SH: (B) the literal-dot unit branch claude/SMA-1.2-real-work IS selected for $TASK_ID_DOT"
+    else
+      fail "$SH: (B) literal-dot accept: got '${GOT:-<empty>}', want claude/SMA-1.2-real-work"
+    fi
+
+    # And a foreign-namespace ref that the TAIL-matching ls-remote glob really does
+    # return is never selected over the legitimate unit branch.
+    GOT="$(head_disc "$SH" "$WORK/b2c-$SH" "claude/" "SMA-9" \
+        "backup/claude/SMA-9-old" "claude/SMA-9-real-unit")"
+    if [ "$GOT" = "claude/SMA-9-real-unit" ]; then
+      pass "$SH: (B) a foreign-namespace ref (backup/claude/SMA-9-old) never wins over the real unit branch"
+    else
+      fail "$SH: (B) foreign-namespace ref selected: got '${GOT:-<empty>}', want claude/SMA-9-real-unit"
     fi
 
     GOT="$(head_disc "$SH" "$WORK/b3-$SH" "claude/" "$TASK_ID_DOT" \
