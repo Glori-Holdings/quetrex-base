@@ -32,7 +32,7 @@ project `.claude/CLAUDE.md` contains `quetrex_welcome: false`.
 | See every task and its status | `/quetrex:status` |
 | Create a task | `/quetrex:task-new` |
 | Refine a task into a spec | `/quetrex:task-refine` |
-| Build a task | `/quetrex:task-build` |
+| Build a task | `/quetrex:task-build <TASK> [cloud\|local]` |
 | Rework a failed task | `/quetrex:task-rework` |
 | Mark a deployed task complete | `/quetrex:task-complete` |
 | Deploy | `/quetrex:deploy` |
@@ -51,6 +51,14 @@ architect → developer(s) → QA → reviewer → git-workflow
 - **QA** proves green with actual exit codes — never takes a developer's word
 - **reviewer** reads the full diff for logic errors, security, and architecture violations
 - **git-workflow** opens a squash PR to the default branch
+
+A task build (`/quetrex:task-build`, `/quetrex:task-rework`) executes on Anthropic's cloud
+via `RemoteTrigger` by default; `/quetrex:task-build <TASK> local` runs the same pipeline on
+this machine, and only that typed argument ever selects it. A local build forks from the same
+approved base sha, publishes the same `<prefix><TASK>-gates-<sha7>` evidence branch, and ends
+the same way: an open PR that `/quetrex:merge <TASK>` merges. Local execution of a task build
+without the literal `local` argument is a violation, never a fallback: when no cloud
+environment is bound, the environment binding is the fix, and the command stops.
 
 ## Workflow Rules
 
