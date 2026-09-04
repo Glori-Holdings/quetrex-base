@@ -57,6 +57,8 @@ STUB="$WORK/stub-bin"; mkdir -p "$STUB"
 cat > "$STUB/quetrex-api" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
+  repo-norm) exec "$QX_REAL_API" repo-norm "${2:-}" ;;
+  code-ok)   exec "$QX_REAL_API" code-ok "${2:-}" ;;
   GET) case "$2" in /api/projects/*) printf '{}\n' ;; *) exit 1 ;; esac ;;
   PATCH)
     n=0; while [ -e "$QX_LOG/patch.$n.json" ]; do n=$((n+1)); done
@@ -69,6 +71,7 @@ EOF
 chmod +x "$STUB/quetrex-api"
 NODE_DIR="$(dirname "$(command -v node)")"; GIT_BIN_DIR="$(dirname "$(command -v git)")"; JQ_DIR="$(dirname "$(command -v jq)")"
 RUN_PATH="$STUB:$REAL_BIN:$NODE_DIR:$GIT_BIN_DIR:$JQ_DIR:/usr/bin:/bin"
+export QX_REAL_API="$REAL_BIN/quetrex-api"
 
 patch_count() { ls "$1"/patch.*.json 2>/dev/null | wc -l | tr -d ' '; }
 patch_field() { node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const b=JSON.parse(j.body);process.stdout.write(b[process.argv[2]]||"")' "$1/patch.0.json" "$2"; }

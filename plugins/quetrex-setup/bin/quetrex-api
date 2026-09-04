@@ -104,6 +104,45 @@ qx_binding_path() {
   return 1
 }
 
+# qx_code_is_board_shaped <code>
+#   Is this a project code the BOARD could have issued? deriveCode() yields
+#   exactly three A-Z letters and assignUniqueCode() appends a decimal collision
+#   suffix (quetrex-kanban src/lib/code.ts), into a varchar(8) column, and
+#   PATCH /api/projects/:code deliberately cannot rename it (updateProjectSchema
+#   omits `code`) — so nothing else can ever mint one, and a code outside this
+#   shape cannot resolve against the board either (the route matches on
+#   eq(projects.code, code)).
+#
+#   THE single definition of that shape. resolve_project enforces it below so
+#   every consumer inherits it, rather than each command guarding the one line
+#   it happens to print — a project code out of a cloned repo's
+#   .quetrex/project.json used to be interpolated straight into a copy-paste
+#   `quetrex-api PATCH` one-liner, and guarding the print site would only have
+#   waited for the next message someone added.
+#
+#   node, not `grep -Eq`: grep is line-oriented and would accept a code whose
+#   first line is "QUE"; JS ^...$ without /m is anchored to the whole string.
+qx_code_is_board_shaped() {
+  node -e 'const c = process.argv[1]; process.exit(/^[A-Z]{3}[0-9]*$/.test(c) && c.length <= 8 ? 0 : 1)' "$1" 2>/dev/null
+}
+
+# qx_repo_norm <value>
+#   The board's own owner/repo comparison shape, in ONE place so init and
+#   doctor cannot drift from each other or from it. quetrex-kanban
+#   src/lib/branch-ref.ts:44-45 compares
+#     projectRepo.trim().toLowerCase().replace(/\.git$/, "").replace(/\/+$/, "")
+#   — four operations, and `.git` is stripped BEFORE the trailing slashes, so
+#   `dealerq.git/` normalises to `dealerq.git` exactly as the board leaves it.
+#   Lowercasing alone was not enough: a stored `dealerq.git` read as a DIFFERENT
+#   repo from origin `dealerq`, which drew a false cross in doctor and a fix
+#   line that resolved nothing. Only the trailing `.git` is reachable through
+#   the API today (githubSlug is zod-trimmed and its charset rejects `/`), but
+#   the whole shape lives here so it stays the board's shape.
+qx_repo_norm() {
+  printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]' \
+    | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/\.git$//; s#/+$##'
+}
+
 # resolve_project
 #   Walk up from $PWD to find .quetrex/project.json. Sets QX_PROJECT_CODE.
 #   Keeps auth.json's kanbanUrl as the source of truth, falling back to the
@@ -125,6 +164,16 @@ resolve_project() {
   fi
 
   QX_PROJECT_CODE="$(_qx_json_get "$f" projectCode)" || { echo "Run /quetrex-setup:init" >&2; return 1; }
+
+  # Validate HERE, once, so every consumer inherits it. A binding file is
+  # attacker-supplied in a cloned repo and nothing else checks it; a code the
+  # board could not have issued resolves to no project anyway, so refusing is
+  # both safer and more honest than carrying it forward.
+  if ! qx_code_is_board_shaped "$QX_PROJECT_CODE"; then
+    echo "quetrex-api: $f holds a projectCode the board could not have issued (it mints three A-Z letters plus an optional collision suffix). Re-run /quetrex-setup:init to rebind this repo." >&2
+    QX_PROJECT_CODE=""
+    return 1
+  fi
 
   # auth's kanbanUrl wins; only fall back to the binding if auth set nothing.
   if [ -z "${QX_KANBAN_URL:-}" ]; then
@@ -812,6 +861,15 @@ usage:
   quetrex-api json-get <file> <dot.path>
   quetrex-api kanban-url
   quetrex-api project-code
+  quetrex-api code-ok <code>
+        exit 0 when <code> is a code the board could have issued. The single
+        definition of that shape; resolve_project enforces it, and a caller
+        that read the binding some other way asks here rather than
+        re-implementing the pattern beside the line it prints.
+  quetrex-api repo-norm <value>
+        Prints <value> normalised the way the board compares an owner/repo
+        (branch-ref.ts: trim, lowercase, strip a trailing .git, then strip
+        trailing slashes). Both sides of every comparison go through this.
   quetrex-api binding-path
   quetrex-api env-scan <dir>
   quetrex-api secret-put <envfile> <rawname> <canon>
@@ -840,6 +898,8 @@ _qx_main() {
       qapi "$@"
       ;;
     json-get)     shift; _qx_json_get "$@" ;;
+    code-ok)      shift; qx_code_is_board_shaped "${1:-}" ;;
+    repo-norm)    shift; qx_repo_norm "${1:-}" ;;
     kanban-url)   resolve_auth    || return 1; printf '%s\n' "$QX_KANBAN_URL" ;;
     project-code) resolve_project || return 1; printf '%s\n' "$QX_PROJECT_CODE" ;;
     binding-path) qx_binding_path ;;

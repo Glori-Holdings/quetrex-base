@@ -149,6 +149,8 @@ cat > "$STUB/quetrex-api" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
   json-get) exec "$QX_REAL_API" json-get "$2" "$3" ;;
+  repo-norm) exec "$QX_REAL_API" repo-norm "${2:-}" ;;
+  code-ok)   exec "$QX_REAL_API" code-ok "${2:-}" ;;
   kanban-url) printf 'https://kanban.test/\n' ;;
   GET) case "$2" in
          */secrets/export) echo "export endpoint called" >&2; exit 1 ;;
