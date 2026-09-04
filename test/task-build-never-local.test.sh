@@ -203,6 +203,16 @@ extract_block() {   # extract_block <name> > file
     $0 ~ ("end quetrex:exec-block " name "([^A-Za-z0-9_]|$)") { inb=0 }
   ' "$COMMAND"
 }
+# qx_valid_ids defines qx_valid_task_id / qx_valid_branch_prefix. qx_parse_args and
+# qx_publish_gates both depend on it, so every driver below sources it first — exactly
+# as the shipped command includes both blocks.
+VALIDS="$WORK/qx_valid_ids.sh"
+extract_block qx_valid_ids > "$VALIDS"
+if [ -s "$VALIDS" ] && grep -q '^qx_valid_task_id()' "$VALIDS" && grep -q '^qx_valid_branch_prefix()' "$VALIDS"; then
+  pass "(o) extracted the qx_valid_ids exec block ($(wc -l < "$VALIDS" | tr -d ' ') lines)"
+else
+  fail "(o) task-build.md has no executable qx_valid_ids block — the task id and the branch prefix are unvalidated"
+fi
 BLOCK="$WORK/qx_cloud_env_id.sh"
 extract_block qx_cloud_env_id > "$BLOCK"
 if [ -s "$BLOCK" ] && grep -q '^qx_cloud_env_id()' "$BLOCK"; then
@@ -263,7 +273,7 @@ else
   fail "(h) task-build.md has no executable qx_parse_args block — the run location is prose only"
 fi
 # parse <shell> <arguments...> — mirrors the command's own read line
-parse() { local sh="$1"; shift; "$sh" -c '. "$1"; shift; qx_parse_args "$*"' _ "$PARSE" "$@"; }
+parse() { local sh="$1"; shift; "$sh" -c '. "$1"; . "$2"; shift 2; qx_parse_args "$*"' _ "$VALIDS" "$PARSE" "$@"; }
 for sh in bash zsh; do
   if ! command -v "$sh" >/dev/null 2>&1; then pass "(h) $sh not present, skipped"; continue; fi
   OUT="$(parse "$sh" SMA-1 2>&1)"; RC=$?
@@ -409,12 +419,15 @@ gates_fixture() {   # gates_fixture <name> <task> [no-plan] -> echoes the clone 
 }
 # drive_publish <shell> <wt> <task> — the SAME bytes the model is told to run,
 # with the routine located the way the shipped block locates it (bin/ on PATH).
-drive_publish() {
-  PATH="$REPO_ROOT/bin:$PATH" "$1" -c '. "$1"; qx_publish_gates "$2" "$3" "claude/"' _ "$PUB" "$2" "$3"
+drive_publish() {   # drive_publish <shell> <wt> <task> [prefix] [routine.md]
+  PATH="$REPO_ROOT/bin:$PATH" "$1" -c '. "$1"; . "$2"; qx_publish_gates "$3" "$4" "${5:-claude/}" ${6:+"$6"}' \
+    _ "$VALIDS" "$PUB" "$2" "$3" "${4:-claude/}" "${5:-}"
 }
 for sh in bash zsh; do
   if ! command -v "$sh" >/dev/null 2>&1; then pass "(j) $sh not present, skipped"; continue; fi
-  T="QXL${$}${sh}"; rm -f "/tmp/plan-$T.json"
+  # A REAL task-id shape. qx_valid_task_id (Step 1) now refuses anything else, so a
+  # fixture id that is not a real identifier would prove only that the guard fires.
+  T="QXL${$}${sh}-1"; rm -f "/tmp/plan-$T.json"
   WTX="$(gates_fixture "pub-$sh" "$T")"
   HEADX="$(git -C "$WTX" rev-parse HEAD)"
   OUT="$(drive_publish "$sh" "$WTX" "$T" 2>&1)"; RC=$?
@@ -438,7 +451,7 @@ for sh in bash zsh; do
     fi
   done
   # Negative: a required artifact missing must FAIL the wrapper and push nothing.
-  T2="${T}x"; rm -f "/tmp/plan-$T2.json"
+  T2="${T}0"; rm -f "/tmp/plan-$T2.json"
   WTN="$(gates_fixture "nopub-$sh" "$T2" no-plan)"
   OUT="$(drive_publish "$sh" "$WTN" "$T2" 2>&1)"; RC=$?
   REFN="$(git -C "$WORK/nopub-$sh.git" for-each-ref --format='%(refname:short)' "refs/heads/claude/$T2-gates-*" | head -1)"
@@ -481,6 +494,221 @@ for sh in bash zsh; do
     [ "$RC" -eq 0 ] && [ -z "$OUT" ] && pass "(k) $sh: $pair → allowed, silent" || fail "(k) $sh: $pair → rc=$RC out=[$OUT]"
   done
 done
+
+# --------------------------------------------------------------------------
+# (o) SEC-4 / SEC-5 — the task id and the branch prefix are DATA, not code.
+#
+# THE DEFECT (SEC-4, HIGH, demonstrated by execution against 80b7895).
+# qx_publish_gates substituted $task and $prefix into the extracted publication
+# block with an unescaped `sed s|{{TASK}}|$task|g` and then ran the result with
+# `bash "$script"`. Both placeholders sat inside double-quoted shell strings, so
+#   * a branchPrefix carrying a double quote closed the string and ran what
+#     followed — and branchPrefix is COMMITTED data, read from
+#     .quetrex/project.json at Step 1, so a branch that edits its own binding
+#     executes shell on the operator's machine the next time it is built local;
+#   * a task id that was a bare `$(...)` or backtick needed no quote at all —
+#     sed wrote it verbatim and bash expanded it at run time. The task id comes
+#     straight from $ARGUMENTS through a parser that split on whitespace and
+#     validated nothing.
+#
+# THE FIX IS NOT MORE ESCAPING. Both values are validated at their source
+# (qx_valid_ids, Step 1), and the script no longer carries them at all — they
+# travel in the ENVIRONMENT and the routine's block reads them as shell
+# variables. SEC-5: the extractor now takes exactly the FIRST sentinel pair and
+# refuses a routine carrying more than one.
+#
+# The FAIL-FIRST block at the end runs the SAME payloads against the pre-fix
+# bytes (git show 80b7895) and REQUIRES the canary to appear there. Without it
+# every refusal below could be green against a payload that never executed.
+# --------------------------------------------------------------------------
+ROUTINE="$REPO_ROOT/.claude/lib/cloud-build-routine.md"
+CANDIR="$WORK/canary"; mkdir -p "$CANDIR"
+canary_absent() {   # canary_absent <label> <name>
+  if [ -e "$CANDIR/$2" ]; then
+    fail "$1: the injected command RAN — $CANDIR/$2 exists"
+    rm -f "$CANDIR/$2"
+  else
+    pass "$1: nothing executed (no $2 canary)"
+  fi
+}
+
+# (o) the wiring, in the shipped text.
+present "(o) qx_parse_args validates the task id"        "$COMMAND" 'qx_valid_task_id "$task" || return 1'
+present "(o) the binding read validates the prefix"      "$COMMAND" 'qx_valid_branch_prefix "$BRANCH_PREFIX" || exit 1'
+present "(o) qx_publish_gates re-asserts both shapes"    "$COMMAND" 'qx_valid_task_id       "$task"   || return 1'
+present "(o) the values reach the script by environment" "$COMMAND" 'QX_TASK="$task" QX_BRANCH_PREFIX="$prefix" bash "$script"'
+present "(o) the routine block reads QX_TASK"            "$ROUTINE" '[ -n "${QX_TASK:-}" ]'
+present "(o) the routine block reads QX_BRANCH_PREFIX"   "$ROUTINE" '[ -n "${QX_BRANCH_PREFIX:-}" ]'
+if grep -qF 's|{{TASK}}|' "$COMMAND" || grep -qF 's|{{BRANCH_PREFIX}}|' "$COMMAND"; then
+  fail "(o) task-build.md still substitutes a caller value into the publication script's TEXT — that is the SEC-4 vector"
+else
+  pass "(o) task-build.md substitutes nothing into the publication script's text"
+fi
+
+# (o) EXECUTED: the two validators, under bash and zsh.
+vid()  { "$1" -c '. "$1"; qx_valid_task_id "$2"'       _ "$VALIDS" "$2"; }
+vpfx() { "$1" -c '. "$1"; qx_valid_branch_prefix "$2"' _ "$VALIDS" "$2"; }
+one_line() { [ "$(printf '%s\n' "$1" | wc -l | tr -d ' ')" = "1" ]; }
+for sh in bash zsh; do
+  if ! command -v "$sh" >/dev/null 2>&1; then pass "(o) $sh not present, skipped"; continue; fi
+  for good in SMA-1 QDM-5.1 A-1 QUE-142; do
+    if vid "$sh" "$good" 2>/dev/null; then
+      pass "(o) $sh: qx_valid_task_id accepts the real identifier $good"
+    else
+      fail "(o) $sh: qx_valid_task_id REFUSED the legitimate id $good — the guard is over-tight and no task can be built"
+    fi
+  done
+  for bad in "" "SMA" "SMA-" "-1" "SMA-1x" "SMA-1.2.3" "SMA-1 local" \
+             'SMA-1"; touch '"$CANDIR"'/vid-q; :"' \
+             '$(touch '"$CANDIR"'/vid-cs)' \
+             '`touch '"$CANDIR"'/vid-bt`' \
+             "$(printf 'SMA-1\n; touch %s/vid-nl' "$CANDIR")"; do
+    OUT="$(vid "$sh" "$bad" 2>&1)"; RC=$?
+    if [ "$RC" -ne 0 ] && one_line "$OUT" && printf '%s' "$OUT" | grep -qF 'Not a task id'; then
+      pass "(o) $sh: qx_valid_task_id refuses [$(printf '%s' "$bad" | tr '\n' '~')] with one line"
+    else
+      fail "(o) $sh: qx_valid_task_id accepted or misreported [$(printf '%s' "$bad" | tr '\n' '~')] — rc=$RC out=[$OUT]"
+    fi
+  done
+  for good in claude/ que/ feature/ team.a/sub-1/; do
+    if vpfx "$sh" "$good" 2>/dev/null; then
+      pass "(o) $sh: qx_valid_branch_prefix accepts $good"
+    else
+      fail "(o) $sh: qx_valid_branch_prefix REFUSED the legitimate prefix $good"
+    fi
+  done
+  for bad in "" "claude" "/claude/" "-claude/" "claude/../" \
+             'claude/"; touch '"$CANDIR"'/vpfx-q; :"' \
+             'claude/$(touch '"$CANDIR"'/vpfx-cs)/' \
+             'claude/`touch '"$CANDIR"'/vpfx-bt`/' \
+             "$(printf 'claude/\n; touch %s/vpfx-nl' "$CANDIR")"; do
+    OUT="$(vpfx "$sh" "$bad" 2>&1)"; RC=$?
+    if [ "$RC" -ne 0 ] && one_line "$OUT" && printf '%s' "$OUT" | grep -qF 'Not a branch prefix'; then
+      pass "(o) $sh: qx_valid_branch_prefix refuses [$(printf '%s' "$bad" | tr '\n' '~')] with one line"
+    else
+      fail "(o) $sh: qx_valid_branch_prefix accepted or misreported [$(printf '%s' "$bad" | tr '\n' '~')] — rc=$RC out=[$OUT]"
+    fi
+  done
+done
+canary_absent "(o) validator payloads: quoted task id"   vid-q
+canary_absent "(o) validator payloads: \$() task id"     vid-cs
+canary_absent "(o) validator payloads: backtick task id" vid-bt
+canary_absent "(o) validator payloads: newline task id"  vid-nl
+canary_absent "(o) validator payloads: quoted prefix"    vpfx-q
+canary_absent "(o) validator payloads: \$() prefix"      vpfx-cs
+canary_absent "(o) validator payloads: backtick prefix"  vpfx-bt
+canary_absent "(o) validator payloads: newline prefix"   vpfx-nl
+
+# (o) EXECUTED end to end: qx_publish_gates itself, against a real bare remote.
+# A routine copy carrying a SECOND sentinel pair — the SEC-5 shape: the branch under
+# review supplies the bytes, and the old extractor appended every pair it found.
+DUP="$WORK/dup-routine.md"
+cp "$ROUTINE" "$DUP"
+{
+  printf '\n    # >>> QUETREX GATE PUBLICATION >>>\n'
+  printf '    touch %s/pub-second-pair\n' "$CANDIR"
+  printf '    # <<< QUETREX GATE PUBLICATION <<<\n'
+} >> "$DUP"
+for sh in bash zsh; do
+  if ! command -v "$sh" >/dev/null 2>&1; then pass "(o) $sh not present (publish), skipped"; continue; fi
+  SAFE="QXS${$}${sh}-1"
+  WTS="$(gates_fixture "sec4-$sh" "$SAFE")"
+  # 1. hostile TASK ID, legitimate prefix
+  for pay in 'SMA-1"; touch '"$CANDIR"'/pub-task-q; :"' \
+             '$(touch '"$CANDIR"'/pub-task-cs)' \
+             '`touch '"$CANDIR"'/pub-task-bt`'; do
+    OUT="$(drive_publish "$sh" "$WTS" "$pay" 2>&1)"; RC=$?
+    if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -qF 'Not a task id'; then
+      pass "(o) $sh: qx_publish_gates refuses the injected task id before anything runs"
+    else
+      fail "(o) $sh: injected task id reached the publication — rc=$RC out=[$OUT]"
+    fi
+  done
+  # 2. hostile BRANCH PREFIX, legitimate task id
+  for pay in 'claude/"; touch '"$CANDIR"'/pub-pfx-q; :"' \
+             'claude/$(touch '"$CANDIR"'/pub-pfx-cs)/' \
+             'claude/`touch '"$CANDIR"'/pub-pfx-bt`/'; do
+    OUT="$(drive_publish "$sh" "$WTS" "$SAFE" "$pay" 2>&1)"; RC=$?
+    if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -qF 'Not a branch prefix'; then
+      pass "(o) $sh: qx_publish_gates refuses the injected branchPrefix before anything runs"
+    else
+      fail "(o) $sh: injected branchPrefix reached the publication — rc=$RC out=[$OUT]"
+    fi
+  done
+  NREF="$(git -C "$WORK/sec4-$sh.git" for-each-ref --format='%(refname:short)' refs/heads/ | grep -c -- '-gates-' || true)"
+  if [ "$NREF" = "0" ]; then
+    pass "(o) $sh: no refused run pushed anything to origin"
+  else
+    fail "(o) $sh: a refused run still published $NREF gates ref(s)"
+  fi
+  # 3. SEC-5 — a routine carrying TWO sentinel pairs must fail loudly, not concatenate.
+  OUT="$(drive_publish "$sh" "$WTS" "$SAFE" "claude/" "$DUP" 2>&1)"; RC=$?
+  if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -qF 'exactly one pair is required'; then
+    pass "(o) $sh: a routine with two GATE PUBLICATION pairs is refused by name"
+  else
+    fail "(o) $sh: two sentinel pairs → rc=$RC out=[$OUT] — the extractor concatenated them again"
+  fi
+done
+canary_absent "(o) publish: quoted task id"   pub-task-q
+canary_absent "(o) publish: \$() task id"     pub-task-cs
+canary_absent "(o) publish: backtick task id" pub-task-bt
+canary_absent "(o) publish: quoted prefix"    pub-pfx-q
+canary_absent "(o) publish: \$() prefix"      pub-pfx-cs
+canary_absent "(o) publish: backtick prefix"  pub-pfx-bt
+canary_absent "(o) publish: second sentinel pair" pub-second-pair
+
+# (o) FAIL-FIRST — the SAME payloads against the pre-fix bytes (80b7895).
+# They must EXECUTE there. A refusal above that cannot be shown to have been an
+# execution before is a test of nothing.
+SEC_SHA="80b7895"
+if ! git -C "$REPO_ROOT" cat-file -e "$SEC_SHA^{commit}" 2>/dev/null; then
+  git -C "$REPO_ROOT" fetch --quiet --depth=1 origin "$SEC_SHA" 2>/dev/null || true
+fi
+if ! git -C "$REPO_ROOT" cat-file -e "$SEC_SHA^{commit}" 2>/dev/null; then
+  fail "(o) FAIL-FIRST: baseline $SEC_SHA unreachable — refusing to report a pass having compared against nothing"
+else
+  OLD_TB="$WORK/sec4-task-build.md"; git -C "$REPO_ROOT" show "$SEC_SHA:.claude/commands/task-build.md"      > "$OLD_TB"
+  OLD_RT="$WORK/sec4-routine.md";    git -C "$REPO_ROOT" show "$SEC_SHA:.claude/lib/cloud-build-routine.md"  > "$OLD_RT"
+  OLD_PUB="$WORK/sec4-qx_publish_gates.sh"
+  awk -v name="qx_publish_gates" '
+    $0 ~ ("quetrex:exec-block " name "([^A-Za-z0-9_]|$)") && $0 !~ ("end quetrex:exec-block") { inb=1 }
+    inb { print }
+    $0 ~ ("end quetrex:exec-block " name "([^A-Za-z0-9_]|$)") { inb=0 }
+  ' "$OLD_TB" > "$OLD_PUB"
+  if grep -qF 's|{{TASK}}|' "$OLD_PUB" && ! grep -q 'qx_valid_task_id' "$OLD_PUB"; then
+    pass "(o) FAIL-FIRST: $SEC_SHA's qx_publish_gates seds the values into the script text and validates nothing"
+  else
+    fail "(o) FAIL-FIRST: $SEC_SHA's qx_publish_gates does not look like the pre-fix version — the control is not testing the reported defect"
+  fi
+  drive_old() {   # drive_old <shell> <wt> <task> <prefix> <routine>
+    PATH="$REPO_ROOT/bin:$PATH" "$1" -c '. "$1"; qx_publish_gates "$2" "$3" "$4" "$5"' \
+      _ "$OLD_PUB" "$2" "$3" "$4" "$5"
+  }
+  for sh in bash zsh; do
+    if ! command -v "$sh" >/dev/null 2>&1; then pass "(o) FAIL-FIRST $sh not present, skipped"; continue; fi
+    OLDT="QXO${$}${sh}-1"; rm -f "/tmp/plan-$OLDT.json"
+    WTO="$(gates_fixture "sec4old-$sh" "$OLDT")"
+    drive_old "$sh" "$WTO" '$(touch '"$CANDIR"'/old-task-cs)' "claude/" "$OLD_RT" >/dev/null 2>&1
+    drive_old "$sh" "$WTO" '`touch '"$CANDIR"'/old-task-bt`' "claude/" "$OLD_RT" >/dev/null 2>&1
+    drive_old "$sh" "$WTO" "$OLDT" 'claude/"; touch '"$CANDIR"'/old-pfx-q; :"' "$OLD_RT" >/dev/null 2>&1
+    WTOD="$(gates_fixture "sec4olddup-$sh" "$OLDT")"
+    drive_old "$sh" "$WTOD" "$OLDT" "claude/" "$DUP" >/dev/null 2>&1
+    for c in old-task-cs old-task-bt old-pfx-q; do
+      if [ -e "$CANDIR/$c" ]; then
+        pass "(o) FAIL-FIRST $sh: $SEC_SHA EXECUTED the payload ($c canary created) — the vector was live"
+        rm -f "$CANDIR/$c"
+      else
+        fail "(o) FAIL-FIRST $sh: $SEC_SHA did NOT execute $c — the payload proves nothing, so the refusal above proves nothing"
+      fi
+    done
+    if [ -e "$CANDIR/pub-second-pair" ]; then
+      pass "(o) FAIL-FIRST $sh: $SEC_SHA's extractor concatenated the SECOND sentinel pair and ran it (SEC-5 was live)"
+      rm -f "$CANDIR/pub-second-pair"
+    else
+      fail "(o) FAIL-FIRST $sh: $SEC_SHA did not run the second sentinel pair — the SEC-5 assertion above proves nothing"
+    fi
+  done
+fi
 
 # (l) ONE COPY of the publication logic.
 N_SENT="$(git -C "$REPO_ROOT" grep -l -E '^[[:space:]]*# >>> QUETREX GATE PUBLICATION >>>[[:space:]]*$' -- . 2>/dev/null | wc -l | tr -d ' ')"

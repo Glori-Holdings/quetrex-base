@@ -253,6 +253,23 @@ block between the two sentinel comments **verbatim** — it is executed as-is by
 test suite, so an edit here is an edit to tested behaviour:
 
     # >>> QUETREX GATE PUBLICATION >>>
+    # THE TASK ID AND THE BRANCH PREFIX ARE DATA, NOT CODE. They reach this block two
+    # ways, and from here down they are only ever shell VARIABLES — nothing below
+    # interpolates either value into the text of a command:
+    #   * ENVIRONMENT. A local build (task-build.md Step 6L) extracts these bytes to a
+    #     file and runs them with QX_TASK / QX_BRANCH_PREFIX exported. That path used to
+    #     sed the values into this text unescaped, so a branchPrefix carrying a double
+    #     quote — committed repo data — or a task id that was a bare command
+    #     substitution ran as shell on the operator's machine.
+    #   * TEMPLATE. A cloud session gets this routine as rendered PROMPT TEXT and has no
+    #     shell to inherit an export from, so the placeholders below are filled by
+    #     task-build.md's substitution pass before dispatch. That path genuinely needs
+    #     the literal, which is why the two placeholders stay.
+    # Both values are validated at their source (qx_valid_task_id / qx_valid_branch_prefix,
+    # task-build.md Step 1) before either path can reach this block. Env wins; the
+    # rendered placeholder is the single-quoted fallback.
+    [ -n "${QX_TASK:-}" ]          || QX_TASK='{{TASK}}'
+    [ -n "${QX_BRANCH_PREFIX:-}" ] || QX_BRANCH_PREFIX='{{BRANCH_PREFIX}}'
     HEAD_SHA="$(git rev-parse HEAD)" || { echo "transport_failure: no HEAD to publish gates for" >&2; exit 1; }
     # The gates branch name carries the head sha it describes, so it is UNIQUE per run and
     # never collides with a previous build's. Nothing has to be replaced or removed to
@@ -261,7 +278,7 @@ test suite, so an edit here is an edit to tested behaviour:
     # fixed name forced a delete-then-push on every re-dispatch; that destructive step is
     # gone, and with it the need to justify one.
     SHORT_SHA="$(printf '%.7s' "$HEAD_SHA")"
-    GATES_BRANCH="{{BRANCH_PREFIX}}{{TASK}}-gates-$SHORT_SHA"
+    GATES_BRANCH="$QX_BRANCH_PREFIX$QX_TASK-gates-$SHORT_SHA"
     mkdir -p .quetrex/plan || { echo "transport_failure: cannot create .quetrex/plan" >&2; exit 1; }
     # THE PLAN AND THE STATE ARE GATE EVIDENCE, not scratch. merge-gate.sh reads
     # .quetrex/plan/<TASK>.json for the file-ownership map (GATE 5) and for
@@ -269,9 +286,9 @@ test suite, so an edit here is an edit to tested behaviour:
     # plan governs this merge. Both are git-ignored, so neither reaches the operator
     # through the PR: without publishing them here, both gates silently no-op on every
     # cloud build and a developer that edited outside its lane ships unchallenged.
-    [ -f ".quetrex/plan/{{TASK}}.json" ] || cp "/tmp/plan-{{TASK}}.json" ".quetrex/plan/{{TASK}}.json" \
-      || { echo "transport_failure: the approved plan /tmp/plan-{{TASK}}.json is gone; cannot publish it" >&2; exit 1; }
-    node -e 'const fs=require("fs"),p=".quetrex/state.json";let s={};try{s=JSON.parse(fs.readFileSync(p,"utf8"))}catch(e){}if(!s.task)s.task=process.argv[1];fs.writeFileSync(p,JSON.stringify(s,null,2)+"\n")' "{{TASK}}" \
+    [ -f ".quetrex/plan/$QX_TASK.json" ] || cp "/tmp/plan-$QX_TASK.json" ".quetrex/plan/$QX_TASK.json" \
+      || { echo "transport_failure: the approved plan /tmp/plan-$QX_TASK.json is gone; cannot publish it" >&2; exit 1; }
+    node -e 'const fs=require("fs"),p=".quetrex/state.json";let s={};try{s=JSON.parse(fs.readFileSync(p,"utf8"))}catch(e){}if(!s.task)s.task=process.argv[1];fs.writeFileSync(p,JSON.stringify(s,null,2)+"\n")' "$QX_TASK" \
       || { echo "transport_failure: cannot write .quetrex/state.json" >&2; exit 1; }
     node -e 'const fs=require("fs");fs.writeFileSync(".quetrex/gates-head",process.argv[1]+"\n")' "$HEAD_SHA" \
       || { echo "transport_failure: cannot write .quetrex/gates-head" >&2; exit 1; }
@@ -282,7 +299,7 @@ test suite, so an edit here is an edit to tested behaviour:
     # skips the very checks this branch exists to carry. Missing required evidence is a
     # transport_failure (rule 5): stop, push nothing, and say which artifact is missing.
     for f in .quetrex/gates-head .quetrex/review-verdict.json .quetrex/verify-ledger.jsonl \
-             ".quetrex/plan/{{TASK}}.json" .quetrex/state.json; do
+             ".quetrex/plan/$QX_TASK.json" .quetrex/state.json; do
       [ -f "$f" ] || { echo "transport_failure: required gate artifact missing: $f" >&2; exit 1; }
       git add -f "$f" || { echo "transport_failure: cannot stage gate artifact: $f" >&2; exit 1; }
     done
@@ -293,7 +310,7 @@ test suite, so an edit here is an edit to tested behaviour:
       git add -f "$f" || { echo "transport_failure: cannot stage gate artifact: $f" >&2; exit 1; }
     done
     git -c user.name='quetrex-bot' -c user.email='quetrex-bot@users.noreply.github.com' \
-      commit -q -m "chore(gates): {{TASK}} gate artifacts for $HEAD_SHA" \
+      commit -q -m "chore(gates): $QX_TASK gate artifacts for $HEAD_SHA" \
       || { echo "transport_failure: cannot commit the gate artifacts" >&2; exit 1; }
     # A plain create-and-push. The branch name carries this run's head sha, so the ref
     # does not already exist and nothing is overwritten or removed. This publication

@@ -56,10 +56,55 @@ Argument: `$ARGUMENTS` is a task identifier (`SMA-1`), an optional run location
 ## Step 1 — Parse, resolve, fetch
 
 ```bash
+# ── quetrex:exec-block qx_valid_ids ────────────────────────────────────────────
+# Executable, and executed: test/task-build-never-local.test.sh drives both
+# functions under bash AND zsh with hostile values.
+#
+# THE TWO VALUES THIS COMMAND CARRIES INTO SHELL ARE VALIDATED AT THEIR SOURCE,
+# ONCE, HERE. The task id arrives raw from `$ARGUMENTS`; the branch prefix
+# arrives from `.quetrex/project.json`, which is COMMITTED data anyone with repo
+# write access controls. Both are then spliced into branch names, file paths and
+# — before this — into the text of a script that was executed, so a value
+# carrying a quote or a command substitution ran as shell on this machine.
+# Validating at the source means every later step inherits the guarantee and no
+# downstream quoting scheme has to be got right.
+#
+# Each check is TWO checks, and the first is what makes the second safe: `case`
+# sees the WHOLE value including any newline, so a payload whose first line is
+# harmless ("SMA-1", newline, "; rm -rf /") cannot pass a line-oriented regex.
+# An error line NEVER reproduces the offending bytes verbatim: a value carrying a
+# newline would print its payload as a second line of its own in the operator's
+# terminal. Control characters go, and the rest is truncated.
+qx_show_value() {              # qx_show_value <value>
+  printf '%s' "$1" | tr -d '\000-\037' | cut -c1-60
+}
+qx_valid_task_id() {           # qx_valid_task_id <value>
+  case "$1" in
+    ""|*[!A-Za-z0-9.-]*) : ;;
+    # The identifier shape the kanban issues and /quetrex:merge already enforces:
+    # SMA-1, and SMA-1.2 for an epic child.
+    *) printf '%s' "$1" | grep -qE '^[A-Za-z][A-Za-z0-9]*-[0-9]+(\.[0-9]+)?$' && return 0 ;;
+  esac
+  printf '%s\n' "Not a task id: '$(qx_show_value "$1")' — a task identifier looks like SMA-1, or SMA-1.2 for an epic child." >&2
+  return 1
+}
+qx_valid_branch_prefix() {     # qx_valid_branch_prefix <value>
+  case "$1" in
+    # Rejected: empty, any character outside a git ref prefix, a `..` segment
+    # (forbidden in a refname and a path escape), a leading `/` or `-`.
+    ""|*[!A-Za-z0-9._/-]*|*..*|/*|-*) : ;;
+    */) return 0 ;;                       # must end in `/` — every branch is <prefix><id>
+  esac
+  printf '%s\n' "Not a branch prefix: branchPrefix='$(qx_show_value "$1")' in .quetrex/project.json — it must read like 'claude/': letters, digits, . _ - / and a trailing /." >&2
+  return 1
+}
+# ── end quetrex:exec-block qx_valid_ids ───────────────────────────────────────
+
 # ── quetrex:exec-block qx_parse_args ───────────────────────────────────────────
 # Executable, and executed: test/task-build-never-local.test.sh drives this
 # under bash AND zsh. Prints "TASK_ID MODE RUN_WHERE" on one line, or fails.
 # RUN_WHERE is `cloud` unless the operator typed the literal word `local`.
+# Requires the qx_valid_ids block above — include it verbatim.
 qx_parse_args() {              # qx_parse_args "$ARGUMENTS"
   local task="" mode="full" where="cloud" arg
   local usage="Usage: /quetrex:task-build SMA-1 [cloud|local] [--build-only | --tick]"
@@ -78,6 +123,9 @@ qx_parse_args() {              # qx_parse_args "$ARGUMENTS"
 $(printf '%s\n' "$1" | tr ' \t' '\n\n')
 EOF
   [ -n "$task" ] || { echo "$usage" >&2; return 1; }
+  # THE ONE PLACE THE TASK ID IS VALIDATED. Everything downstream — branch names,
+  # file paths, the gates publication — inherits this.
+  qx_valid_task_id "$task" || return 1
   printf '%s %s %s\n' "$task" "$mode" "$where"
 }
 # ── end quetrex:exec-block qx_parse_args ──────────────────────────────────────
@@ -106,6 +154,10 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 # without a repo admin loosening the branch restriction first.
 BRANCH_PREFIX="$(quetrex-api json-get "$REPO_ROOT/.quetrex/project.json" branchPrefix 2>/dev/null || echo 'claude/')"
 [ -n "$BRANCH_PREFIX" ] || BRANCH_PREFIX="claude/"
+# THE ONE PLACE THE PREFIX IS VALIDATED — where the binding is read. It is committed
+# data, so anyone with repo write access supplies it; every branch name and every later
+# step is built from it. qx_valid_branch_prefix is in the qx_valid_ids block above.
+qx_valid_branch_prefix "$BRANCH_PREFIX" || exit 1
 
 echo "Project: $QX_PROJECT_CODE @ $QX_KANBAN_URL   branchPrefix=$BRANCH_PREFIX"
 ```
@@ -1132,13 +1184,28 @@ which `test/routine-transport.test.sh` executes — and this block runs exactly 
 ```bash
 # ── quetrex:exec-block qx_publish_gates ────────────────────────────────────────
 # Executable, and executed: test/task-build-never-local.test.sh drives this
-# under bash AND zsh against a real bare remote. ONE COPY: it does not
-# restate the publication logic, it extracts the sentinel-delimited block from
-# cloud-build-routine.md (§5b), fills {{TASK}} / {{BRANCH_PREFIX}}, and runs
-# it inside <wt> — so a local build publishes byte-for-byte what a cloud build
-# publishes, and a fix to the routine's block is a fix here.
+# under bash AND zsh against a real bare remote. Requires the qx_valid_ids block
+# from Step 1 — include it verbatim above this one.
+#
+# ONE COPY: it does not restate the publication logic, it extracts the
+# sentinel-delimited block from cloud-build-routine.md (§5b) and runs it inside
+# <wt> — so a local build publishes byte-for-byte what a cloud build publishes,
+# and a fix to the routine's block is a fix here.
+#
+# NOTHING IS SUBSTITUTED INTO THE SCRIPT TEXT. The task id and the branch prefix
+# are handed to the block through the ENVIRONMENT (QX_TASK / QX_BRANCH_PREFIX),
+# which it reads as shell variables. They used to be sed'd in unescaped and both
+# landed inside double-quoted strings, so a branchPrefix carrying a double quote
+# — committed data, read at Step 1 — or a task id that was a bare command
+# substitution executed arbitrary shell on the operator's machine. Data reaches
+# a script through its environment or its arguments, never through its source.
 qx_publish_gates() {           # qx_publish_gates <wt> <task> <branch-prefix> [routine.md]
   local wt="$1" task="$2" prefix="$3" routine="${4:-}" bin="" script="" rc=0
+  local n_start=0 n_end=0
+  # Belt to Step 1's braces: this function is the one that RUNS something, so it
+  # re-asserts the shape of both values rather than trusting its caller.
+  qx_valid_task_id       "$task"   || return 1
+  qx_valid_branch_prefix "$prefix" || return 1
   if [ -z "$routine" ]; then
     # The routine ships beside this command: <plugin root>/.claude/lib/. bin/ is on the
     # plugin's PATH, so the root is one level above quetrex-cloud-prep; quetrex-base
@@ -1152,17 +1219,30 @@ qx_publish_gates() {           # qx_publish_gates <wt> <task> <branch-prefix> [r
     fi
   fi
   [ -f "$routine" ] || { echo "cannot publish the gates: cloud-build-routine.md not found beside quetrex-cloud-prep or in the repo" >&2; return 1; }
+  # EXACTLY ONE SENTINEL PAIR, or nothing runs. The extractor used to concatenate
+  # every pair in the file, so a second crafted pair — in a routine copy the branch
+  # under review supplies — would be appended to the real block and executed with it.
+  n_start="$(grep -c -E '^[[:space:]]*# >>> QUETREX GATE PUBLICATION >>>[[:space:]]*$' "$routine" || true)"
+  n_end="$(grep -c -E '^[[:space:]]*# <<< QUETREX GATE PUBLICATION <<<[[:space:]]*$' "$routine" || true)"
+  if [ "$n_start" != "1" ] || [ "$n_end" != "1" ]; then
+    echo "cannot publish the gates: $routine carries $n_start start and $n_end end QUETREX GATE PUBLICATION sentinels — exactly one pair is required" >&2
+    return 1
+  fi
   script="$(mktemp)" || return 1
+  # First pair only, and nothing after its end sentinel.
   awk '
-    /^[[:space:]]*# >>> QUETREX GATE PUBLICATION >>>[[:space:]]*$/ { inb=1; next }
+    /^[[:space:]]*# >>> QUETREX GATE PUBLICATION >>>[[:space:]]*$/ { if (!seen) { inb=1; seen=1 } next }
     /^[[:space:]]*# <<< QUETREX GATE PUBLICATION <<<[[:space:]]*$/ { inb=0; next }
     inb { print }
-  ' "$routine" | sed -e 's/^    //' -e "s|{{TASK}}|$task|g" -e "s|{{BRANCH_PREFIX}}|$prefix|g" > "$script"
-  if ! grep -q 'GATES_BRANCH=' "$script" || grep -q '{{' "$script"; then
+  ' "$routine" | sed -e 's/^    //' > "$script"
+  if ! grep -q 'GATES_BRANCH=' "$script"; then
     echo "cannot publish the gates: no usable QUETREX GATE PUBLICATION block between the sentinels in $routine" >&2
     rm -f "$script"; return 1
   fi
-  ( cd "$wt" && bash "$script" ); rc=$?
+  # The values travel in the ENVIRONMENT. The block reads them as $QX_TASK /
+  # $QX_BRANCH_PREFIX; its {{...}} placeholders are the cloud render's fallback and
+  # are never reached here.
+  ( cd "$wt" && QX_TASK="$task" QX_BRANCH_PREFIX="$prefix" bash "$script" ); rc=$?
   rm -f "$script"
   return "$rc"
 }
