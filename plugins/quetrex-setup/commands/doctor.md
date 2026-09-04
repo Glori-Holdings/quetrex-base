@@ -741,7 +741,12 @@ fail differently and the report must not blur them: the webhook matches a delive
 makes the board render the pair as **linked** (`RepoLink` checks both). Comparison is
 done the way the board itself compares (`branch-ref.ts` trims, lowercases, strips a
 trailing `.git`, then strips trailing slashes — all four, through the one shared
-`quetrex-api repo-norm` that init uses). A board that does not answer is reported as
+`quetrex-api repo-norm` that init uses). Because that one helper carries every
+comparison, its result is **checked**: a `repo-norm` missing from `PATH`, exiting
+non-zero, or returning nothing for a non-empty value makes the half read *could not be
+verified* and draws a ✗, never a ✓. Unchecked it would fail silent rather than closed —
+both sides collapse to the empty string, the halves compare equal, and a link pointing at
+another repository passes as green. A board that does not answer is reported as
 *unverified*, never as unset. Init
 writes the missing halves, but it deliberately leaves a **differing** one alone — so a
 mismatch gets the fix that actually resolves it, not another "re-run init".
@@ -802,6 +807,7 @@ else
   WH_INIT=""       # something here is a thing init will actually write
   WH_MISMATCH=""   # a stored half DIFFERS — init leaves those alone by design
   WH_UNREAD=""     # the board did not answer; the link state is UNKNOWN
+  WH_NOCOMPARE=""  # repo-norm gave no value; the halves could not be COMPARED
   # (b) a hook on the repo whose config.url is the board's endpoint
   HOOK_ID="$(gh api "repos/$QX_SLUG/hooks" --jq '.[] | select(.config.url=="'"$HOOK_URL"'") | .id' 2>/dev/null | head -1)"
   if [ -z "$HOOK_ID" ]; then
@@ -835,7 +841,25 @@ else
   # `dealerq` drew a cross here and a fix line that resolved nothing — the board
   # had considered them the same repo all along. `quetrex-api repo-norm` holds
   # that shape once and init uses the identical call, so the two cannot drift.
-  qx_norm() { quetrex-api repo-norm "$1"; }
+  # qx_norm <value> — the shared normalization behind a contract: PRINT a
+  # value and return 0, or return NON-ZERO having asserted nothing. Every
+  # comparison below is an equality test between two normalized values, so a
+  # helper that quietly hands back "" for both sides makes a link pointing at
+  # a DIFFERENT repository compare EQUAL: no PATCH, but no warning either, and
+  # the operator is told nothing at all. All three failure shapes are failures
+  # and never a value — a non-zero exit, quetrex-api missing from PATH (127),
+  # and an empty or whitespace-only result from a NON-EMPTY input. An empty
+  # input normalizing to empty is legitimate and stays a success, so "unset on
+  # the board" is still distinguishable from "could not be normalized".
+  # This wrapper is byte-identical in init.md's qx_link_project_repo block;
+  # both files call it rather than the bare helper, so a call site cannot
+  # forget the check.
+  qx_norm() {
+    local _qn_in="$1" _qn_out
+    _qn_out="$(quetrex-api repo-norm "$_qn_in" 2>/dev/null)" || return 1
+    [ -z "$_qn_in" ] || [ -n "$(printf '%s' "$_qn_out" | LC_ALL=C tr -d '[:space:]')" ] || return 1
+    printf '%s' "$_qn_out"
+  }
   SLUG_OWNER="${QX_SLUG%%/*}"; SLUG_REPO="${QX_SLUG##*/}"
   LINKED_OWNER=""; LINKED_REPO=""
   if [ "$LINKED_RC" -ne 0 ] || ! printf '%s' "$LINKED_JSON" | node -e '
@@ -847,14 +871,25 @@ else
     WH_UNREAD=1
   else
     LINKED_OWNER="$(linked_field githubOwner)"; LINKED_REPO="$(linked_field githubRepo)"
+    # Each comparison takes qx_norm's EXIT STATUS. A normalization that fails
+    # is not a match: unchecked, both sides collapse to "" and the half reads
+    # EQUAL, which is a silent ✓ over a link that may point somewhere else.
+    # WH_NOCOMPARE keeps this out of WH_MISMATCH deliberately — no mismatch was
+    # established, so no PATCH one-liner is offered, and out of WH_MOVE/
+    # WH_DISPLAY, whose consequences were never demonstrated either. It still
+    # lands in WH_MISSING, so the check prints ✗, never ✓.
     if [ -z "$LINKED_OWNER" ]; then
       WH_MISSING="$WH_MISSING project $CODE_SHOWN githubOwner (unset; origin is $SLUG_OWNER);"; WH_DISPLAY=1; WH_INIT=1
-    elif [ "$(qx_norm "$LINKED_OWNER")" != "$(qx_norm "$SLUG_OWNER")" ]; then
+    elif ! NORM_LINKED_OWNER="$(qx_norm "$LINKED_OWNER")" || ! NORM_SLUG_OWNER="$(qx_norm "$SLUG_OWNER")"; then
+      WH_MISSING="$WH_MISSING project $CODE_SHOWN githubOwner (could not be verified — repo-norm returned no value);"; WH_NOCOMPARE=1
+    elif [ "$NORM_LINKED_OWNER" != "$NORM_SLUG_OWNER" ]; then
       WH_MISSING="$WH_MISSING project $CODE_SHOWN githubOwner (is $(qx_ctl "$LINKED_OWNER"), origin is $SLUG_OWNER);"; WH_DISPLAY=1; WH_MISMATCH=1
     fi
     if [ -z "$LINKED_REPO" ]; then
       WH_MISSING="$WH_MISSING project $CODE_SHOWN githubRepo (unset; origin is $SLUG_REPO);"; WH_MOVE=1; WH_DISPLAY=1; WH_INIT=1
-    elif [ "$(qx_norm "$LINKED_REPO")" != "$(qx_norm "$SLUG_REPO")" ]; then
+    elif ! NORM_LINKED_REPO="$(qx_norm "$LINKED_REPO")" || ! NORM_SLUG_REPO="$(qx_norm "$SLUG_REPO")"; then
+      WH_MISSING="$WH_MISSING project $CODE_SHOWN githubRepo (could not be verified — repo-norm returned no value);"; WH_NOCOMPARE=1
+    elif [ "$NORM_LINKED_REPO" != "$NORM_SLUG_REPO" ]; then
       WH_MISSING="$WH_MISSING project $CODE_SHOWN githubRepo (is $(qx_ctl "$LINKED_REPO"), origin is $SLUG_REPO);"; WH_MOVE=1; WH_DISPLAY=1; WH_MISMATCH=1
     fi
   fi
@@ -866,6 +901,9 @@ else
     [ -z "$WH_DISPLAY" ] || echo "    The board will show the repository as not linked."
     if [ -n "$WH_UNREAD" ]; then
       echo "    Fix: the board did not answer for project $CODE_SHOWN — check it is reachable and the login is current (/quetrex-setup:login), then re-run /quetrex-setup:doctor."
+    fi
+    if [ -n "$WH_NOCOMPARE" ]; then
+      echo "    Fix: the stored halves could not be compared with the origin — 'quetrex-api repo-norm' returned no value (missing from PATH, or failing), so this check asserts nothing about the link. Check quetrex-api runs (quetrex-api repo-norm dealerq), then re-run /quetrex-setup:doctor."
     fi
     if [ -n "$WH_MISMATCH" ]; then
       echo "    Fix: init never overwrites a differing repo link, so re-running it changes nothing here. Set the pair on the board's repo-link dialog, or as a project admin run:"

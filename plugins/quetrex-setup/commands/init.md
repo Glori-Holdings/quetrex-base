@@ -1081,7 +1081,15 @@ trailing `.git`, then strips trailing slashes. Lowercasing alone left a stored
 `dealerq.git` reading as a different repo from an origin `dealerq`, which refused the link
 forever and printed a fix for a problem the board did not have. `quetrex-api repo-norm`
 holds that shape in one place and **both** sides of **every** comparison go through it, in
-init and in doctor alike, so the two cannot drift from each other or from the board.
+init and in doctor alike, so the two cannot drift from each other or from the board. One
+shared helper on the comparison path is also a single point of failure, so its result is
+**checked**: a `repo-norm` that is missing from `PATH`, exits non-zero, or hands back
+nothing for a non-empty value returns no value at all, and the block says the comparison
+could not be made and touches nothing. Unchecked it would fail *silent* rather than
+closed — all four normalized values collapse to the empty string, `""` compares equal to
+`""`, and a link pointing at a genuinely different repository reads as a match with nothing
+printed. An empty input normalizing to empty is still a success, so "unset on the board"
+stays distinguishable from "could not be normalized".
 Runs in the operator's zsh as well as bash: `${SLUG%%/*}` / `${SLUG##*/}` only and no
 `$var:` modifiers (`${v,,}` is bash-4-only and `${v:l}` zsh-only, and neither does the
 other three steps anyway).
@@ -1161,11 +1169,34 @@ if printf '%s' "$QX_SLUG" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
     # through it, so init and doctor cannot drift from each other or from the
     # board. (It is also why there is no ${v,,}/${v:l} here — neither is
     # portable across bash and zsh, and neither does the other three steps.)
-    QX_OWNER_LC="$(quetrex-api repo-norm "$QX_OWNER_NAME")"
-    QX_REPO_LC="$(quetrex-api repo-norm "$QX_REPO_NAME")"
-    QX_LINKED_OWNER_LC="$(quetrex-api repo-norm "$QX_LINKED_OWNER")"
-    QX_LINKED_REPO_LC="$(quetrex-api repo-norm "$QX_LINKED_REPO")"
-    if { [ -n "$QX_LINKED_OWNER" ] && [ "$QX_LINKED_OWNER_LC" != "$QX_OWNER_LC" ]; } \
+    # qx_norm <value> — the shared normalization behind a contract: PRINT a
+    # value and return 0, or return NON-ZERO having asserted nothing. Every
+    # comparison below is an equality test between two normalized values, so a
+    # helper that quietly hands back "" for both sides makes a link pointing at
+    # a DIFFERENT repository compare EQUAL: no PATCH, but no warning either, and
+    # the operator is told nothing at all. All three failure shapes are failures
+    # and never a value — a non-zero exit, quetrex-api missing from PATH (127),
+    # and an empty or whitespace-only result from a NON-EMPTY input. An empty
+    # input normalizing to empty is legitimate and stays a success, so "unset on
+    # the board" is still distinguishable from "could not be normalized".
+    # This wrapper is byte-identical in doctor.md's Check 14; both files call it
+    # rather than the bare helper, so a call site cannot forget the check.
+    qx_norm() {
+      local _qn_in="$1" _qn_out
+      _qn_out="$(quetrex-api repo-norm "$_qn_in" 2>/dev/null)" || return 1
+      [ -z "$_qn_in" ] || [ -n "$(printf '%s' "$_qn_out" | LC_ALL=C tr -d '[:space:]')" ] || return 1
+      printf '%s' "$_qn_out"
+    }
+    QX_NORM_RC=0
+    QX_OWNER_LC="$(qx_norm "$QX_OWNER_NAME")"          || QX_NORM_RC=1
+    QX_REPO_LC="$(qx_norm "$QX_REPO_NAME")"            || QX_NORM_RC=1
+    QX_LINKED_OWNER_LC="$(qx_norm "$QX_LINKED_OWNER")" || QX_NORM_RC=1
+    QX_LINKED_REPO_LC="$(qx_norm "$QX_LINKED_REPO")"   || QX_NORM_RC=1
+    if [ "$QX_NORM_RC" -ne 0 ]; then
+      # Fail CLOSED and SAY SO. Never PATCH, never claim a match.
+      echo "could not compare project $QX_CODE_SHOWN's repo link against $QX_SLUG — 'quetrex-api repo-norm' returned no usable value (missing from PATH, or failing). The board was not changed and the link state is unverified." >&2
+      echo "  Fix: check quetrex-api runs (quetrex-api repo-norm dealerq), then re-run /quetrex-setup:init." >&2
+    elif { [ -n "$QX_LINKED_OWNER" ] && [ "$QX_LINKED_OWNER_LC" != "$QX_OWNER_LC" ]; } \
        || { [ -n "$QX_LINKED_REPO" ] && [ "$QX_LINKED_REPO_LC" != "$QX_REPO_LC" ]; }; then
       # Name BOTH halves. A half-set link rendered as "Someone-Else/" reads as a
       # repository nobody owns.
@@ -1190,7 +1221,8 @@ if printf '%s' "$QX_SLUG" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
         && echo "project $QX_CODE_SHOWN linked to $QX_OWNER_NAME/$QX_REPO_NAME" \
         || echo "could not link project $QX_CODE_SHOWN to $QX_OWNER_NAME/$QX_REPO_NAME — the board shows it unlinked and the webhook will ignore its deliveries" >&2
     fi
-    unset QX_LINKED_OWNER QX_LINKED_REPO QX_LINKED_OWNER_LC QX_LINKED_REPO_LC QX_OWNER_LC QX_REPO_LC
+    unset QX_LINKED_OWNER QX_LINKED_REPO QX_LINKED_OWNER_LC QX_LINKED_REPO_LC QX_OWNER_LC QX_REPO_LC QX_NORM_RC
+    unset -f qx_norm
   fi
   unset QX_LINKED_JSON QX_GET_RC
 fi
