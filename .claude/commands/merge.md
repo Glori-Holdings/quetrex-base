@@ -1,5 +1,5 @@
 ---
-description: Merge a Quetrex task's reviewed PR — brings the cloud build's gate evidence home, verifies it against the PR head, squash-merges, sets the task to merged, and tears the branch down. Usage: /quetrex:merge SMA-1
+description: Merge a Quetrex task's reviewed PR — brings the build's gate evidence home (a cloud build's published gates branch, or a local build's on-disk artifacts), verifies it against the PR head, squash-merges, sets the task to merged, and tears the branch down. Usage: /quetrex:merge SMA-1
 argument-hint: "<TASK-ID>  (e.g. DEA-1, or DEA-1.2 for an epic child)"
 ---
 
@@ -28,9 +28,19 @@ So this command's real job is **transport plus verification**: fetch the evidenc
 build published, prove it describes the exact commit being merged, then let the same gate
 that always ran make the decision.
 
-**It bypasses nothing.** `merge-gate.sh` still fires on the merge and re-checks every
-artifact independently. If the evidence is missing, stale, or red, the merge is denied and
-this command says so plainly. There is no flag to force it.
+**A build that ran locally is the same problem with a shorter journey.** Its seven artifacts
+were never published to a gates branch — they are sitting in the `.quetrex/` of whatever
+checkout the pipeline ran in, usually a worktree of this very repo. Until this command could
+see them, a local build's merge was refused for want of evidence that existed one directory
+away. So there are **two equal evidence sources**, remote and local, selected by the same
+rule: the artifacts must name the commit being merged, or they are not used.
+
+**It bypasses nothing, on either route.** `merge-gate.sh` still fires on the merge and
+re-checks every artifact independently, from the one location it reads — `$REPO_ROOT/.quetrex/`
+— which is why local evidence is *copied there* rather than trusted where it lies. A locally
+built PR merges only when the same green verify ledger, the same zero open Critical findings,
+and the same HEAD-pinned `AUTO_MERGE` verdict exist that a cloud-built one needs. Local
+evidence is a **delivery** path, not a lower standard, and there is no flag to force it.
 
 ---
 
@@ -169,6 +179,66 @@ fi
 SPEC_BRANCH="$(git -C "$REPO_ROOT" ls-remote --heads origin "quetrex-spec/${TASK}-*" 2>/dev/null | awk '{print $2}' | sed 's#refs/heads/##' | tail -1)"
 [ -n "$SPEC_BRANCH" ] || SPEC_BRANCH="quetrex-spec/${TASK}"
 
+# ── quetrex:exec-block qx_find_local_evidence ──────────────────────────────
+# LOCAL evidence — the second, equal source. Executable, and executed:
+# test/merge-local-evidence.test.sh drives this function against real git
+# worktrees carrying real artifact files.
+#
+# A cloud build publishes its gate artifacts to `<prefix><TASK>-gates-<sha7>`.
+# A build that ran on THIS machine publishes nothing: it writes the identical
+# seven files into the `.quetrex/` of the checkout it ran in — the operator's
+# repo, or (far more often) the worktree the pipeline created for the task.
+# Discovery that only ever looked at origin therefore refused every local
+# build's merge for want of evidence sitting one directory away.
+#
+# THE SELECTION RULE IS THE REMOTE PATH'S RULE, NOT A SECOND ONE. §2 accepts a
+# gates branch only when it NAMES this PR's head; the same pin decides here,
+# read off the very fields merge-gate.sh itself pins on:
+#   - review-verdict.json  .sha        == the PR head
+#   - verify-ledger.jsonl  some .sha   == the PR head   (at least one entry)
+#   - security-findings.json .head_sha == the PR head   (when the file exists;
+#                                          absent is legal, malformed is not)
+#   - gates-head, if a file of that name is sitting beside them, must agree —
+#     an evidence set whose own header contradicts the artifacts next to it is
+#     not evidence, it is two answers.
+# Evidence pinned to any other commit is evidence about other code and is
+# never accepted. Nothing here judges GREEN, an open Critical, or ownership:
+# that is merge-gate.sh's job and it is untouched.
+qx_find_local_evidence() {   # qx_find_local_evidence <repo-root> <pr-sha> -> prints dir
+  local root="$1" want="$2" d
+  [ -n "$want" ] || return 0
+  { printf '%s\n' "$root"
+    git -C "$root" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p'
+  } | awk 'NF && !seen[$0]++' | while IFS= read -r d; do
+    [ -d "$d/.quetrex" ] || continue
+    node -e '
+      const fs = require("fs"), dir = process.argv[1], want = process.argv[2];
+      const rd = f => { try { return fs.readFileSync(dir + "/.quetrex/" + f, "utf8") } catch { return null } };
+      const js = f => { const t = rd(f); if (t === null) return null; try { return JSON.parse(t) } catch { return false } };
+      const gh = rd("gates-head");
+      if (gh !== null && gh.trim() !== want) process.exit(1);
+      const v = js("review-verdict.json");
+      if (!v || String(v.sha || "") !== want) process.exit(1);
+      const led = rd("verify-ledger.jsonl");
+      if (led === null) process.exit(1);
+      let pinned = false;
+      for (const line of led.split("\n")) {
+        if (!line.trim()) continue;
+        let e; try { e = JSON.parse(line) } catch { continue }
+        if (String(e.sha || "") === want) pinned = true;
+      }
+      if (!pinned) process.exit(1);
+      const s = js("security-findings.json");
+      if (s === false) process.exit(1);
+      if (s && String(s.head_sha || "") !== want) process.exit(1);
+      process.exit(0);
+    ' "$d" "$want" 2>/dev/null || continue
+    printf '%s\n' "$d"
+  done | head -1
+}
+# ── end quetrex:exec-block qx_find_local_evidence ──────────────────────────
+LOCAL_EVIDENCE_DIR="$(qx_find_local_evidence "$REPO_ROOT" "$PR_SHA")"
+
 # Rule A: persist everything, because none of it survives to the next Bash call.
 mkdir -p "$REPO_ROOT/.quetrex"
 {
@@ -182,10 +252,12 @@ mkdir -p "$REPO_ROOT/.quetrex"
   printf 'PR_SHA=%q\n'        "$PR_SHA"
   printf 'GATES_BRANCH=%q\n'  "$GATES_BRANCH"
   printf 'SPEC_BRANCH=%q\n'   "$SPEC_BRANCH"
+  printf 'LOCAL_EVIDENCE_DIR=%q\n' "$LOCAL_EVIDENCE_DIR"
 } > "$REPO_ROOT/.quetrex/merge-facts.env"
 
 echo "$TASK → PR #$PR_NUM ($PR_HEAD @ ${PR_SHA:0:12})"
 echo "repo=$SLUG  gates=$GATES_BRANCH  spec=$SPEC_BRANCH  epic=$IS_EPIC"
+echo "local evidence: ${LOCAL_EVIDENCE_DIR:-none}"
 ```
 
 If zero or several PRs match, stop and show them — the block already printed each candidate's
@@ -204,10 +276,43 @@ file-ownership map and for the architect's `security_review_required` flag, and 
 `state.json` for the task id. Without them every cloud build silently took the gate's
 "no plan → skip ownership" branch — a gate that cannot fail is not a gate.
 
+Two sources, one destination. A cloud build's artifacts are fetched off the gates branch; a
+local build's are copied out of the `.quetrex/` §1 found them in. Either way they land in
+`$REPO_ROOT/.quetrex/` — the single location `merge-gate.sh` reads — so every downstream
+check is byte-identical between the two routes rather than a second, differently-sourced
+code path. **Copy, never trust in place.**
+
 ```bash
 . "$(git rev-parse --show-toplevel)/.quetrex/merge-facts.env"
+LOCAL_EVIDENCE_DIR="${LOCAL_EVIDENCE_DIR:-}"
 
-git -C "$REPO_ROOT" fetch -q origin "$GATES_BRANCH" 2>/dev/null && GATES_OK=1 || GATES_OK=0
+# §1 leaves GATES_BRANCH EMPTY when origin carries no gates ref for this head,
+# and `git fetch origin ""` is not an error — an empty refspec is a plain
+# default fetch, which SUCCEEDS. Unguarded, "no gates branch" therefore
+# reported itself as GATES_OK=1 and went on to print
+# "Fetched gate evidence from  (pinned to )" while deleting every artifact it
+# had just failed to `show`. Ask for nothing and you get FETCH_HEAD pointing at
+# something entirely unrelated; the name has to be non-empty to mean anything.
+GATES_OK=0
+if [ -n "$GATES_BRANCH" ]; then
+  git -C "$REPO_ROOT" fetch -q origin "$GATES_BRANCH" 2>/dev/null && GATES_OK=1
+fi
+REMOTE_SHA=""
+[ "$GATES_OK" -eq 1 ] && REMOTE_SHA="$(git -C "$REPO_ROOT" show "FETCH_HEAD:.quetrex/gates-head" 2>/dev/null | tr -d '[:space:]')"
+
+# PRECEDENCE, decided before a single byte is copied.
+#   both name this head  → REMOTE wins. It is immutable and shared: every party
+#       judging this PR reads the same commit, and no working tree can have been
+#       edited out from under it. Say so, in one line — the operator should
+#       never have to guess which of two evidence sets authorized a merge.
+#   exactly one          → that one.
+#   they name DIFFERENT  → NEITHER, and stop. Two evidence sets that disagree
+#       commits            about what was verified are not evidence; picking the
+#       convenient one is exactly how a stale green gets laundered into a merge.
+if [ "$GATES_OK" -eq 1 ] && [ -n "$LOCAL_EVIDENCE_DIR" ] && [ "$REMOTE_SHA" != "$PR_SHA" ]; then
+  echo "EVIDENCE CONFLICT for PR #$PR_NUM (head ${PR_SHA:0:12}): gates branch $GATES_BRANCH describes ${REMOTE_SHA:-<no gates-head>}, local artifacts in $LOCAL_EVIDENCE_DIR/.quetrex describe $PR_SHA — using neither." >&2
+  exit 1
+fi
 
 if [ "$GATES_OK" -eq 1 ]; then
   mkdir -p "$REPO_ROOT/.quetrex/plan"
@@ -218,16 +323,43 @@ if [ "$GATES_OK" -eq 1 ]; then
     || rm -f "$REPO_ROOT/.quetrex/plan/$TASK.json"
   GATES_SHA="$(tr -d '[:space:]' < "$REPO_ROOT/.quetrex/gates-head" 2>/dev/null || echo "")"
   echo "Fetched gate evidence from $GATES_BRANCH (pinned to ${GATES_SHA:0:12})"
+  if [ -n "$LOCAL_EVIDENCE_DIR" ]; then
+    echo "  local artifacts in $LOCAL_EVIDENCE_DIR/.quetrex pin the same head — using the REMOTE gates branch, which is immutable and shared."
+  fi
   [ -s "$REPO_ROOT/.quetrex/plan/$TASK.json" ] \
     && echo "  plan/$TASK.json present — GATE 5 (ownership) and the plan's security_review_required are live" \
     || echo "  NOTE: no plan/$TASK.json on the gates branch — merge-gate.sh will skip GATE 5 (ownership)."
+elif [ -n "$LOCAL_EVIDENCE_DIR" ]; then
+  mkdir -p "$REPO_ROOT/.quetrex/plan"
+  # Copying onto itself would `cp: same file` and the `|| rm -f` would then
+  # DELETE the very evidence being used — so the already-home case copies
+  # nothing and simply says where it is.
+  if [ "$LOCAL_EVIDENCE_DIR" != "$REPO_ROOT" ]; then
+    for f in verify-ledger.jsonl review-verdict.json qa-report.json security-findings.json gates-head state.json; do
+      cp -f "$LOCAL_EVIDENCE_DIR/.quetrex/$f" "$REPO_ROOT/.quetrex/$f" 2>/dev/null || rm -f "$REPO_ROOT/.quetrex/$f"
+    done
+    cp -f "$LOCAL_EVIDENCE_DIR/.quetrex/plan/$TASK.json" "$REPO_ROOT/.quetrex/plan/$TASK.json" 2>/dev/null \
+      || rm -f "$REPO_ROOT/.quetrex/plan/$TASK.json"
+  fi
+  echo "Using LOCAL gate evidence from $LOCAL_EVIDENCE_DIR/.quetrex (pinned to ${PR_SHA:0:12}) — nothing published a gates branch for this head."
+  [ -s "$REPO_ROOT/.quetrex/plan/$TASK.json" ] \
+    && echo "  plan/$TASK.json present — GATE 5 (ownership) and the plan's security_review_required are live" \
+    || echo "  NOTE: no plan/$TASK.json beside the local evidence — merge-gate.sh will skip GATE 5 (ownership)."
 else
-  echo "No gates branch ($GATES_BRANCH) — this PR carries no published gate evidence."
+  echo "No gates branch (${GATES_BRANCH:-none on origin for this head}), and no local .quetrex artifacts pinned to ${PR_SHA:0:12} — this PR carries no gate evidence at all, from either source."
 fi
 ```
 
+Local evidence changes **what is delivered, never what is required**. `merge-gate.sh` is
+untouched: the copied ledger must still be green for the merged commit, `security-findings.json`
+must still carry zero open Critical findings, and `review-verdict.json` must still say
+`AUTO_MERGE` pinned to this head. A locally built PR that cannot satisfy those does not merge,
+and there is no flag that skips a gate for it.
+
 **Then check the pin yourself, before attempting anything.** The local gate will check it
-too; catching it here produces a message that explains what to do instead of a denial:
+too; catching it here produces a message that explains what to do instead of a denial.
+(On the local route this is belt-and-braces: §1 already refused any on-disk artifact that
+named another commit, so a `gates-head` copied home alongside it can only agree.)
 
 ```bash
 . "$(git rev-parse --show-toplevel)/.quetrex/merge-facts.env"
@@ -240,13 +372,23 @@ if [ -n "$GATES_SHA" ] && [ "$GATES_SHA" != "$PR_SHA" ]; then
 fi
 ```
 
-With no evidence at all, say exactly this and stop — do not merge, and do not suggest a way
-around it:
+With no evidence at all — **neither** source — say exactly this and stop. Name both
+possibilities, because "no gates branch" alone reads as "the cloud build failed" to an
+operator whose build ran on their own machine, and both remedies, because re-running a build
+is not the only one:
 
-> PR #`<n>` has no published gate evidence, so nothing has verified it. Either re-run
-> `/quetrex:task-build <TASK>` so the cloud build publishes its gates, or decide as a human
-> that you are merging an unverified change and do it yourself on GitHub. This command will
-> not merge what it cannot verify.
+> PR #`<n>` has no gate evidence for its head `<sha12>`, from either source: no published
+> gates branch (`<prefix><TASK>-gates-*`), and no local `.quetrex/` artifacts pinned to this
+> head — not in `<REPO_ROOT>`, and not in any git worktree of it. Nothing has verified this
+> commit.
+>
+> Two remedies. **Re-run the build** — `/quetrex:task-build <TASK> --build-only` — so the
+> gates are produced against the current head. Or, if the build already ran locally and its
+> worktree is still on disk, **run `/quetrex:merge <TASK>` from that worktree**, where its
+> `.quetrex/` artifacts live. (`git worktree list` will show you.)
+>
+> Failing both, decide as a human that you are merging an unverified change and do it
+> yourself on GitHub. This command will not merge what it cannot verify.
 
 **If `IS_EPIC=1` and the gates branch is missing, say this instead** — the remedy is
 different, and the generic message sends the operator to GitHub for a reason that is not
@@ -472,8 +614,9 @@ rm -f "$REPO_ROOT/.quetrex/review-verdict.json" "$REPO_ROOT/.quetrex/qa-report.j
 ## 6. Report
 
 - **PR** — number, title, the commit that merged.
-- **Evidence** — which gate artifacts backed it (including whether the plan came home, and
-  so whether GATE 5's ownership check was live), and the sha they were pinned to.
+- **Evidence** — its **source** (the gates branch, or the local directory it was copied from),
+  which gate artifacts backed it (including whether the plan came home, and so whether GATE 5's
+  ownership check was live), and the sha they were pinned to.
 - **Board** — `<TASK>` → `merged`.
 - **Cleanup** — unit/integration branch, gates branch, spec branch and worktree removed;
   base branch fast-forwarded. Name anything that did not delete.
@@ -484,7 +627,12 @@ rm -f "$REPO_ROOT/.quetrex/review-verdict.json" "$REPO_ROOT/.quetrex/qa-report.j
 ## Error-handling rules
 
 - **Never merge without verified evidence**, and never offer a bypass. Missing or stale
-  gates mean the honest answer is "re-run the build" or "merge it yourself as a human".
+  gates mean the honest answer is "re-run the build", "run the merge from the worktree the
+  local build used", or "merge it yourself as a human".
+- **Local evidence is a delivery route, not a lower bar.** It is accepted only when it names
+  the commit being merged, it is copied into `$REPO_ROOT/.quetrex/` so `merge-gate.sh` judges
+  it from its one expected location, and the gate then applies exactly the rules a cloud
+  build faces. Never special-case a gate because the build ran locally.
 - **Never edit a gate artifact** to make a merge pass. Publish-and-verify only works while
   the artifacts are untouched.
 - If `merge-gate.sh` denies, quote its reason verbatim. It is the authority, not this file.
