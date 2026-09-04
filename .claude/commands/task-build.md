@@ -1085,6 +1085,30 @@ node -e '
                "session="+(p.sessionId||"-"),"cap="+p.concurrencyCap,
                "tick="+p.tickIntervalMinutes+"m"].join("\n"));
 ' "$PAYLOAD" || exit 1
+
+# ── quetrex:exec-block qx_payload_prefix ───────────────────────────────────────
+# Executable, and executed: test/task-build-never-local.test.sh drives this under
+# bash AND zsh against real payload files. Requires the qx_valid_ids block from
+# Step 1 — include it verbatim above this one.
+#
+# THE PAYLOAD IS UNTRUSTED INPUT, exactly like the binding it was built from, and
+# this is the second place the branch prefix is READ. It is a file under
+# `.quetrex/` that every entry into the build half re-reads — straight on from
+# Step 4c, `--build-only`, `--tick`, the Step 1 resume path — and it carries its
+# OWN copy of `branchPrefix`: the copy Step 6A substitutes into the cloud routine
+# prompt and Step 6B reads for each child. Step 1 validated the BINDING; a payload
+# written against a different one would otherwise walk straight past that check.
+# From here down `$BRANCH_PREFIX` is the single validated value for the whole build
+# half, so no later step has to decide which copy it is holding.
+qx_payload_prefix() {          # qx_payload_prefix <payload> <fallback-prefix>
+  local prefix=""
+  prefix="$(quetrex-api json-get "$1" branchPrefix 2>/dev/null || true)"
+  [ -n "$prefix" ] || prefix="$2"
+  qx_valid_branch_prefix "$prefix" || return 1
+  printf '%s\n' "$prefix"
+}
+# ── end quetrex:exec-block qx_payload_prefix ──────────────────────────────────
+BRANCH_PREFIX="$(qx_payload_prefix "$PAYLOAD" "$BRANCH_PREFIX")" || exit 1
 ```
 
 **Refusing to build an unapproved payload is a gate, not a convenience check.** Never
@@ -1500,8 +1524,10 @@ unsubstituted text, and `/quetrex:merge` found nothing on every single run.
 
 Load `.claude/lib/cloud-build-routine.md`, substitute its `{{TASK}}`, `{{TITLE}}`,
 `{{REPO_URL}}`, `{{SPEC_BRANCH}}`, `{{BASE_BRANCH}}`, `{{BRANCH_PREFIX}}` placeholders with
-`$TASK_ID`, `$TASK_TITLE`, `$REPO_URL`, `$SPEC_BRANCH`, `$BASE_BRANCH_FOR_SPEC`, and the
-payload's `branchPrefix`, and use the filled text verbatim as the event's `message.content`.
+`$TASK_ID`, `$TASK_TITLE`, `$REPO_URL`, `$SPEC_BRANCH`, `$BASE_BRANCH_FOR_SPEC`, and
+`$BRANCH_PREFIX` — the payload's `branchPrefix`, validated at Step 5 by
+`qx_payload_prefix`; never re-read the raw field here — and use the filled text verbatim
+as the event's `message.content`.
 
 **Two different names, both derived from `$TASK_ID` + `$TASK_TITLE`, and both mandatory.**
 

@@ -657,6 +657,93 @@ canary_absent "(o) publish: \$() prefix"      pub-pfx-cs
 canary_absent "(o) publish: backtick prefix"  pub-pfx-bt
 canary_absent "(o) publish: second sentinel pair" pub-second-pair
 
+# (o) EXECUTED: qx_payload_prefix — the SECOND place the branch prefix is READ.
+# The binding is not the only untrusted copy: the build payload under .quetrex/ is
+# re-read by every entry into the build half (--build-only, --tick, the Step 1
+# resume path) and carries its own branchPrefix, which is the value Step 6A
+# substitutes into the cloud routine prompt.
+PP="$WORK/qx_payload_prefix.sh"
+extract_block qx_payload_prefix > "$PP"
+if [ -s "$PP" ] && grep -q '^qx_payload_prefix()' "$PP"; then
+  pass "(o) extracted the qx_payload_prefix exec block ($(wc -l < "$PP" | tr -d ' ') lines)"
+else
+  fail "(o) task-build.md has no executable qx_payload_prefix block — the payload's own prefix is read unvalidated on every resume"
+fi
+present "(o) Step 5 runs it over the payload" "$COMMAND" 'BRANCH_PREFIX="$(qx_payload_prefix "$PAYLOAD" "$BRANCH_PREFIX")" || exit 1'
+mkpay() {   # mkpay <name> <branchPrefix value|-> -> echoes the payload path
+  local f="$WORK/payload-$1.json"
+  if [ "$2" = "-" ]; then
+    node -e 'require("fs").writeFileSync(process.argv[1],JSON.stringify({task:"LOC-9",scopeApprovedAt:"now"}))' "$f"
+  else
+    node -e 'require("fs").writeFileSync(process.argv[1],JSON.stringify({task:"LOC-9",scopeApprovedAt:"now",branchPrefix:process.argv[2]}))' "$f" "$2"
+  fi
+  printf '%s' "$f"
+}
+ppfx() { PATH="$REPO_ROOT/bin:$PATH" "$1" -c '. "$1"; . "$2"; qx_payload_prefix "$3" "claude/"' _ "$VALIDS" "$PP" "$2"; }
+for sh in bash zsh; do
+  if ! command -v "$sh" >/dev/null 2>&1; then pass "(o) $sh not present (payload), skipped"; continue; fi
+  OUT="$(ppfx "$sh" "$(mkpay good 'que/')" 2>&1)"; RC=$?
+  if [ "$RC" -eq 0 ] && [ "$OUT" = "que/" ]; then
+    pass "(o) $sh: a legitimate payload prefix is returned unchanged (que/)"
+  else
+    fail "(o) $sh: legitimate payload prefix → rc=$RC out=[$OUT], want que/"
+  fi
+  OUT="$(ppfx "$sh" "$(mkpay absent -)" 2>&1)"; RC=$?
+  if [ "$RC" -eq 0 ] && [ "$OUT" = "claude/" ]; then
+    pass "(o) $sh: a payload with no branchPrefix falls back to the validated binding value"
+  else
+    fail "(o) $sh: payload with no branchPrefix → rc=$RC out=[$OUT], want the claude/ fallback"
+  fi
+  for pay in 'claude/"; touch '"$CANDIR"'/payload-q; :"' \
+             'claude/$(touch '"$CANDIR"'/payload-cs)/' \
+             'claude/`touch '"$CANDIR"'/payload-bt`/' \
+             'claude' '../'; do
+    OUT="$(ppfx "$sh" "$(mkpay bad "$pay")" 2>&1)"; RC=$?
+    if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -qF 'Not a branch prefix'; then
+      pass "(o) $sh: a payload branchPrefix of [$pay] is refused before the build half runs"
+    else
+      fail "(o) $sh: payload branchPrefix [$pay] → rc=$RC out=[$OUT] — it would reach the cloud prompt and Step 6L unchecked"
+    fi
+  done
+done
+canary_absent "(o) payload branchPrefix: quoted"   payload-q
+canary_absent "(o) payload branchPrefix: \$()"     payload-cs
+canary_absent "(o) payload branchPrefix: backtick" payload-bt
+
+# (o) BENIGN CONTROL — the fix must not change what a legitimate build publishes.
+# This is the prior blocker's own proof case, and it asserts the ref by COMPUTING
+# the exact expected name rather than discovering whatever landed: a run that
+# published to the wrong name, or not at all, cannot pass it.
+for sh in bash zsh; do
+  if ! command -v "$sh" >/dev/null 2>&1; then pass "(o) $sh not present (control), skipped"; continue; fi
+  for CT in "LOC${$}${sh}-9" "LOC${$}${sh}-9.1"; do
+    rm -f "/tmp/plan-$CT.json"
+    WTC="$(gates_fixture "ctl-$CT" "$CT")"
+    HEADC="$(git -C "$WTC" rev-parse HEAD)"
+    WANT="claude/$CT-gates-$(printf '%.7s' "$HEADC")"
+    OUT="$(drive_publish "$sh" "$WTC" "$CT" 2>&1)"; RC=$?
+    GOT="$(git -C "$WORK/ctl-$CT.git" for-each-ref --format='%(refname:short)' refs/heads/ | grep -- '-gates-' || true)"
+    if [ "$RC" -eq 0 ] && [ "$GOT" = "$WANT" ]; then
+      pass "(o) $sh: benign control $CT still publishes exactly $WANT"
+    else
+      fail "(o) $sh: benign control $CT rc=$RC ref='${GOT:-none}' want='$WANT' out=[$OUT] — the fix changed what a legitimate build publishes"
+    fi
+    GH="$(git -C "$WORK/ctl-$CT.git" show "$WANT:.quetrex/gates-head" 2>/dev/null | tr -d '[:space:]')"
+    if [ "$GH" = "$HEADC" ]; then
+      pass "(o) $sh: benign control $CT gates-head IS the unit head (${HEADC:0:12})"
+    else
+      fail "(o) $sh: benign control $CT gates-head is '${GH:-missing}', unit head is $HEADC"
+    fi
+    for f in review-verdict.json verify-ledger.jsonl state.json "plan/$CT.json"; do
+      if git -C "$WORK/ctl-$CT.git" show "$WANT:.quetrex/$f" >/dev/null 2>&1; then
+        pass "(o) $sh: benign control $CT carried .quetrex/$f home"
+      else
+        fail "(o) $sh: benign control $CT is MISSING .quetrex/$f on $WANT"
+      fi
+    done
+  done
+done
+
 # (o) FAIL-FIRST — the SAME payloads against the pre-fix bytes (80b7895).
 # They must EXECUTE there. A refusal above that cannot be shown to have been an
 # execution before is a test of nothing.
