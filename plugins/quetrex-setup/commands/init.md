@@ -1096,8 +1096,14 @@ copy-paste `quetrex-api PATCH` line, so it is offered only for a code the board 
 issued: `deriveCode` mints exactly three `A-Z` letters and `assignUniqueCode` appends a
 decimal collision suffix (`quetrex-kanban src/lib/code.ts`) into a `varchar(8)` column, and
 `PATCH /api/projects/:code` cannot rename it. That check lives in `resolve_project`, so
-**every** consumer of the binding inherits it and no future advisory line has to remember
-to guard itself; this block asks the same question through `quetrex-api code-ok`. Anything
+every consumer that resolves the project **through `resolve_project`** inherits it and no
+future advisory line reached that way has to remember to guard itself; this block asks the
+same question through `quetrex-api code-ok`. It is **not** universal, and saying so would
+be false: five sites in this file and in `doctor.md` still read the binding with
+`json-get`, which does not validate, and interpolate the code into a request path. Those
+lines are unchanged from base and out of scope here, but a new consumer must either go
+through `resolve_project` or call `code-ok` itself — inheriting the check is a property of
+the call path, never of the binding. Anything
 else — a hand-written `.quetrex/project.json` — gets a plain instruction naming the board
 dialog and no runnable command. Every value rendered into a printed line has its control
 characters stripped whatever its source, so an `ESC` byte can never rewrite the operator's
