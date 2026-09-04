@@ -1061,9 +1061,16 @@ shows the repository as **linked** only when BOTH `githubOwner` and `githubRepo`
 (`RepoLink` checks the pair); a project with only `githubRepo` reads "repository not
 linked" on every card. So this block derives `owner` and `repo` from the origin slug and
 writes the pair whenever either is missing. It never overwrites a non-empty value that
-differs — that project belongs to another repo, and init says so and leaves it. Runs in
-the operator's zsh as well as bash: `${SLUG%%/*}` / `${SLUG##*/}` only, no `$var:`
-modifiers.
+differs — that project belongs to another repo, and init says so, names BOTH stored
+halves (never a dangling `Someone-Else/`), and leaves it. Two things the comparison has
+to get right. A **failed** board GET is not an unset field: `jq -r '… // empty'` on empty
+stdin exits 0 printing nothing, so an outage would otherwise read as "nothing recorded"
+and PATCH over another repo's link — the block takes the GET's exit status and proves the
+body is a JSON object before it compares anything. And owner/repo names are **case
+insensitive**, which is how the board itself compares them (`branch-ref.ts` lowercases
+both sides), so a stored `DealerQ` against an origin `dealerq` is a match, not a conflict.
+Runs in the operator's zsh as well as bash: `${SLUG%%/*}` / `${SLUG##*/}` only, no `$var:`
+modifiers, and `tr` for lowercasing because `${v,,}` is bash-4-only and `${v:l}` zsh-only.
 
 ```bash
 # ── quetrex:exec-block qx_link_project_repo ────────────────────────────────────
@@ -1074,20 +1081,49 @@ QX_SLUG="$(printf '%s' "$QX_ORIGIN" | sed -E 's#^(git@github\.com:|(https?|ssh|g
 if printf '%s' "$QX_SLUG" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
   QX_OWNER_NAME="${QX_SLUG%%/*}"
   QX_REPO_NAME="${QX_SLUG##*/}"
-  QX_LINKED_JSON="$(quetrex-api GET "/api/projects/$QX_PROJECT_CODE" 2>/dev/null)"
-  QX_LINKED_OWNER="$(printf '%s' "$QX_LINKED_JSON" | jq -r '.githubOwner // empty' 2>/dev/null)"
-  QX_LINKED_REPO="$(printf '%s' "$QX_LINKED_JSON" | jq -r '.githubRepo // empty' 2>/dev/null)"
-  if { [ -n "$QX_LINKED_OWNER" ] && [ "$QX_LINKED_OWNER" != "$QX_OWNER_NAME" ]; } \
-     || { [ -n "$QX_LINKED_REPO" ] && [ "$QX_LINKED_REPO" != "$QX_REPO_NAME" ]; }; then
-    QX_LINKED_SHOWN="${QX_LINKED_OWNER:+$QX_LINKED_OWNER/}$QX_LINKED_REPO"
-    echo "project $QX_PROJECT_CODE is linked to a different repo ($QX_LINKED_SHOWN), not $QX_SLUG — left alone; relink it on the board if this repo is the right one" >&2
-  elif [ -z "$QX_LINKED_OWNER" ] || [ -z "$QX_LINKED_REPO" ]; then
-    quetrex-api PATCH "/api/projects/$QX_PROJECT_CODE" \
-      "$(jq -cn --arg o "$QX_OWNER_NAME" --arg r "$QX_REPO_NAME" '{githubOwner:$o,githubRepo:$r}')" >/dev/null 2>&1 \
-      && echo "project $QX_PROJECT_CODE linked to $QX_OWNER_NAME/$QX_REPO_NAME" \
-      || echo "could not link project $QX_PROJECT_CODE to $QX_OWNER_NAME/$QX_REPO_NAME — the board shows it unlinked and the webhook will ignore its deliveries" >&2
+  # A board OUTAGE must never read as "nothing recorded yet". `jq -r '… // empty'`
+  # on empty stdin exits 0 printing nothing, so an unread GET would fall into the
+  # PATCH arm below and overwrite a link belonging to a different repo. Take the
+  # GET's exit status AND prove the body is a JSON object; anything else says so
+  # and touches nothing.
+  QX_LINKED_JSON="$(quetrex-api GET "/api/projects/$QX_PROJECT_CODE" 2>/dev/null)"; QX_GET_RC=$?
+  if [ "$QX_GET_RC" -ne 0 ] || ! printf '%s' "$QX_LINKED_JSON" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    echo "could not read project $QX_PROJECT_CODE from the board — leaving the repo link alone" >&2
+  else
+    QX_LINKED_OWNER="$(printf '%s' "$QX_LINKED_JSON" | jq -r '.githubOwner // empty' 2>/dev/null)"
+    QX_LINKED_REPO="$(printf '%s' "$QX_LINKED_JSON" | jq -r '.githubRepo // empty' 2>/dev/null)"
+    # GitHub owner/repo names are case-INSENSITIVE, and the board lowercases both
+    # sides before comparing (quetrex-kanban src/lib/branch-ref.ts). Stored
+    # `DealerQ` against an origin `dealerq` is the SAME repo — calling that a
+    # mismatch would refuse the link forever. `tr` because ${v,,} is bash-4-only
+    # and ${v:l} is zsh-only.
+    QX_OWNER_LC="$(printf '%s' "$QX_OWNER_NAME" | tr '[:upper:]' '[:lower:]')"
+    QX_REPO_LC="$(printf '%s' "$QX_REPO_NAME" | tr '[:upper:]' '[:lower:]')"
+    QX_LINKED_OWNER_LC="$(printf '%s' "$QX_LINKED_OWNER" | tr '[:upper:]' '[:lower:]')"
+    QX_LINKED_REPO_LC="$(printf '%s' "$QX_LINKED_REPO" | tr '[:upper:]' '[:lower:]')"
+    if { [ -n "$QX_LINKED_OWNER" ] && [ "$QX_LINKED_OWNER_LC" != "$QX_OWNER_LC" ]; } \
+       || { [ -n "$QX_LINKED_REPO" ] && [ "$QX_LINKED_REPO_LC" != "$QX_REPO_LC" ]; }; then
+      # Name BOTH halves. A half-set link rendered as "Someone-Else/" reads as a
+      # repository nobody owns.
+      if [ -n "$QX_LINKED_OWNER" ] && [ -n "$QX_LINKED_REPO" ]; then
+        QX_LINKED_SHOWN="$QX_LINKED_OWNER/$QX_LINKED_REPO"
+      elif [ -n "$QX_LINKED_OWNER" ]; then
+        QX_LINKED_SHOWN="owner $QX_LINKED_OWNER, repo unset"
+      else
+        QX_LINKED_SHOWN="owner unset, repo $QX_LINKED_REPO"
+      fi
+      echo "project $QX_PROJECT_CODE is linked to a different repo ($QX_LINKED_SHOWN), not $QX_SLUG — left alone" >&2
+      echo "  re-running init will not change it. Set the pair on the board's repo-link dialog, or as a project admin: quetrex-api PATCH \"/api/projects/$QX_PROJECT_CODE\" '{\"githubOwner\":\"$QX_OWNER_NAME\",\"githubRepo\":\"$QX_REPO_NAME\"}'" >&2
+      unset QX_LINKED_SHOWN
+    elif [ -z "$QX_LINKED_OWNER" ] || [ -z "$QX_LINKED_REPO" ]; then
+      quetrex-api PATCH "/api/projects/$QX_PROJECT_CODE" \
+        "$(jq -cn --arg o "$QX_OWNER_NAME" --arg r "$QX_REPO_NAME" '{githubOwner:$o,githubRepo:$r}')" >/dev/null 2>&1 \
+        && echo "project $QX_PROJECT_CODE linked to $QX_OWNER_NAME/$QX_REPO_NAME" \
+        || echo "could not link project $QX_PROJECT_CODE to $QX_OWNER_NAME/$QX_REPO_NAME — the board shows it unlinked and the webhook will ignore its deliveries" >&2
+    fi
+    unset QX_LINKED_OWNER QX_LINKED_REPO QX_LINKED_OWNER_LC QX_LINKED_REPO_LC QX_OWNER_LC QX_REPO_LC
   fi
-  unset QX_LINKED_JSON
+  unset QX_LINKED_JSON QX_GET_RC
 fi
 # ── end quetrex:exec-block qx_link_project_repo ────────────────────────────────
 ```

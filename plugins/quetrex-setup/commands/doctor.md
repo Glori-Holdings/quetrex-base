@@ -735,10 +735,14 @@ GitHub webhook the board verifies against THIS project's vault entry
 by the operator, never needed by an agent). Four things must all hold: the origin is a
 GitHub repo; that repo carries a hook pointed at the board; the vault lists the name
 (names-only collection GET — never the export endpoint); and the project records BOTH
-halves of the origin slug — `githubOwner` and `githubRepo` — equal to it. The board
-shows the repository as linked only when both are set (`RepoLink` checks the pair), and
-the webhook drops a delivery from any other repo. Report which is missing or mismatched;
-the one writer for all four is init:
+halves of the origin slug — `githubOwner` and `githubRepo` — equal to it. The two halves
+fail differently and the report must not blur them: the webhook matches a delivery on
+`githubRepo` alone, so only that half stops cards moving, while `githubOwner` is what
+makes the board render the pair as **linked** (`RepoLink` checks both). Comparison is
+case-insensitive, the way the board itself compares (`branch-ref.ts` lowercases both
+sides). A board that does not answer is reported as *unverified*, never as unset. Init
+writes the missing halves, but it deliberately leaves a **differing** one alone — so a
+mismatch gets the fix that actually resolves it, not another "re-run init":
 
 ```bash
 QX_ORIGIN="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null)"
@@ -757,10 +761,17 @@ elif ! KANBAN="$(quetrex-api kanban-url 2>/dev/null)" || [ -z "$KANBAN" ]; then
   echo "    Fix: run /quetrex-setup:login, then re-run /quetrex-setup:init"
 else
   HOOK_URL="${KANBAN%/}/api/webhooks/github"
-  WH_MISSING=""
+  WH_MISSING=""    # every unmet condition, each named on its own
+  WH_MOVE=""       # something here stops cards auto-moving to pr_ready
+  WH_DISPLAY=""    # something here only changes what the board DISPLAYS
+  WH_INIT=""       # something here is a thing init will actually write
+  WH_MISMATCH=""   # a stored half DIFFERS — init leaves those alone by design
+  WH_UNREAD=""     # the board did not answer; the link state is UNKNOWN
   # (b) a hook on the repo whose config.url is the board's endpoint
   HOOK_ID="$(gh api "repos/$QX_SLUG/hooks" --jq '.[] | select(.config.url=="'"$HOOK_URL"'") | .id' 2>/dev/null | head -1)"
-  [ -n "$HOOK_ID" ] || WH_MISSING="$WH_MISSING GitHub hook on $QX_SLUG -> $HOOK_URL;"
+  if [ -z "$HOOK_ID" ]; then
+    WH_MISSING="$WH_MISSING GitHub hook on $QX_SLUG -> $HOOK_URL;"; WH_MOVE=1; WH_INIT=1
+  fi
   # (c) the vault lists the NAME — masked collection GET, never a value
   if ! quetrex-api GET "/api/projects/$CODE/secrets" 2>/dev/null | node -e '
     let d=""; process.stdin.on("data",c=>{d+=c;}).on("end",()=>{
@@ -768,34 +779,64 @@ else
       const list = Array.isArray(a) ? a : (Array.isArray(a.secrets) ? a.secrets : Object.keys(a).map(k=>({name:k})));
       process.exit(list.some(x=>(typeof x==="string"?x:(x&&(x.name||x.key||x.id)))==="GITHUB_WEBHOOK_SECRET") ? 0 : 1);
     });' 2>/dev/null; then
-    WH_MISSING="$WH_MISSING GITHUB_WEBHOOK_SECRET in project $CODE's vault;"
+    WH_MISSING="$WH_MISSING GITHUB_WEBHOOK_SECRET in project $CODE's vault;"; WH_MOVE=1; WH_INIT=1
   fi
-  # (d) the project records BOTH halves of the origin slug — the board shows the
-  # repository as linked only when githubOwner AND githubRepo are set, and the
-  # webhook refuses a delivery from any other repo. Each half is named on its own.
-  LINKED_JSON="$(quetrex-api GET "/api/projects/$CODE" 2>/dev/null)"
+  # (d) the project records BOTH halves of the origin slug. They do DIFFERENT
+  # jobs: the webhook matches a delivery on githubRepo alone, so only that half
+  # gates card movement; githubOwner is what makes the board render the pair as
+  # linked. Report each with its own consequence, never one blanket claim.
+  # A board OUTAGE is not an unset field — take the GET's exit status and prove
+  # the body is a JSON object, or say the link could not be read and assert
+  # nothing about it.
+  LINKED_JSON="$(quetrex-api GET "/api/projects/$CODE" 2>/dev/null)"; LINKED_RC=$?
   linked_field() { printf '%s' "$LINKED_JSON" | node -e '
     let d=""; process.stdin.on("data",c=>{d+=c;}).on("end",()=>{
       let p; try { p=JSON.parse(d); } catch { process.exit(0); }
       process.stdout.write(String((p && p[process.argv[1]]) || ""));
     });' "$1" 2>/dev/null; }
-  LINKED_OWNER="$(linked_field githubOwner)"; LINKED_REPO="$(linked_field githubRepo)"
+  # GitHub owner/repo names are case-INSENSITIVE and the board lowercases both
+  # sides before comparing (branch-ref.ts), so stored `DealerQ` vs origin
+  # `dealerq` is a MATCH. `tr` because ${v,,} is bash-4-only, ${v:l} zsh-only.
+  qx_lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
   SLUG_OWNER="${QX_SLUG%%/*}"; SLUG_REPO="${QX_SLUG##*/}"
-  if [ -z "$LINKED_OWNER" ]; then
-    WH_MISSING="$WH_MISSING project $CODE githubOwner (unset; origin is $SLUG_OWNER);"
-  elif [ "$LINKED_OWNER" != "$SLUG_OWNER" ]; then
-    WH_MISSING="$WH_MISSING project $CODE githubOwner (is $LINKED_OWNER, origin is $SLUG_OWNER);"
-  fi
-  if [ -z "$LINKED_REPO" ]; then
-    WH_MISSING="$WH_MISSING project $CODE githubRepo (unset; origin is $SLUG_REPO);"
-  elif [ "$LINKED_REPO" != "$SLUG_REPO" ]; then
-    WH_MISSING="$WH_MISSING project $CODE githubRepo (is $LINKED_REPO, origin is $SLUG_REPO);"
+  LINKED_OWNER=""; LINKED_REPO=""
+  if [ "$LINKED_RC" -ne 0 ] || ! printf '%s' "$LINKED_JSON" | node -e '
+    let d=""; process.stdin.on("data",c=>{d+=c;}).on("end",()=>{
+      let p; try { p=JSON.parse(d); } catch { process.exit(1); }
+      process.exit(p && typeof p === "object" && !Array.isArray(p) ? 0 : 1);
+    });' 2>/dev/null; then
+    WH_MISSING="$WH_MISSING project $CODE's repo link (could not read project $CODE from the board — unverified);"
+    WH_UNREAD=1
+  else
+    LINKED_OWNER="$(linked_field githubOwner)"; LINKED_REPO="$(linked_field githubRepo)"
+    if [ -z "$LINKED_OWNER" ]; then
+      WH_MISSING="$WH_MISSING project $CODE githubOwner (unset; origin is $SLUG_OWNER);"; WH_DISPLAY=1; WH_INIT=1
+    elif [ "$(qx_lower "$LINKED_OWNER")" != "$(qx_lower "$SLUG_OWNER")" ]; then
+      WH_MISSING="$WH_MISSING project $CODE githubOwner (is $LINKED_OWNER, origin is $SLUG_OWNER);"; WH_DISPLAY=1; WH_MISMATCH=1
+    fi
+    if [ -z "$LINKED_REPO" ]; then
+      WH_MISSING="$WH_MISSING project $CODE githubRepo (unset; origin is $SLUG_REPO);"; WH_MOVE=1; WH_DISPLAY=1; WH_INIT=1
+    elif [ "$(qx_lower "$LINKED_REPO")" != "$(qx_lower "$SLUG_REPO")" ]; then
+      WH_MISSING="$WH_MISSING project $CODE githubRepo (is $LINKED_REPO, origin is $SLUG_REPO);"; WH_MOVE=1; WH_DISPLAY=1; WH_MISMATCH=1
+    fi
   fi
   if [ -z "$WH_MISSING" ]; then
     echo "✓ Webhook registered — $QX_SLUG hook $HOOK_ID -> $HOOK_URL, GITHUB_WEBHOOK_SECRET in project $CODE's vault, project linked to $LINKED_OWNER/$LINKED_REPO — board shows the repository as linked."
   else
-    echo "✗ Webhook registered — missing:$WH_MISSING cards will not auto-move to pr_ready."
-    echo "    Fix: re-run /quetrex-setup:init"
+    echo "✗ Webhook registered — missing:$WH_MISSING"
+    [ -z "$WH_MOVE" ]    || echo "    Cards will not auto-move to pr_ready."
+    [ -z "$WH_DISPLAY" ] || echo "    The board will show the repository as not linked."
+    if [ -n "$WH_UNREAD" ]; then
+      echo "    Fix: the board did not answer for project $CODE — check it is reachable and the login is current (/quetrex-setup:login), then re-run /quetrex-setup:doctor."
+    fi
+    if [ -n "$WH_MISMATCH" ]; then
+      echo "    Fix: init never overwrites a differing repo link, so re-running it changes nothing here. Set the pair on the board's repo-link dialog, or as a project admin run:"
+      echo "         quetrex-api PATCH \"/api/projects/$CODE\" '{\"githubOwner\":\"$SLUG_OWNER\",\"githubRepo\":\"$SLUG_REPO\"}'"
+      echo "         (admin-gated: a plain member gets \"No access — contact your administrator\" and must ask an admin to change it.)"
+    fi
+    if [ -n "$WH_INIT" ]; then
+      echo "    Fix: re-run /quetrex-setup:init"
+    fi
   fi
 fi
 ```

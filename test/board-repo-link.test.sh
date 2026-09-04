@@ -25,6 +25,21 @@
 #        ✗ naming githubOwner (not githubRepo); owner MISMATCHED -> ✗ naming
 #        githubOwner with both values; both matching -> ✓ ending in
 #        "board shows the repository as linked".
+#   AC6  EXECUTED: a board OUTAGE is not "unset" — a GET that exits non-zero
+#        (and one that answers 200 with a non-object body) makes init print
+#        "could not read project <CODE> from the board — leaving the repo link
+#        alone" and PATCH nothing, even while the board holds a DIFFERENT repo.
+#   AC7  EXECUTED: stored `glori-holdings/DealerQ` against origin
+#        `Glori-Holdings/dealerq` is the SAME repo (the board lowercases both
+#        sides — branch-ref.ts): init links it instead of refusing, and doctor
+#        reports ✓ instead of a false ✗.
+#   AC8  EXECUTED: init's mismatch line names BOTH halves of a half-set link
+#        ("owner Someone-Else, repo unset"), never a dangling "Someone-Else/".
+#   AC9  EXECUTED: doctor's consequences are each TRUE — the owner half says
+#        the board will show the repository as not linked, only the repo half
+#        mentions card movement (the webhook matches on githubRepo alone), the
+#        mismatch Fix names the real `quetrex-api PATCH` rather than looping
+#        back through init, and an unreadable board is reported as unverified.
 #   AC5  FAIL-FIRST against the literal pre-change sha 87dc34a (never `main`):
 #        (a) its init block, driven by the same {} GET stub, PATCHes a body
 #        WITHOUT githubOwner; (d) its doctor Check 14 prints ✓ on a project
@@ -37,6 +52,7 @@ INIT_MD="$ROOT/plugins/quetrex-setup/commands/init.md"
 DOCTOR_MD="$ROOT/plugins/quetrex-setup/commands/doctor.md"
 REAL_BIN="$ROOT/plugins/quetrex-setup/bin"
 BASE_SHA="87dc34a"
+PREV_SHA="c8f9cbd"   # the review target: every AC6-AC9 assertion must fail here
 
 PASS=0; FAIL=0
 ok()    { PASS=$((PASS+1)); printf 'ok - %s\n' "$1"; }
@@ -93,7 +109,14 @@ case "$1" in
   GET) case "$2" in
          */secrets/export) echo "export endpoint called" >&2; exit 1 ;;
          */secrets) [ -n "${QX_STUB_VAULT:-}" ] || exit 1; cat "$QX_STUB_VAULT" ;;
-         /api/projects/*) if [ -n "${QX_STUB_PROJECT:-}" ]; then cat "$QX_STUB_PROJECT"; else printf '{}\n'; fi ;;
+         /api/projects/*)
+           # QX_STUB_PROJECT_RC — the board REFUSES/fails: exit non-zero, print
+           # nothing (what quetrex-api does on 5xx / connection failure).
+           # QX_STUB_PROJECT_RAW — the board answers 200 with a body that is not
+           # a JSON object (an HTML error page from a proxy, say).
+           if [ -n "${QX_STUB_PROJECT_RC:-}" ]; then exit "$QX_STUB_PROJECT_RC"; fi
+           if [ -n "${QX_STUB_PROJECT_RAW:-}" ]; then printf '%s\n' "$QX_STUB_PROJECT_RAW"; exit 0; fi
+           if [ -n "${QX_STUB_PROJECT:-}" ]; then cat "$QX_STUB_PROJECT"; else printf '{}\n'; fi ;;
          *) exit 1 ;;
        esac ;;
   PATCH)
@@ -144,6 +167,12 @@ PROJ_REPO_ONLY="$WORK/proj-repo.json";  write_json "$PROJ_REPO_ONLY" '{"code":"D
 PROJ_OTHER="$WORK/proj-other.json";     write_json "$PROJ_OTHER" '{"code":"DEA","githubOwner":"Someone-Else","githubRepo":"other-app"}'
 PROJ_BOTH="$WORK/proj-both.json";       write_json "$PROJ_BOTH" '{"code":"DEA","githubOwner":"Glori-Holdings","githubRepo":"dealerq"}'
 PROJ_OWNER_WRONG="$WORK/proj-ow.json";  write_json "$PROJ_OWNER_WRONG" '{"code":"DEA","githubOwner":"Someone-Else","githubRepo":"dealerq"}'
+# Case-differing but SAME repo: GitHub names are case-insensitive and the board
+# lowercases both sides before comparing (quetrex-kanban src/lib/branch-ref.ts).
+PROJ_CASE="$WORK/proj-case.json";       write_json "$PROJ_CASE" '{"code":"DEA","githubOwner":"glori-holdings","githubRepo":"DealerQ"}'
+# Half-set links, each half differing — the dangling-slash renderings.
+PROJ_OWNER_ONLY="$WORK/proj-oo.json";   write_json "$PROJ_OWNER_ONLY" '{"code":"DEA","githubOwner":"Someone-Else","githubRepo":null}'
+PROJ_REPO_WRONG="$WORK/proj-rw.json";   write_json "$PROJ_REPO_WRONG" '{"code":"DEA","githubOwner":null,"githubRepo":"other-app"}'
 VAULT="$WORK/vault.json";               write_json "$VAULT" '[{"name":"GITHUB_WEBHOOK_SECRET","isSet":true,"last4":"beef"}]'
 
 for SH in $SHELLS; do
@@ -215,6 +244,99 @@ for SH in $SHELLS; do
   else
     notok "AC4/$SH: both-match case wrong: $(printf '%s' "$OUT" | tr '\n' '|')"
   fi
+
+  # --- AC6: a board OUTAGE is not "unset" — init must not PATCH -------------
+  # The stub holds Someone-Else/other-app but the GET FAILS. Reading the empty
+  # stdout as "nothing recorded" would overwrite another repo's link.
+  L="$WORK/ac6-$SH"
+  OUT="$(run_init "$SH" "$WORK/link.sh" "$L" QX_STUB_PROJECT="$PROJ_OTHER" QX_STUB_PROJECT_RC=1)"
+  if [ "$(patch_count "$L")" = 0 ]; then
+    ok "AC6/$SH: GET fails -> NO PATCH (a board outage never overwrites the link)"
+  else
+    notok "AC6/$SH: GET failure still PATCHed (count=$(patch_count "$L")): $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+  if printf '%s' "$OUT" | grep -q "^could not read project DEA from the board — leaving the repo link alone$" \
+     && ! printf '%s' "$OUT" | grep -q '^project DEA linked to'; then
+    ok "AC6/$SH: GET fails -> the outage line, and never a success line"
+  else
+    notok "AC6/$SH: no outage line: $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+  # A 200 whose body is not a JSON object is the same class of unknown.
+  L="$WORK/ac6b-$SH"
+  OUT="$(run_init "$SH" "$WORK/link.sh" "$L" QX_STUB_PROJECT_RAW='<html>502 Bad Gateway</html>')"
+  if [ "$(patch_count "$L")" = 0 ] && printf '%s' "$OUT" | grep -q 'could not read project DEA from the board'; then
+    ok "AC6/$SH: an unparseable body -> NO PATCH, the outage line"
+  else
+    notok "AC6/$SH: unparseable body wrong (count=$(patch_count "$L")): $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+
+  # --- AC7: case-differing stored values are the SAME repo ------------------
+  L="$WORK/ac7-$SH"
+  OUT="$(run_init "$SH" "$WORK/link.sh" "$L" QX_STUB_PROJECT="$PROJ_CASE")"
+  if [ "$(patch_count "$L")" = 0 ] && ! printf '%s' "$OUT" | grep -q 'different repo'; then
+    ok "AC7/$SH: stored glori-holdings/DealerQ vs origin Glori-Holdings/dealerq -> linked, not refused"
+  else
+    notok "AC7/$SH: case-differing link was refused (count=$(patch_count "$L")): $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+  OUT="$(run_doctor "$SH" "$WORK/check14.sh" "$L" QX_STUB_VAULT="$VAULT" QX_STUB_PROJECT="$PROJ_CASE" QX_STUB_HOOK_ID=4242)"
+  if printf '%s' "$OUT" | grep -q '^✓ Webhook registered' && ! printf '%s' "$OUT" | grep -q 'githubOwner\|githubRepo'; then
+    ok "AC7/$SH: doctor reports ✓ on a case-differing-but-equal repo link"
+  else
+    notok "AC7/$SH: doctor false ✗ on case-differing link: $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+
+  # --- AC8: init's mismatch line never renders a dangling slash -------------
+  L="$WORK/ac8-$SH"
+  OUT="$(run_init "$SH" "$WORK/link.sh" "$L" QX_STUB_PROJECT="$PROJ_OWNER_ONLY")"
+  if [ "$(patch_count "$L")" = 0 ] && printf '%s' "$OUT" | grep -q 'owner Someone-Else, repo unset' \
+     && ! printf '%s' "$OUT" | grep -q 'Someone-Else/'; then
+    ok "AC8/$SH: owner-only link -> 'owner Someone-Else, repo unset', never 'Someone-Else/'"
+  else
+    notok "AC8/$SH: dangling-slash rendering (count=$(patch_count "$L")): $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+  L="$WORK/ac8b-$SH"
+  OUT="$(run_init "$SH" "$WORK/link.sh" "$L" QX_STUB_PROJECT="$PROJ_REPO_WRONG")"
+  if [ "$(patch_count "$L")" = 0 ] && printf '%s' "$OUT" | grep -q 'owner unset, repo other-app'; then
+    ok "AC8/$SH: repo-only link -> 'owner unset, repo other-app', both halves named"
+  else
+    notok "AC8/$SH: repo-only rendering wrong (count=$(patch_count "$L")): $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+
+  # --- AC9: doctor's consequences and Fix lines are each true ---------------
+  # (a) the OWNER half drives the board's display, not card movement: the
+  #     webhook matches a delivery on githubRepo alone.
+  L="$WORK/ac9-$SH"
+  OUT="$(run_doctor "$SH" "$WORK/check14.sh" "$L" QX_STUB_VAULT="$VAULT" QX_STUB_PROJECT="$PROJ_OWNER_WRONG" QX_STUB_HOOK_ID=4242)"
+  if printf '%s' "$OUT" | grep -q 'The board will show the repository as not linked' \
+     && ! printf '%s' "$OUT" | grep -q 'auto-move to pr_ready'; then
+    ok "AC9/$SH: owner-half ✗ says the board shows it unlinked, and never claims cards will not move"
+  else
+    notok "AC9/$SH: owner-half consequence wrong: $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+  # (b) the mismatch Fix names an action that actually resolves it — init
+  #     deliberately leaves a differing value alone, so "re-run init" is a loop.
+  if printf '%s' "$OUT" | grep -q 'quetrex-api PATCH "/api/projects/DEA"' \
+     && printf '%s' "$OUT" | grep -q '"githubOwner":"Glori-Holdings","githubRepo":"dealerq"' \
+     && ! printf '%s' "$OUT" | grep -q 'Fix: re-run /quetrex-setup:init'; then
+    ok "AC9/$SH: mismatch Fix names the real PATCH, and does not send the operator back to init"
+  else
+    notok "AC9/$SH: mismatch Fix wrong: $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+  # (c) the repo half DOES gate card movement.
+  OUT="$(run_doctor "$SH" "$WORK/check14.sh" "$L" QX_STUB_VAULT="$VAULT" QX_STUB_PROJECT="$PROJ_REPO_WRONG" QX_STUB_HOOK_ID=4242)"
+  if printf '%s' "$OUT" | grep -q 'Cards will not auto-move to pr_ready'; then
+    ok "AC9/$SH: repo-half ✗ is the one that says cards will not auto-move"
+  else
+    notok "AC9/$SH: repo-half consequence missing: $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
+  # (d) a board outage is reported as UNVERIFIED, never as an unset field.
+  OUT="$(run_doctor "$SH" "$WORK/check14.sh" "$L" QX_STUB_VAULT="$VAULT" QX_STUB_PROJECT="$PROJ_OTHER" QX_STUB_PROJECT_RC=1 QX_STUB_HOOK_ID=4242)"
+  if printf '%s' "$OUT" | grep -q 'could not read project DEA from the board' \
+     && ! printf '%s' "$OUT" | grep -q 'unset; origin is'; then
+    ok "AC9/$SH: doctor reports a board outage as unverified, not as githubOwner/githubRepo unset"
+  else
+    notok "AC9/$SH: outage reported as unset: $(printf '%s' "$OUT" | tr '\n' '|')"
+  fi
 done
 
 # --- AC5: fail-first against the pre-change sha ------------------------------
@@ -246,6 +368,77 @@ if git -C "$ROOT" show "$BASE_SHA:plugins/quetrex-setup/commands/init.md" > "$WO
   fi
 else
   notok "AC5: baseline blobs at $BASE_SHA are unreadable (shallow clone?) — fail-first arm cannot run"
+fi
+
+# --- AC10: fail-first for the review findings, against the literal sha $PREV_SHA
+# Everything AC6-AC9 asserts must FAIL against the code as it stood at c8f9cbd;
+# each arm below drives that exact revision's shipped block and proves the old
+# behavior, so a regression cannot pass by accident.
+if git -C "$ROOT" show "$PREV_SHA:plugins/quetrex-setup/commands/init.md" > "$WORK/prev-init.md" 2>/dev/null \
+   && [ -s "$WORK/prev-init.md" ] \
+   && git -C "$ROOT" show "$PREV_SHA:plugins/quetrex-setup/commands/doctor.md" > "$WORK/prev-doctor.md" 2>/dev/null \
+   && [ -s "$WORK/prev-doctor.md" ]; then
+  extract_exec_block "$WORK/prev-init.md" qx_link_project_repo > "$WORK/prev-link.sh"
+  extract_check14 "$WORK/prev-doctor.md" > "$WORK/prev-check14.sh"
+  if [ ! -s "$WORK/prev-link.sh" ] || [ ! -s "$WORK/prev-check14.sh" ]; then
+    notok "AC10: could not extract the $PREV_SHA init block / doctor Check 14"
+  else
+    # (a) AC6's fail-first: a FAILED GET fell into the PATCH arm and overwrote
+    #     a link the board already held for a different repo.
+    L="$WORK/prev-outage"
+    OUT="$(run_init bash "$WORK/prev-link.sh" "$L" QX_STUB_PROJECT="$PROJ_OTHER" QX_STUB_PROJECT_RC=1)"
+    if [ "$(patch_count "$L")" = 1 ] && printf '%s' "$OUT" | grep -q '^project DEA linked to Glori-Holdings/dealerq$'; then
+      ok "AC10: FAIL-FIRST (a) — $PREV_SHA PATCHes over a differing link when the GET FAILS"
+    else
+      notok "AC10 (a): $PREV_SHA did not show the outage-conflation defect (count=$(patch_count "$L")): $(printf '%s' "$OUT" | tr '\n' '|')"
+    fi
+    # (b) AC7's fail-first: a case-differing stored value was refused as a
+    #     different repo, permanently.
+    L="$WORK/prev-case"
+    OUT="$(run_init bash "$WORK/prev-link.sh" "$L" QX_STUB_PROJECT="$PROJ_CASE")"
+    if printf '%s' "$OUT" | grep -q 'linked to a different repo'; then
+      ok "AC10: FAIL-FIRST (b) — $PREV_SHA refuses glori-holdings/DealerQ as a different repo"
+    else
+      notok "AC10 (b): $PREV_SHA did not show the case-sensitivity defect: $(printf '%s' "$OUT" | tr '\n' '|')"
+    fi
+    # (c) AC8's fail-first: the half-set link rendered a dangling slash.
+    L="$WORK/prev-slash"
+    OUT="$(run_init bash "$WORK/prev-link.sh" "$L" QX_STUB_PROJECT="$PROJ_OWNER_ONLY")"
+    if printf '%s' "$OUT" | grep -q 'Someone-Else/)'; then
+      ok "AC10: FAIL-FIRST (c) — $PREV_SHA renders the dangling 'Someone-Else/'"
+    else
+      notok "AC10 (c): $PREV_SHA did not show the dangling-slash defect: $(printf '%s' "$OUT" | tr '\n' '|')"
+    fi
+    # (d) AC7's doctor fail-first: a false ✗ on a working, case-differing link.
+    L="$WORK/prev-doc-case"
+    OUT="$(run_doctor bash "$WORK/prev-check14.sh" "$L" QX_STUB_VAULT="$VAULT" QX_STUB_PROJECT="$PROJ_CASE" QX_STUB_HOOK_ID=4242)"
+    if printf '%s' "$OUT" | grep -q '^✗ Webhook registered'; then
+      ok "AC10: FAIL-FIRST (d) — $PREV_SHA's doctor emits a false ✗ on a case-differing link"
+    else
+      notok "AC10 (d): $PREV_SHA's doctor did not show the false-✗ defect: $(printf '%s' "$OUT" | tr '\n' '|')"
+    fi
+    # (e) AC9's fail-first: the owner half claimed cards would not move, and
+    #     the Fix was a no-op loop back through init.
+    L="$WORK/prev-doc-owner"
+    OUT="$(run_doctor bash "$WORK/prev-check14.sh" "$L" QX_STUB_VAULT="$VAULT" QX_STUB_PROJECT="$PROJ_OWNER_WRONG" QX_STUB_HOOK_ID=4242)"
+    if printf '%s' "$OUT" | grep -q 'cards will not auto-move to pr_ready' \
+       && printf '%s' "$OUT" | grep -q 'Fix: re-run /quetrex-setup:init' \
+       && ! printf '%s' "$OUT" | grep -q 'quetrex-api PATCH'; then
+      ok "AC10: FAIL-FIRST (e) — $PREV_SHA blames card movement on githubOwner and offers only 're-run init'"
+    else
+      notok "AC10 (e): $PREV_SHA's doctor did not show the wording/Fix defects: $(printf '%s' "$OUT" | tr '\n' '|')"
+    fi
+    # (f) AC9's fail-first: a board outage was reported as an unset field.
+    L="$WORK/prev-doc-outage"
+    OUT="$(run_doctor bash "$WORK/prev-check14.sh" "$L" QX_STUB_VAULT="$VAULT" QX_STUB_PROJECT="$PROJ_OTHER" QX_STUB_PROJECT_RC=1 QX_STUB_HOOK_ID=4242)"
+    if printf '%s' "$OUT" | grep -q 'unset; origin is'; then
+      ok "AC10: FAIL-FIRST (f) — $PREV_SHA's doctor reports a board outage as 'githubOwner (unset...)'"
+    else
+      notok "AC10 (f): $PREV_SHA's doctor did not show the outage-as-unset defect: $(printf '%s' "$OUT" | tr '\n' '|')"
+    fi
+  fi
+else
+  notok "AC10: baseline blobs at $PREV_SHA are unreadable (shallow clone?) — fail-first arm cannot run"
 fi
 
 finish
