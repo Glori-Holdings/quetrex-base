@@ -261,11 +261,48 @@ if grep -q 'process\.argv' "$SRC"; then
 else
   ok "quetrex-api: no node script reads process.argv"
 fi
-if grep -n 'curl -q' "$SRC" | grep -q -- '-w .%{http_code}. "\$url"'; then
-  notok "quetrex-api: curl is still handed \$url as a bare trailing token — use --url"
-else
-  ok "quetrex-api: curl receives its URL via --url, never as a bare token"
-fi
+# curl must receive its URL via --url, in BOTH byte-paired files.
+#
+# WHY IT IS WRITTEN THIS WAY. The first version of this check was
+# `grep -n 'curl -q' "$SRC" | grep -q -- '-w .%{http_code}. "$url"'`, and it
+# could never fail: the invocation is split over backslash continuations, so
+# the line carrying `curl -q` and the line carrying the URL token are different
+# lines and the inner grep matched nothing for ANY file content. Reverting both
+# call sites to a bare trailing "$url" still reported ok. So: flatten the
+# continuations first and judge each curl invocation as ONE logical line, and
+# never prefilter on `curl -q` — the lib's curl does not carry -q at all, which
+# put the second copy outside the check entirely.
+#
+# Two conditions, because either one alone is defeatable:
+#   (a) POSITIVE — the guarded form `--url "$url"` must actually appear at
+#       least twice (the body and no-body branches). Renaming the variable
+#       would otherwise make (b) vacuously true.
+#   (b) NEGATIVE — after removing every `--url "$url"`, no curl invocation may
+#       still mention "$url"; a leftover is a bare trailing token.
+#
+# `curl -q` is unrelated to URL parsing (-q only stops curl reading ~/.curlrc);
+# a URL that begins with a dash is what --url exists to disarm.
+flatten_continuations() {
+  sed -e ':a' -e '/\\$/{N;s/\\\n[[:space:]]*/ /;ba' -e '}' "$1"
+}
+for CURL_SRC in "$ROOT/plugins/quetrex-setup/bin/quetrex-api" "$ROOT/.claude/lib/quetrex-api.sh"; do
+  CURL_REL="${CURL_SRC#"$ROOT"/}"
+  if [ ! -f "$CURL_SRC" ]; then
+    notok "curl/--url: $CURL_REL not found — this check went blind"
+    continue
+  fi
+  # Logical curl invocations, comments stripped.
+  CURL_LINES="$(flatten_continuations "$CURL_SRC" | grep 'curl ' | grep -v '^[[:space:]]*#')"
+  GUARDED="$(printf '%s\n' "$CURL_LINES" | grep -c -- '--url "\$url"')"
+  BARE="$(printf '%s\n' "$CURL_LINES" | sed 's/--url "\$url"//g' | grep -F -- '"$url"')"
+  if [ "$GUARDED" -lt 2 ]; then
+    notok "curl/--url: $CURL_REL has $GUARDED occurrence(s) of --url \"\$url\" — expected both the body and no-body branches to pass the URL via --url"
+  elif [ -n "$BARE" ]; then
+    notok "curl/--url: $CURL_REL still hands curl \$url as a bare trailing token — use --url: $(printf '%s' "$BARE" | tr -s ' ' | head -1)"
+  else
+    ok "curl/--url: $CURL_REL passes its URL via --url in both branches, never as a bare token"
+  fi
+done
 
 # --- the SOURCEABLE copy carries the same bypass ----------------------------
 # .claude/lib/quetrex-api.sh duplicates these helpers and is genuinely live (it
@@ -298,5 +335,130 @@ if [ -f "$LIB_SRC" ]; then
 else
   notok "lib: .claude/lib/quetrex-api.sh not found — the parity copy moved and this check went blind"
 fi
+
+# --- THE LIB'S resolve_project MUST REFUSE A TRAVERSING projectCode ----------
+# The CLI and .claude/lib/quetrex-api.sh are byte-paired copies, and the harden
+# landed in the CLI only. `.quetrex/project.json` is COMMITTED, so a cloned repo
+# chooses its own projectCode, and the lib interpolates it straight into a
+# request path (`qapi PUT "/api/projects/$QX_PROJECT_CODE/secrets"`) with the
+# operator's bearer token attached from ~/.quetrex/auth.json. A code of
+# `../admin/secrets` made curl perform RFC 3986 dot-segment removal and issue a
+# real, authenticated request to /api/admin/secrets/secrets — a caller-chosen
+# route on the operator's own board.
+#
+# This does not grep the lib. It stands up a real listener, drives the SOURCED
+# lib end to end, and reads back the request path the server actually saw. The
+# only acceptable outcome for a hostile binding is that NOTHING reaches the
+# listener at all.
+LIB_SRC="$ROOT/.claude/lib/quetrex-api.sh"
+if [ ! -f "$LIB_SRC" ]; then
+  notok "lib traversal: .claude/lib/quetrex-api.sh not found — this check went blind"
+else
+  TRAV="$WORK/trav"; mkdir -p "$TRAV"
+  REQLOG="$TRAV/requests"; PORTF="$TRAV/port"
+  : > "$REQLOG"
+
+  # A listener that records the path of anything that reaches it.
+  QX_LOG="$REQLOG" QX_PORTF="$PORTF" node -e '
+    const fs = require("fs"), http = require("http");
+    const log = process.env.QX_LOG, pf = process.env.QX_PORTF;
+    const srv = http.createServer((req, res) => {
+      fs.appendFileSync(log, "PATH=" + req.url + "\n");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("{}");
+    });
+    srv.listen(0, "127.0.0.1", () => fs.writeFileSync(pf, String(srv.address().port)));
+  ' >/dev/null 2>&1 &
+  LISTENER_PID=$!
+  # shellcheck disable=SC2317
+  kill_listener() { kill "$LISTENER_PID" 2>/dev/null; wait "$LISTENER_PID" 2>/dev/null; }
+
+  PORT=""
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -s "$PORTF" ] && { PORT="$(cat "$PORTF")"; break; }
+    sleep 0.25
+  done
+
+  if [ -z "$PORT" ]; then
+    kill_listener
+    notok "lib traversal: the local listener never bound a port — cannot prove what the lib sends"
+  else
+    LHOME="$TRAV/home"; mkdir -p "$LHOME/.quetrex"
+    write_file "$LHOME/.quetrex/auth.json" \
+      "{\"kanbanUrl\":\"http://127.0.0.1:$PORT\",\"token\":\"BEARER-SECRET\",\"expiresAt\":\"2099-01-01T00:00:00.000Z\"}"
+
+    # Write the binding with node so a code carrying a newline (or any other
+    # byte a shell heredoc would mangle) lands in the file exactly as intended.
+    mk_binding_raw() {
+      local dir="$TRAV/bind"
+      rm -rf "$dir"; mkdir -p "$dir/.quetrex"
+      QX_A1="$dir/.quetrex/project.json" QX_A2="$1" node -e '
+        require("fs").writeFileSync(process.env.QX_A1,
+          JSON.stringify({ projectCode: process.env.QX_A2 }));
+      ' || return 1
+      printf '%s' "$dir"
+    }
+
+    # Source the lib, resolve, and issue the request the way qx_secret_put_from_env
+    # does. Prints the resolved code on success; anything reaching the listener is
+    # recorded server-side regardless.
+    DRIVER='
+      source "$1" >/dev/null 2>&1 || exit 90
+      resolve_auth    >/dev/null 2>&1 || exit 91
+      resolve_project >/dev/null 2>&1 || exit 92
+      qapi PUT "/api/projects/$QX_PROJECT_CODE/secrets" "{}" >/dev/null 2>&1 || exit 93
+      printf "%s" "$QX_PROJECT_CODE"
+    '
+
+    for SH in $SHELLS; do
+      # A newline-bearing code is built here rather than written inline so the
+      # literal byte survives into the JSON.
+      NL_CODE="$(printf 'QUE\nADMIN')"
+      for bad in "../admin/secrets" "..%2Fadmin" "/api/x" "$NL_CODE" "../../etc" "QUE/../admin"; do
+        d="$(mk_binding_raw "$bad")" || { notok "lib traversal: could not write a binding for '${bad}'"; continue; }
+        : > "$REQLOG"
+        out="$(cd "$d" && HOME="$LHOME" "$SH" -c "$DRIVER" _ "$LIB_SRC" 2>/dev/null)"; rc=$?
+        seen="$(cat "$REQLOG")"
+        label="$(printf '%s' "$bad" | tr '\n' '~')"
+        if [ "$rc" -ne 0 ] && [ -z "$seen" ] && [ -z "$out" ]; then
+          ok "$SH/lib resolve_project projectCode '$label': refused, zero requests reached the board"
+        else
+          notok "$SH/lib resolve_project projectCode '$label': TRAVERSAL — exit $rc, stdout '${out:0:40}', the server saw: $(printf '%s' "$seen" | tr '\n' ' ')"
+        fi
+        rm -rf "$d"
+      done
+
+      # And the legitimate code still works, hitting EXACTLY its own route.
+      d="$(mk_binding_raw "DEA")"
+      : > "$REQLOG"
+      out="$(cd "$d" && HOME="$LHOME" "$SH" -c "$DRIVER" _ "$LIB_SRC" 2>/dev/null)"; rc=$?
+      seen="$(cat "$REQLOG")"
+      if [ "$rc" -eq 0 ] && [ "$out" = "DEA" ] && [ "$seen" = "PATH=/api/projects/DEA/secrets" ]; then
+        ok "$SH/lib resolve_project projectCode 'DEA': still resolves and the board saw exactly /api/projects/DEA/secrets"
+      else
+        notok "$SH/lib resolve_project projectCode 'DEA': regression — exit $rc, stdout '$out', server saw '$(printf '%s' "$seen" | tr '\n' ' ')'"
+      fi
+      rm -rf "$d"
+    done
+
+    kill_listener
+  fi
+fi
+
+# --- the lib gets the SAME single-node-site guarantee as the CLI -------------
+# The CLI's "exactly one node -e call site" check above covered bin/quetrex-api
+# only. A raw node -e added to the lib alone is drift of the exact shape this
+# whole file exists for, and the parity test cannot see it either: it compares
+# named functions, so a new lib-only call site is outside its reach.
+if [ -f "$LIB_SRC" ]; then
+  LIB_NODE_SITES="$(grep -n 'node -e' "$LIB_SRC" | grep -v '^[0-9]*:[[:space:]]*#')"
+  if [ "$(printf '%s\n' "$LIB_NODE_SITES" | grep -c 'node -e')" = "1" ] \
+     && printf '%s' "$LIB_NODE_SITES" | grep -q 'node -e "\$_qx_script"'; then
+    ok "lib: exactly one 'node -e' call site remains in .claude/lib/quetrex-api.sh, inside _qx_node"
+  else
+    notok "lib: a raw 'node -e' call site exists outside _qx_node in .claude/lib/quetrex-api.sh: $(printf '%s' "$LIB_NODE_SITES" | tr '\n' ' ')"
+  fi
+fi
+
 
 finish

@@ -139,6 +139,28 @@ qx_binding_path() {
   return 1
 }
 
+# qx_code_is_board_shaped <code>
+#   Is this a project code the BOARD could have issued? deriveCode() yields
+#   exactly three A-Z letters and assignUniqueCode() appends a decimal collision
+#   suffix (quetrex-kanban src/lib/code.ts), into a varchar(8) column, and
+#   PATCH /api/projects/:code deliberately cannot rename it (updateProjectSchema
+#   omits `code`) — so nothing else can ever mint one, and a code outside this
+#   shape cannot resolve against the board either (the route matches on
+#   eq(projects.code, code)).
+#
+#   THE single definition of that shape. resolve_project enforces it below so
+#   every consumer inherits it, rather than each command guarding the one line
+#   it happens to print — a project code out of a cloned repo's
+#   .quetrex/project.json used to be interpolated straight into a copy-paste
+#   `quetrex-api PATCH` one-liner, and guarding the print site would only have
+#   waited for the next message someone added.
+#
+#   node, not `grep -Eq`: grep is line-oriented and would accept a code whose
+#   first line is "QUE"; JS ^...$ without /m is anchored to the whole string.
+qx_code_is_board_shaped() {
+  _qx_node 'const c = process.env.QX_A1; process.exit(/^[A-Z]{3}[0-9]*$/.test(c) && c.length <= 8 ? 0 : 1)' "$1" 2>/dev/null
+}
+
 # resolve_project
 #   Walk up from $PWD to find .quetrex/project.json. Sets QX_PROJECT_CODE.
 #   Keeps auth.json's kanbanUrl as the source of truth, falling back to the
@@ -159,9 +181,17 @@ resolve_project() {
     return 1
   fi
 
-  # consumed by skill callers, not internally — hence the disable.
-  # shellcheck disable=SC2034
   QX_PROJECT_CODE="$(_qx_json_get "$f" projectCode)" || { echo "Run /quetrex-setup:init" >&2; return 1; }
+
+  # Validate HERE, once, so every consumer inherits it. A binding file is
+  # attacker-supplied in a cloned repo and nothing else checks it; a code the
+  # board could not have issued resolves to no project anyway, so refusing is
+  # both safer and more honest than carrying it forward.
+  if ! qx_code_is_board_shaped "$QX_PROJECT_CODE"; then
+    echo "quetrex-api: $f holds a projectCode the board could not have issued (it mints three A-Z letters plus an optional collision suffix). Re-run /quetrex-setup:init to rebind this repo." >&2
+    QX_PROJECT_CODE=""
+    return 1
+  fi
 
   # auth's kanbanUrl wins; only fall back to the binding if auth set nothing.
   if [ -z "${QX_KANBAN_URL:-}" ]; then
