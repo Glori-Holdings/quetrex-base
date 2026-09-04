@@ -931,6 +931,35 @@ disc_run() {
   "$shell" "$outdir/drive.sh" "$r" "$prefix" "$task" 2>/dev/null
 }
 
+# Same driver, but the REF LISTING is stubbed instead of coming off a real remote.
+# `ls-remote --heads origin '<prefix><TASK>-*'` pre-anchors the literal prefix (a
+# git refspec glob reads `.` literally), so for task SMA-1.2 a branch named
+# claude/SMA-1X2-... can never appear in the listing. That is precisely why the
+# dot-as-wildcard defect has to be exercised at the FILTER, by handing the filter
+# the candidate list directly. These cases are claims about the filter's own
+# behavior, not end-to-end reachability claims.
+disc_run_list() {
+  local shell="$1" disc="$2" outdir="$3" prefix="$4" task="$5"; shift 5
+  local stub="$outdir/bin" b
+  rm -rf "$outdir"; mkdir -p "$stub"
+  : > "$outdir/refs.txt"
+  for b in "$@"; do
+    printf '%s\trefs/heads/%s\n' "0000000000000000000000000000000000000000" "$b" >> "$outdir/refs.txt"
+  done
+  cat > "$stub/git" <<EOF
+#!/bin/sh
+# the discovery block's only git call is the ls-remote listing
+cat "$outdir/refs.txt"
+EOF
+  chmod +x "$stub/git"
+  {
+    printf '%s\n' 'REPO_ROOT="$1"; BRANCH_PREFIX="$2"; TASK_ID="$3"'
+    cat "$disc"
+    printf '%s\n' 'printf "%s\n" "$UNIT_BRANCH"'
+  } > "$outdir/drive.sh"
+  PATH="$stub:$PATH" "$shell" "$outdir/drive.sh" "$outdir" "$prefix" "$task" 2>/dev/null
+}
+
 DISC_NOW="$WORK/discovery-now.sh"
 extract_discovery "$COMMAND" > "$DISC_NOW"
 if grep -q 'ls-remote' "$DISC_NOW" && grep -q 'head -1' "$DISC_NOW"; then
@@ -960,6 +989,46 @@ if git -C "$REPO_ROOT" cat-file -e "$PRE_SHA^{commit}" 2>/dev/null; then
   fi
 else
   fail "(q) FAIL-FIRST: pre-fix commit $PRE_SHA is not reachable in this checkout — refusing to report a pass having compared against nothing"
+fi
+
+# SECOND FAIL-FIRST BASELINE — the anchored-regex era (68ea3ef). The anchor fixed
+# the unanchored bug above but interpolated two validated-yet-unescaped values
+# into an `-E` pattern, which left two residuals; both are reproduced here
+# against the SHIPPED bytes of that commit, never a retyped pattern.
+ANCHOR_SHA="68ea3ef"
+ANCHOR_TB="$WORK/anchor-task-build.md"
+if git -C "$REPO_ROOT" cat-file -e "$ANCHOR_SHA^{commit}" 2>/dev/null; then
+  git -C "$REPO_ROOT" show "$ANCHOR_SHA:.claude/commands/task-build.md" > "$ANCHOR_TB"
+  DISC_ANCHOR="$WORK/discovery-anchor.sh"
+  extract_discovery "$ANCHOR_TB" > "$DISC_ANCHOR"
+  if grep -q 'grep -v -E' "$DISC_ANCHOR"; then
+    pass "(q) FAIL-FIRST: $ANCHOR_SHA carries the interpolated \`grep -v -E\` anchor"
+  else
+    fail "(q) FAIL-FIRST: $ANCHOR_SHA does NOT carry the interpolated -E anchor — the baseline is wrong, refusing to claim a fix"
+  fi
+
+  # Residual 1: a REAL unit branch whose title-derived slug is literally
+  # `gates-<hex>`. `[0-9a-f]+` matches any length, so an 8-hex slug is excluded
+  # as if it were evidence — the same second-branch/second-PR defect, narrower.
+  ANCHOR_GOT="$(disc_run bash "$DISC_ANCHOR" "$WORK/ff-anchor-a" "claude/" "QUE-11" \
+      "claude/QUE-11-gates-a1b2c3d" "claude/QUE-11-gates-deadbeef")"
+  if [ -z "$ANCHOR_GOT" ]; then
+    pass "(q) FAIL-FIRST: $ANCHOR_SHA dropped the real unit branch claude/QUE-11-gates-deadbeef (slug 'gates-deadbeef') and returned EMPTY — the defect was real"
+  else
+    fail "(q) FAIL-FIRST: $ANCHOR_SHA returned '$ANCHOR_GOT' for the gates-<hex> slug case — it did NOT reproduce, so the assertion below proves nothing"
+  fi
+
+  # Residual 2: `.` in a valid epic-child task id reaches the anchor unescaped
+  # and acts as a wildcard, so a candidate with no literal dot is excluded.
+  ANCHOR_GOT="$(disc_run_list bash "$DISC_ANCHOR" "$WORK/ff-anchor-b" "claude/" "SMA-1.2" \
+      "claude/SMA-1X2-gates-deadbee")"
+  if [ -z "$ANCHOR_GOT" ]; then
+    pass "(q) FAIL-FIRST: $ANCHOR_SHA treated '.' in task id SMA-1.2 as a regex wildcard and excluded claude/SMA-1X2-gates-deadbee, which contains no literal dot"
+  else
+    fail "(q) FAIL-FIRST: $ANCHOR_SHA returned '$ANCHOR_GOT' — the dot-wildcard residual did NOT reproduce, so the assertion below proves nothing"
+  fi
+else
+  fail "(q) FAIL-FIRST: anchor-era commit $ANCHOR_SHA is not reachable in this checkout — refusing to report a pass having compared against nothing"
 fi
 
 for SH in bash zsh; do
@@ -1012,6 +1081,75 @@ for SH in bash zsh; do
     pass "$SH: (q) the unit branch wins over an evidence ref that sorts ahead of it"
   else
     fail "$SH: (q) evidence ref sorting ahead broke selection: got '${GOT:-<empty>}'"
+  fi
+
+  # THE `gates-<hex>` SLUG COLLISION. A task titled "Gates deadbeef" slugifies to
+  # `gates-deadbeef` — 8 hex characters, so NOT a sha7, so the unit branch. It has
+  # to be discovered alongside a real evidence ref for the same task.
+  GOT="$(disc_run "$SH" "$DISC_NOW" "$WORK/o-$SH-e" "claude/" "QUE-11" \
+      "claude/QUE-11-gates-a1b2c3d" "claude/QUE-11-gates-deadbeef")"
+  if [ "$GOT" = "claude/QUE-11-gates-deadbeef" ]; then
+    pass "$SH: (q) a unit branch whose own slug is 'gates-deadbeef' is KEPT while the real evidence ref beside it is excluded"
+  else
+    fail "$SH: (q) gates-<hex> slug collision: got '${GOT:-<empty>}', want claude/QUE-11-gates-deadbeef"
+  fi
+
+  # And the evidence ref of that same pair is still excluded when it is alone,
+  # so the case above is discrimination, not a blanket "keep everything".
+  GOT="$(disc_run "$SH" "$DISC_NOW" "$WORK/o-$SH-f" "claude/" "QUE-11" \
+      "claude/QUE-11-gates-a1b2c3d")"
+  if [ -z "$GOT" ]; then
+    pass "$SH: (q) the sha7 evidence ref claude/QUE-11-gates-a1b2c3d is still excluded on its own"
+  else
+    fail "$SH: (q) evidence ref claude/QUE-11-gates-a1b2c3d was selected as the unit branch: '$GOT'"
+  fi
+
+  # A slug that merely STARTS with `gates-` but is not a sha7 (wrong charset).
+  GOT="$(disc_run "$SH" "$DISC_NOW" "$WORK/o-$SH-g" "claude/" "QUE-12" \
+      "claude/QUE-12-gates-0f1e2d3" "claude/QUE-12-gates-of-dawn")"
+  if [ "$GOT" = "claude/QUE-12-gates-of-dawn" ]; then
+    pass "$SH: (q) a slug starting with 'gates-' but not hex ('gates-of-dawn') is kept; the sha7 beside it is excluded"
+  else
+    fail "$SH: (q) gates-of-dawn case: got '${GOT:-<empty>}', want claude/QUE-12-gates-of-dawn"
+  fi
+
+  # EPIC-CHILD TASK ID. The '.' is the only regex metacharacter qx_valid_task_id
+  # lets through, and this discovery no longer builds a pattern out of it at all.
+  GOT="$(disc_run "$SH" "$DISC_NOW" "$WORK/o-$SH-h" "claude/" "SMA-1.2" \
+      "claude/SMA-1.2-add-the-thing" "claude/SMA-1.2-gates-a1b2c3d")"
+  if [ "$GOT" = "claude/SMA-1.2-add-the-thing" ]; then
+    pass "$SH: (q) an epic-child task id (SMA-1.2) discovers its unit branch and excludes its evidence ref"
+  else
+    fail "$SH: (q) epic-child discovery: got '${GOT:-<empty>}', want claude/SMA-1.2-add-the-thing"
+  fi
+
+  # THE DOT IS NO LONGER A WILDCARD. Fed straight to the filter (the real
+  # ls-remote glob would never list this name for SMA-1.2 — see disc_run_list),
+  # a candidate with 'X' where the dot is must survive: nothing here interpolates
+  # TASK_ID into a pattern any more.
+  GOT="$(disc_run_list "$SH" "$DISC_NOW" "$WORK/o-$SH-i" "claude/" "SMA-1.2" \
+      "claude/SMA-1X2-gates-deadbee")"
+  if [ "$GOT" = "claude/SMA-1X2-gates-deadbee" ]; then
+    pass "$SH: (q) '.' in task id SMA-1.2 is a literal, not a wildcard — claude/SMA-1X2-gates-deadbee is kept"
+  else
+    fail "$SH: (q) dot-as-wildcard: got '${GOT:-<empty>}', want claude/SMA-1X2-gates-deadbee"
+  fi
+
+  # The literal-dot evidence ref for that same task IS still excluded, so the
+  # assertion above is not passing because the filter stopped filtering.
+  GOT="$(disc_run_list "$SH" "$DISC_NOW" "$WORK/o-$SH-j" "claude/" "SMA-1.2" \
+      "claude/SMA-1.2-gates-deadbee")"
+  if [ -z "$GOT" ]; then
+    pass "$SH: (q) the literal-dot evidence ref claude/SMA-1.2-gates-deadbee is still excluded for task SMA-1.2"
+  else
+    fail "$SH: (q) literal-dot evidence ref was selected as the unit branch: '$GOT'"
+  fi
+
+  # NO PATTERN IS BUILT FROM EITHER VALUE. Shape assertion on the shipped bytes.
+  if grep -q 'grep -v -E' "$DISC_NOW" || grep -q 'grep -vE' "$DISC_NOW"; then
+    fail "$SH: (q) the discovery block still interpolates values into a \`grep -E\` pattern"
+  else
+    pass "$SH: (q) the discovery block builds no regex from BRANCH_PREFIX or TASK_ID"
   fi
 done
 

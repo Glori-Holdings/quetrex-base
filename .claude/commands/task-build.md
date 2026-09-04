@@ -1217,19 +1217,45 @@ else
   # task (a re-run — the `-gates-` refs are evidence, not the unit), else
   # <prefix><TASK>-<slug> as dev-pipeline.md step 1 names it. Create it DETACHED AT THE
   # APPROVED SHA so nothing here ever forks from a moving branch name.
-  # THE EXCLUSION IS ANCHORED TO THE EVIDENCE-REF SHAPE, and it has to be. An
-  # unanchored `grep -v -- '-gates-'` also discards the UNIT branch whenever the
-  # title-derived slug happens to carry `gates` between hyphens — a
-  # `-merge-gates-hardening` branch is dropped, discovery comes back empty, the
+  # THE EXCLUSION IS A LITERAL COMPARISON, NOT A PATTERN — and both halves of that
+  # matter. Only `<prefix><TASK>-gates-<sha7>` is evidence; everything else under
+  # this glob is the unit. Miss the unit and discovery comes back empty, the
   # fallback below invents a second name, and a re-run opens a SECOND branch and a
-  # SECOND PR for one task while orphaning what the first run pushed. Only
-  # `<prefix><TASK>-gates-<sha7>` is evidence; everything else under this glob is
-  # the unit. dev-pipeline.md step 1 fixes the branch SHAPE and not the slug, so
-  # the invented name is not guaranteed to reproduce the pushed one — which is the
-  # whole reason this discovery exists and why it must not miss.
+  # SECOND PR for one task while orphaning what the first run pushed —
+  # dev-pipeline.md step 1 fixes the branch SHAPE and not the slug, so the invented
+  # name is not guaranteed to reproduce the pushed one. Two earlier shapes both
+  # missed it, and neither is recoverable by writing a better regex:
+  #   * `grep -v -- '-gates-'`, unanchored, dropped ANY slug carrying `gates`
+  #     between hyphens (`-merge-gates-hardening`).
+  #   * `grep -v -E "^${BRANCH_PREFIX}${TASK_ID}-gates-[0-9a-f]+$"` interpolated two
+  #     validated-but-not-escaped values into a regex. qx_valid_task_id must permit
+  #     `.` for the epic-child shape (`SMA-1.2`) and qx_valid_branch_prefix permits
+  #     it too, so that `.` reached the anchor as a WILDCARD: with TASK_ID=SMA-1.2 it
+  #     matched `<prefix>SMA-1X2-gates-<hex>`, a branch with no literal dot in it.
+  # So no value is interpolated into a pattern here at all. The prefix is stripped
+  # LITERALLY (`${ref#"$literal"}` — quoted, so nothing in it can glob), and what
+  # remains must be a sha7: EXACTLY 7 characters, all lowercase hex. That length is
+  # not a guess — the publication block (cloud-build-routine.md §5b) builds the name
+  # as `$QX_BRANCH_PREFIX$QX_TASK-gates-$(printf '%.7s' "$HEAD_SHA")`, so an evidence
+  # ref is always exactly 7. Pinning it there is also what KEEPS a real unit branch
+  # whose own slug happens to be `gates-<hex>`: a task titled "Gates deadbeef"
+  # slugifies to `gates-deadbeef`, 8 hex characters, which is not a sha7 and is
+  # therefore the unit. (`[0-9a-f]+` would have excluded it and reopened the same
+  # second-branch/second-PR defect at a narrower trigger.) Identical under bash and
+  # zsh: no regex, no `[[ ]]`, no shell-specific expansion.
   UNIT_BRANCH="$(git -C "$REPO_ROOT" ls-remote --heads origin "${BRANCH_PREFIX}${TASK_ID}-*" 2>/dev/null \
     | awk '{sub("refs/heads/","",$2); print $2}' \
-    | grep -v -E "^${BRANCH_PREFIX}${TASK_ID}-gates-[0-9a-f]+$" | head -1)"
+    | while IFS= read -r qx_ref; do
+        [ -n "$qx_ref" ] || continue
+        qx_rest="${qx_ref#"${BRANCH_PREFIX}${TASK_ID}-gates-"}"
+        if [ "$qx_rest" != "$qx_ref" ] && [ "${#qx_rest}" -eq 7 ]; then
+          case "$qx_rest" in
+            *[!0-9a-f]*) : ;;            # not a sha7 — this is the unit branch
+            *) continue ;;               # <prefix><TASK>-gates-<sha7> — evidence
+          esac
+        fi
+        printf '%s\n' "$qx_ref"
+      done | head -1)"
   [ -n "$UNIT_BRANCH" ] || UNIT_BRANCH="${BRANCH_PREFIX}${TASK_ID}-$(printf '%s' "$TASK_TITLE" \
     | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//; s/-$//' | cut -c1-40)"
   WT="$(mktemp -d)"

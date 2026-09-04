@@ -15,22 +15,28 @@
 #       shipped bytes, not a summary) confirm the definition precedes both
 #       call sites — the same mechanical check test/task-build-never-local.
 #       test.sh section (r) makes, independently re-derived here.
-#   (B) the new anchor is attacked with regex metacharacters. TASK_ID and
+#   (B) the anchor is attacked with regex metacharacters. TASK_ID and
 #       BRANCH_PREFIX are validated by qx_valid_ids before they ever reach the
-#       anchor; this section proves that validator does NOT forbid every
-#       metacharacter the anchor mishandles — `.` passes validation and then
-#       acts as a regex wildcard inside the interpolated pattern, both
-#       distorting an unrelated branch name into a false match and — the
-#       concrete, reachable case — recreating the exact failure mode REV-3
-#       fixes (a real unit branch dropped, so a re-run would invent a second
-#       branch and open a second PR) whenever a task's title-derived slug is
-#       literally `gates-<hex only>`. This is a genuine, narrow gap in the
-#       new anchor, not a regression: it is strictly rarer than the unanchored
-#       bug it replaces (which fired on ANY slug containing `gates` between
-#       hyphens; this needs the slug to be `gates-` followed by nothing but
-#       hex digits, or a task id containing '.'). Logged as a coverage gap,
-#       not asserted as a blocking FAIL — see .quetrex/qa-report.json's
-#       not_verified[] for the same note.
+#       exclusion; this section proves that validator does NOT forbid every
+#       metacharacter a pattern would mishandle — `.` passes validation, and in
+#       68ea3ef's interpolated anchor it then acted as a regex wildcard,
+#       distorting an unrelated branch name into a false match. It also proves
+#       the concrete, reachable case: that anchor recreated the exact failure
+#       mode REV-3 fixes (a real unit branch dropped, so a re-run would invent a
+#       second branch and open a second PR) whenever a task's title-derived slug
+#       was literally `gates-<hex only>`.
+#
+#       BOTH RESIDUALS ARE NOW CLOSED, and this section asserts that rather than
+#       logging it. Each one is still reproduced first against the anchor as
+#       68ea3ef shipped it — the pattern is read out of that commit's bytes, not
+#       retyped — and then re-decided by EXECUTING the shipped HEAD block under
+#       bash and zsh. HEAD builds no pattern from either value: it strips the
+#       literal `<prefix><TASK>-gates-` and requires what remains to be a sha7
+#       (exactly 7 lowercase hex, the length the publication block emits), so an
+#       8-hex slug like `gates-deadbeef` is correctly kept as the unit branch and
+#       a `.` in an epic-child id is a literal. The stale note in
+#       .quetrex/qa-report.json's not_verified[] is pinned to 68ea3ef and
+#       describes the state of the code at that sha.
 #
 # Run: bash test/task-build-qa-rev3.test.sh
 
@@ -198,29 +204,118 @@ for CH in '.' '*' '+' '[' '(' '|' '^' '$'; do
   fi
 done
 
-# The concrete, reachable collision: a task whose title slugifies to exactly
-# `gates-<hex only>` produces a real unit branch that the new anchor drops —
-# same failure class REV-3 fixes (discovery returns empty → fallback invents
-# a second branch → a re-run opens a second PR), just far narrower than the
-# unanchored bug (which fired on ANY `gates` between hyphens).
-BRANCH_PREFIX="claude/"; TASK_ID="SMA-9"
-PATTERN="^${BRANCH_PREFIX}${TASK_ID}-gates-[0-9a-f]+\$"
-COLLIDING_UNIT_BRANCH="${BRANCH_PREFIX}${TASK_ID}-gates-deadbeef"   # a REAL unit branch: slug = "gates-deadbeef"
-if printf '%s' "$COLLIDING_UNIT_BRANCH" | grep -qE "$PATTERN"; then
-  pass "(B) CONFIRMED GAP (logged, not blocking): a real unit branch whose slug is literally 'gates-<hex>' ($COLLIDING_UNIT_BRANCH) is itself matched by the anchor and would be wrongly excluded as evidence — narrower than the pre-fix bug but not eliminated; see qa-report.json not_verified[]"
+# --------------------------------------------------------------------------
+# (B) The two residuals QA recorded against the 68ea3ef anchor, now CLOSED.
+#
+# Both are still proven to reproduce — but against the anchor as 68ea3ef
+# actually shipped it, read out of that commit's bytes rather than retyped
+# here, so the fail-first cannot drift away from the code it indicts. Each is
+# then re-asserted against the SHIPPED HEAD, which decides the same question
+# with a literal prefix strip and a sha7 shape check instead of a pattern.
+# --------------------------------------------------------------------------
+ANCHOR_SHA="68ea3ef"
+ANCHOR_PATTERN=""
+if git -C "$ROOT" cat-file -e "$ANCHOR_SHA^{commit}" 2>/dev/null; then
+  # The anchor's own text, lifted from the shipped line: grep -v -E "<pattern>"
+  ANCHOR_PATTERN="$(git -C "$ROOT" show "$ANCHOR_SHA:.claude/commands/task-build.md" \
+    | sed -n 's/.*grep -v -E "\([^"]*\)".*/\1/p' | head -1)"
+fi
+if [ -n "$ANCHOR_PATTERN" ]; then
+  pass "(B) read the anchor pattern out of $ANCHOR_SHA's shipped bytes: $ANCHOR_PATTERN"
 else
-  fail "(B) expected the hex-slug collision to reproduce — if this now fails, the anchor's behavior changed and the gap note is stale"
+  fail "(B) could not read the anchor pattern from $ANCHOR_SHA — the fail-first below would prove nothing"
 fi
 
-# The dot-as-wildcard case: TASK_ID carrying '.' (a valid epic-child id) makes
-# the anchor match a branch that does not contain a literal '.' at all.
-TASK_ID_DOT="SMA-1.2"
-PATTERN_DOT="^${BRANCH_PREFIX}${TASK_ID_DOT}-gates-[0-9a-f]+\$"
-WILDCARD_BRANCH="${BRANCH_PREFIX}SMA-1X2-gates-deadbeef"   # 'X' where the '.' is, not a literal dot
-if printf '%s' "$WILDCARD_BRANCH" | grep -qE "$PATTERN_DOT"; then
-  pass "(B) CONFIRMED: '.' in a valid task id (epic-child shape) is an unescaped regex wildcard in the anchor — matches '$WILDCARD_BRANCH' though no literal '.' is present"
+# Residual 1 — the concrete, reachable collision: a task whose title slugifies
+# to exactly `gates-<hex only>` produces a REAL unit branch that the anchor
+# drops. Same failure class REV-3 fixes (discovery returns empty → fallback
+# invents a second branch → a re-run opens a second PR), just narrower than the
+# unanchored bug (which fired on ANY `gates` between hyphens).
+BRANCH_PREFIX="claude/"; TASK_ID="SMA-9"
+PATTERN="$(printf '%s' "$ANCHOR_PATTERN" | sed -e "s#\${BRANCH_PREFIX}#$BRANCH_PREFIX#" -e "s#\${TASK_ID}#$TASK_ID#")"
+COLLIDING_UNIT_BRANCH="${BRANCH_PREFIX}${TASK_ID}-gates-deadbeef"   # a REAL unit branch: slug = "gates-deadbeef"
+if [ -n "$PATTERN" ] && printf '%s' "$COLLIDING_UNIT_BRANCH" | grep -qE "$PATTERN"; then
+  pass "(B) FAIL-FIRST reproduces: $ANCHOR_SHA's anchor matched the real unit branch $COLLIDING_UNIT_BRANCH (slug 'gates-deadbeef') and would have excluded it as evidence"
 else
-  fail "(B) expected the dot-as-wildcard case to match — if this now fails, re-verify the anchor no longer interpolates TASK_ID raw"
+  fail "(B) expected the hex-slug collision to reproduce against $ANCHOR_SHA — the baseline is wrong, so the HEAD assertion below proves nothing"
+fi
+
+# Residual 2 — the dot-as-wildcard case: TASK_ID carrying '.' (a valid
+# epic-child id) makes the anchor match a branch with no literal '.' in it.
+TASK_ID_DOT="SMA-1.2"
+PATTERN_DOT="$(printf '%s' "$ANCHOR_PATTERN" | sed -e "s#\${BRANCH_PREFIX}#$BRANCH_PREFIX#" -e "s#\${TASK_ID}#$TASK_ID_DOT#")"
+WILDCARD_BRANCH="${BRANCH_PREFIX}SMA-1X2-gates-deadbeef"   # 'X' where the '.' is, not a literal dot
+if [ -n "$PATTERN_DOT" ] && printf '%s' "$WILDCARD_BRANCH" | grep -qE "$PATTERN_DOT"; then
+  pass "(B) FAIL-FIRST reproduces: '.' in a valid task id was an unescaped regex wildcard in $ANCHOR_SHA's anchor — it matched '$WILDCARD_BRANCH' though no literal '.' is present"
+else
+  fail "(B) expected the dot-as-wildcard case to reproduce against $ANCHOR_SHA — the baseline is wrong, so the HEAD assertion below proves nothing"
+fi
+
+# --------------------------------------------------------------------------
+# (B) CLOSED at HEAD — the shipped discovery block, EXECUTED under bash and zsh.
+# Independent of test/task-build-never-local.test.sh section (q): the block is
+# re-extracted here by its own markers and driven through a stubbed ref listing,
+# so both residuals are decided by running the shipped bytes, not by reading them.
+# --------------------------------------------------------------------------
+awk '
+  /UNIT_BRANCH=/ && /ls-remote/ { inb = 1 }
+  inb { print }
+  inb && /head -1/ { exit }
+' "$COMMAND" > "$WORK/disc_head.sh"
+
+if grep -q 'ls-remote' "$WORK/disc_head.sh"; then
+  if grep -qE 'grep -v -?E' "$WORK/disc_head.sh"; then
+    fail "(B) HEAD's discovery block still interpolates BRANCH_PREFIX/TASK_ID into a grep -E pattern"
+  else
+    pass "(B) HEAD's discovery block builds no regex out of BRANCH_PREFIX or TASK_ID"
+  fi
+
+  # <shell> <outdir> <prefix> <task> <ref>... -> the branch discovery selects
+  head_disc() {
+    local sh="$1" out="$2" pfx="$3" tsk="$4"; shift 4
+    local b
+    rm -rf "$out"; mkdir -p "$out/bin"
+    : > "$out/refs.txt"
+    for b in "$@"; do printf '%s\trefs/heads/%s\n' "0000000000000000000000000000000000000000" "$b" >> "$out/refs.txt"; done
+    printf '#!/bin/sh\ncat "%s"\n' "$out/refs.txt" > "$out/bin/git"
+    chmod +x "$out/bin/git"
+    {
+      printf '%s\n' 'REPO_ROOT="$1"; BRANCH_PREFIX="$2"; TASK_ID="$3"'
+      cat "$WORK/disc_head.sh"
+      printf '%s\n' 'printf "%s\n" "$UNIT_BRANCH"'
+    } > "$out/drive.sh"
+    PATH="$out/bin:$PATH" "$sh" "$out/drive.sh" "$out" "$pfx" "$tsk" 2>/dev/null
+  }
+
+  for SH in bash zsh; do
+    command -v "$SH" >/dev/null 2>&1 || { echo "SKIP: $SH not installed — (B) HEAD cases"; continue; }
+
+    GOT="$(head_disc "$SH" "$WORK/b1-$SH" "claude/" "SMA-9" \
+        "claude/SMA-9-gates-a1b2c3d" "$COLLIDING_UNIT_BRANCH")"
+    if [ "$GOT" = "$COLLIDING_UNIT_BRANCH" ]; then
+      pass "$SH: (B) CLOSED: HEAD keeps the real unit branch $COLLIDING_UNIT_BRANCH and excludes the sha7 evidence ref beside it"
+    else
+      fail "$SH: (B) HEAD still mishandles the 'gates-<hex>' slug: got '${GOT:-<empty>}', want $COLLIDING_UNIT_BRANCH"
+    fi
+
+    GOT="$(head_disc "$SH" "$WORK/b2-$SH" "claude/" "$TASK_ID_DOT" \
+        "claude/SMA-1X2-gates-deadbee")"
+    if [ "$GOT" = "claude/SMA-1X2-gates-deadbee" ]; then
+      pass "$SH: (B) CLOSED: with task id $TASK_ID_DOT the '.' is a literal, so claude/SMA-1X2-gates-deadbee is kept"
+    else
+      fail "$SH: (B) HEAD still treats '.' as a wildcard: got '${GOT:-<empty>}', want claude/SMA-1X2-gates-deadbee"
+    fi
+
+    GOT="$(head_disc "$SH" "$WORK/b3-$SH" "claude/" "$TASK_ID_DOT" \
+        "claude/SMA-1.2-gates-deadbee")"
+    if [ -z "$GOT" ]; then
+      pass "$SH: (B) HEAD still excludes a genuine sha7 evidence ref for an epic-child id (claude/SMA-1.2-gates-deadbee)"
+    else
+      fail "$SH: (B) HEAD selected an evidence ref as the unit branch: '$GOT'"
+    fi
+  done
+else
+  fail "(B) could not extract HEAD's discovery block from $COMMAND"
 fi
 
 echo
