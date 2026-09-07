@@ -105,7 +105,7 @@ converges) and neither substitutes for the other.
 
 ## Engine steps
 
-1. **Isolate.** Per the `worktree-workflow` skill, create branch
+1. **Isolate.** Create branch
    `UNIT_BRANCH=${BRANCH_PREFIX}<TASK_ID>-<slug>` and a git worktree `WT` off `BASE_BRANCH`
    (later steps refer to those two names). Use `git -C "$WT"` so the enforce-branch hook sees the
    branch instead of blocking on main. A worktree carries only tracked files, so **provision it**
@@ -220,7 +220,7 @@ converges) and neither substitutes for the other.
 9. **Kanban: `pr_ready`.** On PR open, `qx_task_status "$TASK_ID" pr_ready`; post a comment with
    the PR URL via `qx_task_comment`.
 
-10. **Teardown** per `worktree-workflow`: the pipeline leaves **no dangling worktree or sub-branch
+10. **Teardown.** The pipeline leaves **no dangling worktree or sub-branch
     of its own**. The unit branch and its PR remain.
 
 ---

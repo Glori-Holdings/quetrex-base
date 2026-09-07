@@ -903,7 +903,7 @@ done
 ```
 
 Then create the **per-epic integration branch** `${BRANCH_PREFIX}<EPIC-ID>` off `main` via
-the `worktree-workflow` skill (use `git -C` so the enforce-branch hook sees the branch).
+standard branch isolation (use `git -C` so the enforce-branch hook sees the branch).
 Finally set the **epic** itself to `in_progress` and post a summary comment:
 
 ```bash
