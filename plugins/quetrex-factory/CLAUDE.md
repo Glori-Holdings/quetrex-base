@@ -36,41 +36,6 @@ the reviewer's verdict is the only thing that authorizes a merge.
 
 ---
 
-## 1. Obey the Router — do not re-decide the tier
-
-Every user prompt passes through the **`right-size-router`** hook (`UserPromptSubmit`), which
-injects an authoritative line:
-
-```
-ROUTE: TRIVIAL — single agent, direct edit ... Reasons: docs-only, 1 file.
-ROUTE: STANDARD — one worktree, one developer + qa ...
-ROUTE: COMPLEX — full architect → parallel devs → qa → preview+E2E → reviewer → git-workflow
-ROUTE: AMBIGUOUS — invoke the triage agent for one token
-```
-
-**This verdict is binding. You do not second-guess it, re-classify, or "upgrade for safety" on
-your own.** The router already applies conservative round-up and the hard security override.
-Your job is to *enact* the tier it chose:
-
-- **`ROUTE: AMBIGUOUS`** — and only then — spawn the **`triage`** agent (haiku). It returns
-  exactly one token: `TRIVIAL | STANDARD | COMPLEX`. Adopt it. Do not deliberate further.
-- If a route line is somehow absent (hook disabled), default to **STANDARD** — never skip
-  straight to TRIVIAL.
-
-### Routing table — what you spawn per tier
-
-| Tier | You spawn | Ceremony you SKIP | Gates that STILL fire (never skip) |
-|---|---|---|---|
-| **TRIVIAL** | one `developer`, direct edit in the working tree (no worktree, no plan) | architect, ownership map, parallel devs, separate qa agent, reviewer, security-reviewer | verify-gate, deny-guard, secret-scan, enforce-branch |
-| **STANDARD** | `architect` (light plan) → one `developer` (worktree) → `qa`; `reviewer` + `security-reviewer` only if the plan/router flags security paths | parallel devs, heavy architecture | verify-gate, all guardrails, security-reviewer when flagged |
-| **COMPLEX** | `architect` → parallel `developer`s (disjoint files, one worktree each) → `qa` → preview+E2E → `reviewer` (fresh context: `/review` + `/security-review`) → `git-workflow` → auto-merge | — | all |
-
-Ceremony is optional; **hooks are not.** The fast path lowers orchestration cost, never the
-safety floor. A TRIVIAL task still cannot finish while typecheck/lint/build/tests are red —
-the verify-gate blocks it exactly like a COMPLEX one.
-
----
-
 ## 2. Pipeline Mode — No Stops
 
 Once a build pipeline starts, **run every stage to completion without asking for confirmation,
@@ -126,8 +91,9 @@ Each arrow is crossed only when the upstream **artifact** is present and green. 
    correctness/security defect) → back to developer (bounded). `ESCALATE_HUMAN` (uncertain/
    risky) → pause; a human merges on GitHub (valid pause #4). `AUTO_MERGE` → proceed.
    The `/security-review` pass writes `.quetrex/security-findings.json` and is **mandatory
-   whenever the router or plan flagged security paths** (auth/authz/secret/migration/payment/
-   infra/ci); any `severity:"critical", status:"open"` forces `REWORK`, never `AUTO_MERGE`.
+   whenever security paths are flagged by the architect's plan or the merge gate's path
+   detection** (auth/authz/secret/migration/payment/infra/ci); any `severity:"critical",
+   status:"open"` forces `REWORK`, never `AUTO_MERGE`.
    Triggered by *detection*, not your discretion — do not skip it to save time.
 6. **git-workflow** → reads the artifacts (green + commit-pinned ledger, no open Critical,
    `AUTO_MERGE` verdict, no ESCALATION) and opens a **squash PR to main**, which then
@@ -174,7 +140,6 @@ You spawn sub-agents; you never do their work inline. Each has one job and a min
 | **security-reviewer** | opus | The `/security-review` pass of the reviewer — mandatory when security paths are flagged. |
 | **database-architect** | opus | Schema/migration work, before qa + security. |
 | **git-workflow** | sonnet | After all gates pass — opens the squash PR. |
-| **triage** | haiku | Only when the router returns `AMBIGUOUS`. |
 
 Restate load-bearing rules in every delegation message — sub-agents are context-blind and do
 not see this file or the transcript. Give each the exact artifact path it consumes and name the
@@ -198,9 +163,9 @@ correctly and never try to work around them:
 3. **Security** — the reviewer's `/security-review` pass is mandatory-by-detection; a Critical
    `status:"open"` hard-blocks the merge via the artifact gate. `secret-scan` (Write/Edit +
    Bash) and `deny-guard` fire in **auto mode**, from the managed floor.
-4. **Speed** — the router's fast path routes trivial work to a single direct-edit agent and
-   skips ceremony, while the five floor hooks still fire. Right-sized models (haiku triage,
-   sonnet dev/qa, opus review/security/architecture) keep cost down. Clean runs merge
+4. **Speed** — the architect's tier selection routes trivial work to a single direct-edit
+   agent and skips ceremony, while the five floor hooks still fire. Right-sized models
+   (sonnet dev/qa, opus review/security/architecture) keep cost down. Clean runs merge
    automatically with no human wait.
 
 You do not re-implement any of this. You enact the route, drive the stages, read the artifacts,
@@ -212,11 +177,11 @@ and stop only for the valid pauses in §2.
 
 - All code work on feature branches — **never commit to main**. One branch per unit:
   `feature/<desc>`; parallel devs on sub-branches `feature/<desc>-api`, `feature/<desc>-ui`.
-- Isolated work + teardown is governed by the **`worktree-workflow`** skill: branch, commit in
-  the worktree with `git -C <path>` so the enforce-branch hook detects the branch, PR →
-  auto-merge (or human merge on escalation) → squash-merge, then **mandatory teardown**. Never
-  leave a dangling worktree, open PR, stale branch, or leaked ephemeral preview app / Neon
-  branch. Run its final audit at the end of any multi-unit effort.
+- Isolated work + teardown: branch, commit in the worktree with `git -C <path>` so the
+  enforce-branch hook detects the branch, PR → auto-merge (or human merge on escalation) →
+  squash-merge, then **mandatory teardown**. Never leave a dangling worktree, open PR, stale
+  branch, or leaked ephemeral preview app / Neon branch. Audit for these at the end of any
+  multi-unit effort.
 - Merge policy: a clean `AUTO_MERGE` verdict merges the PR **automatically, no human**; a
   `REWORK` verdict re-enters the pipeline; an `ESCALATE_HUMAN` verdict is merged by a human on
   GitHub. There is no `/quetrex-task-merge` command and no merge-approval artifact. The one

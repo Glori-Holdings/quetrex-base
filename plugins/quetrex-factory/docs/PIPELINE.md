@@ -47,10 +47,9 @@ not read the transcript.
 
 ## 1. Routing — the entry decision (SPEED pillar)
 
-Before any stage runs, the task is sized. Sizing is deterministic and happens in the
-`right-size-router.sh` hook on `UserPromptSubmit` (sub-100ms, no model call in the common
-case). The router injects an authoritative `ROUTE:` line as `additionalContext`; the
-orchestrator **does not re-decide** — it obeys the injected route.
+Before any stage runs, the task is sized. Sizing is the architect's job: it writes the
+tier (`TRIVIAL`/`STANDARD`/`COMPLEX`) into the plan; the orchestrator **does not
+re-decide** — it obeys the tier the architect chose.
 
 ### 1.1 Classification
 
@@ -60,13 +59,9 @@ orchestrator **does not re-decide** — it obeys the injected route.
 | **STANDARD** | everything not caught by the TRIVIAL or COMPLEX signal sets | one worktree, one developer + qa; reviewer only if security paths are touched |
 | **COMPLEX** | any one of: new dependency; schema/DB migration; >3 files or crosses layers (api+ui+db); ambiguous/underspecified ask; public-API change; prompt/paths touch **auth / authz / payment / crypto / secrets / infra / CI** | full architect → parallel developers → qa → preview+E2E → reviewer → git-workflow |
 
-### 1.2 Two rules that keep the fast path safe
+### 1.2 The rule that keeps the fast path safe
 
-1. **Conservative round-up.** Low-confidence or contradictory signals round **up** one
-   tier. Mis-sizing a hard task as trivial ships silent bad code; the reverse only wastes
-   tokens. If genuinely ambiguous the router emits `AMBIGUOUS`, and the orchestrator
-   spawns the `triage` agent (haiku) for one token: `TRIVIAL|STANDARD|COMPLEX`.
-2. **Hard security override.** Any path matching `auth|authz|secret|migration|infra|ci|payment`
+1. **Hard security override.** Any path matching `auth|authz|secret|migration|infra|ci|payment`
    forces **minimum STANDARD** and forces `security_review_required=true`, regardless of
    score and regardless of the architect's own judgment. Security is mandatory
    **by detection**, not by discretion.
@@ -89,7 +84,7 @@ A TRIVIAL edit that breaks the build is blocked by verify-gate exactly like a CO
 ## 2. The state machine
 
 ```
-route (hook) ──TRIVIAL──▶ [single agent: edit → verify-gate green] ──▶ PR ──▶ auto-merge (clean) / escalate
+plan (architect) ──TRIVIAL──▶ [single agent: edit → verify-gate green] ──▶ PR ──▶ auto-merge (clean) / escalate
              ──STANDARD─▶ architect(light) → developer → qa ─┐
              ──COMPLEX──▶ architect → developers(∥ disjoint) → qa ─┐
                                                                     ▼
@@ -109,7 +104,7 @@ route (hook) ──TRIVIAL──▶ [single agent: edit → verify-gate green] �
                                                        ▼
                              merge-gate (commit-pinned, verdict=AUTO_MERGE) → AUTO squash-merge to main
                                                        ▼
-                                    worktree-workflow teardown (audit: no dangling worktree/branch/PR)
+                                    teardown (audit: no dangling worktree/branch/PR)
                                                        ▼
                           (PRODUCTION deploy stays a MANUAL gate — /quetrex-deploy production)
 ```
@@ -124,7 +119,7 @@ never advances on chat — only on its written, green artifact.
 
 ### 3.0 TRIVIAL fast path (bypasses stages 3.1–3.6)
 
-- **Entry:** `ROUTE: TRIVIAL`.
+- **Entry:** the architect's plan names the `TRIVIAL` tier.
 - **Do:** a single agent (sonnet, direct Edit in the working tree) makes the change.
   No worktree, no architect, no ownership map, no parallel devs, no separate QA agent,
   no reviewer.
@@ -141,7 +136,7 @@ TRIVIAL skips ceremony, not gates. The four floor hooks (§1.3) all fire.
 
 ### 3.1 architect — the plan (STANDARD light / COMPLEX full)
 
-- **Entry:** `ROUTE: STANDARD` or `COMPLEX`. (STANDARD gets a *light* plan — a single
+- **Entry:** the architect's plan names the `STANDARD` or `COMPLEX` tier. (STANDARD gets a *light* plan — a single
   workstream, minimal ownership map; COMPLEX gets the full parallel decomposition.)
 - **Agent:** `architect` (opus, high). Read/Grep/Glob + Write scoped to the plan file.
 - **IN:** task id, refined spec, repo snapshot, path to `.quetrex/verify.json`. The
@@ -156,8 +151,8 @@ TRIVIAL skips ceremony, not gates. The four floor hooks (§1.3) all fire.
      criterion containing an unquantified adjective (`fast`, `secure`, `reasonable`) ⇒
      the architect returns **`needs_clarity`** (the one valid early exit — §5) instead of
      a plan.
-  3. `security_review_required` is advisory; the router's path-detection can force it on
-     (§1.2) and the architect cannot turn it off.
+  3. `security_review_required` is advisory; the merge gate's path-detection can force it
+     on (§1.2) and the architect cannot turn it off.
 - **Exit:** valid plan written → developer(s). `needs_clarity` → pause, ask the user.
 
 ### 3.2 developer(s) — implementation (parallel, disjoint)
@@ -256,7 +251,7 @@ The security pass runs as the **`/security-review` half of the fresh-context rev
 gate.
 
 - **Entry:** `security_review_required == true` — set by the architect **or forced** by
-  the router's path-detection (§1.2). When forced, this pass cannot be skipped.
+  the merge gate's path-detection (§1.2). When forced, this pass cannot be skipped.
 - **IN:** the diff, the plan's `security_surface`, full dependency context on touched
   data-access / auth / input paths.
 - **OUT:** `.quetrex/security-findings.json`. Runs the OWASP checklist in `docs/SECURITY.md`
@@ -396,10 +391,10 @@ agent, performs it).
   there is no separate human-approval writer; `review-verdict.json` is the source of truth.
 - **Production deploy is the one manual gate.** Merging to `main` is automatic;
   **deploying to production** is always human-initiated via `/quetrex-deploy production`.
-- **Teardown is mandatory.** After merge, the `worktree-workflow` skill governs cleanup: no
-  dangling worktree, no open/unmerged PR, no stale local or remote branch, and no leaked
-  ephemeral preview app / Neon branch (§3.3b). Run its final audit at the end of any
-  multi-unit effort. A left-behind worktree/branch/PR/preview is a defect.
+- **Teardown is mandatory.** After merge: no dangling worktree, no open/unmerged PR, no
+  stale local or remote branch, and no leaked ephemeral preview app / Neon branch (§3.3b).
+  Audit for these at the end of any multi-unit effort. A left-behind
+  worktree/branch/PR/preview is a defect.
 
 ---
 
@@ -426,14 +421,14 @@ agent, performs it).
 | **1 — Excellent code** | verify-gate on **Stop AND SubagentStop** binds every finish to real exit codes of the `verify.json` chain (§3.2, §3.3, §4); the live-preview E2E run is part of that ledger (§3.3b); merge gate re-reads the ledger and commit-pins it to HEAD (§6). QA authors independent tests + coverage + vacuous-suite guard (§3.3). |
 | **2 — Solid process** | this state machine (§2), where each stage's pass = a written green artifact the next stage reads (§0). Zero-overlap ownership → disjoint parallel devs (§3.1–3.2). Bounded loops (§4). A clean run auto-merges; risk escalates to a human (§6–§7). git-workflow gates on artifacts, never prose (§3.6). |
 | **3 — Security** | the fresh-context reviewer's `/security-review` pass is **mandatory, force-triggered by path detection** (§1.2, §3.5); its findings artifact hard-blocks Critical at the merge gate (§6). secret-scan + deny-guard fire in auto mode, from the managed floor (§1.3). |
-| **4 — Speed** | the deterministic router (§1) routes TRIVIAL to a single direct-edit agent and STANDARD to one dev+qa; only COMPLEX pays the full line — while the five floor hooks still fire on every tier (§1.3), and clean work merges automatically with no human wait (§7). |
+| **4 — Speed** | the architect's tier choice (§1) routes TRIVIAL to a single direct-edit agent and STANDARD to one dev+qa; only COMPLEX pays the full line — while the five floor hooks still fire on every tier (§1.3), and clean work merges automatically with no human wait (§7). |
 
 ---
 
 ## 10. Command → pipeline map (for command authors)
 
 - `/quetrex-task-build <TASK>` — **the entrypoint.** Fetches/refines the task, lets the
-  router size it, then drives this state machine to an **automatic merge** (or a human
+  architect size it, then drives this state machine to an **automatic merge** (or a human
   escalation). Runs in Pipeline Mode (§5).
 - `/quetrex-task-rework <TASK>` — re-enters the machine after a `REWORK`/escalation; agrees
   a fix plan with the user, clears `ESCALATION`, resets the relevant counters, re-runs.

@@ -140,7 +140,7 @@ if [ -f "$SEC" ]; then
 fi
 ```
 
-Note: if the plan set `security_review_required:true` (or the router forced it) but `security-findings.json` does not exist, that is a FAILURE — the mandatory stage did not run. Read the plan to check:
+Note: if the plan set `security_review_required:true` (or the merge gate forced it) but `security-findings.json` does not exist, that is a FAILURE — the mandatory stage did not run. Read the plan to check:
 
 ```bash
 PLAN="$ROOT/.quetrex/plan/$(jq -r '.task' "$ROOT/.quetrex/state.json").json"
