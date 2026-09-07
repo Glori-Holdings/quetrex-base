@@ -163,7 +163,7 @@ correctly and never try to work around them:
 3. **Security** — the reviewer's `/security-review` pass is mandatory-by-detection; a Critical
    `status:"open"` hard-blocks the merge via the artifact gate. `secret-scan` (Write/Edit +
    Bash) and `deny-guard` fire in **auto mode**, from the managed floor.
-4. **Speed** — the architect's tier selection routes trivial work to a single direct-edit
+4. **Speed** — the orchestrator's tier selection routes trivial work to a single direct-edit
    agent and skips ceremony, while the five floor hooks still fire. Right-sized models
    (sonnet dev/qa, opus review/security/architecture) keep cost down. Clean runs merge
    automatically with no human wait.

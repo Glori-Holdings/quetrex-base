@@ -47,9 +47,11 @@ not read the transcript.
 
 ## 1. Routing — the entry decision (SPEED pillar)
 
-Before any stage runs, the task is sized. Sizing is the architect's job: it writes the
-tier (`TRIVIAL`/`STANDARD`/`COMPLEX`) into the plan; the orchestrator **does not
-re-decide** — it obeys the tier the architect chose.
+Before any stage runs, the task is sized. Sizing is the orchestrator's job: it judges the
+tier (`TRIVIAL`/`STANDARD`/`COMPLEX`) when it reads the task. TRIVIAL routes straight to a
+single direct-edit agent with no architect; STANDARD/COMPLEX route to the architect, whose
+plan records the tier the orchestrator chose in its `route` field — the architect may
+**raise** the tier, never lower it.
 
 ### 1.1 Classification
 
@@ -119,7 +121,7 @@ never advances on chat — only on its written, green artifact.
 
 ### 3.0 TRIVIAL fast path (bypasses stages 3.1–3.6)
 
-- **Entry:** the architect's plan names the `TRIVIAL` tier.
+- **Entry:** the orchestrator sizes the task `TRIVIAL` when it reads it.
 - **Do:** a single agent (sonnet, direct Edit in the working tree) makes the change.
   No worktree, no architect, no ownership map, no parallel devs, no separate QA agent,
   no reviewer.
@@ -136,7 +138,7 @@ TRIVIAL skips ceremony, not gates. The four floor hooks (§1.3) all fire.
 
 ### 3.1 architect — the plan (STANDARD light / COMPLEX full)
 
-- **Entry:** the architect's plan names the `STANDARD` or `COMPLEX` tier. (STANDARD gets a *light* plan — a single
+- **Entry:** the orchestrator sizes the task `STANDARD` or `COMPLEX` when it reads it. (STANDARD gets a *light* plan — a single
   workstream, minimal ownership map; COMPLEX gets the full parallel decomposition.)
 - **Agent:** `architect` (opus, high). Read/Grep/Glob + Write scoped to the plan file.
 - **IN:** task id, refined spec, repo snapshot, path to `.quetrex/verify.json`. The
@@ -421,14 +423,14 @@ agent, performs it).
 | **1 — Excellent code** | verify-gate on **Stop AND SubagentStop** binds every finish to real exit codes of the `verify.json` chain (§3.2, §3.3, §4); the live-preview E2E run is part of that ledger (§3.3b); merge gate re-reads the ledger and commit-pins it to HEAD (§6). QA authors independent tests + coverage + vacuous-suite guard (§3.3). |
 | **2 — Solid process** | this state machine (§2), where each stage's pass = a written green artifact the next stage reads (§0). Zero-overlap ownership → disjoint parallel devs (§3.1–3.2). Bounded loops (§4). A clean run auto-merges; risk escalates to a human (§6–§7). git-workflow gates on artifacts, never prose (§3.6). |
 | **3 — Security** | the fresh-context reviewer's `/security-review` pass is **mandatory, force-triggered by path detection** (§1.2, §3.5); its findings artifact hard-blocks Critical at the merge gate (§6). secret-scan + deny-guard fire in auto mode, from the managed floor (§1.3). |
-| **4 — Speed** | the architect's tier choice (§1) routes TRIVIAL to a single direct-edit agent and STANDARD to one dev+qa; only COMPLEX pays the full line — while the five floor hooks still fire on every tier (§1.3), and clean work merges automatically with no human wait (§7). |
+| **4 — Speed** | the orchestrator's tier choice (§1) routes TRIVIAL to a single direct-edit agent and STANDARD to one dev+qa; only COMPLEX pays the full line — while the five floor hooks still fire on every tier (§1.3), and clean work merges automatically with no human wait (§7). |
 
 ---
 
 ## 10. Command → pipeline map (for command authors)
 
-- `/quetrex-task-build <TASK>` — **the entrypoint.** Fetches/refines the task, lets the
-  architect size it, then drives this state machine to an **automatic merge** (or a human
+- `/quetrex-task-build <TASK>` — **the entrypoint.** Fetches/refines the task, the
+  orchestrator sizes it, then drives this state machine to an **automatic merge** (or a human
   escalation). Runs in Pipeline Mode (§5).
 - `/quetrex-task-rework <TASK>` — re-enters the machine after a `REWORK`/escalation; agrees
   a fix plan with the user, clears `ESCALATION`, resets the relevant counters, re-runs.
