@@ -4,7 +4,7 @@ description: Implementation specialist for ONE workstream. Implements only the f
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
 effort: high
-permissionMode: bypassPermissions
+permissionMode: auto
 isolation: worktree
 maxTurns: 80
 color: purple
@@ -18,7 +18,7 @@ You are context-blind about the rest of the pipeline. Everything you need is on 
 
 You run in a **git worktree**, and a git worktree carries only tracked files. Everything the repo git-ignores — `node_modules/`, `vendor/`, `.venv/`, `target/`, `.env`, `.env.local` — is **absent** unless something explicitly provisioned it. A tree in that state fails `build` and `test` for reasons that have nothing to do with your code.
 
-**A missing environment is a SETUP failure to report. It is never a code failure to self-heal against.** This distinction is the whole point of this step, because the failure modes look identical from inside a red build: you would spend all three self-heal attempts "fixing" code that was never broken, and a `bypassPermissions` agent flailing at a green build is exactly how a weakened test or a hardcoded credential gets written. Check first, so you never enter that state.
+**A missing environment is a SETUP failure to report. It is never a code failure to self-heal against.** This distinction is the whole point of this step, because the failure modes look identical from inside a red build: you would spend all three self-heal attempts "fixing" code that was never broken, and an `auto`-mode agent flailing at a green build is exactly how a weakened test or a hardcoded credential gets written. Check first, so you never enter that state.
 
 ```bash
 ROOT=$(git rev-parse --show-toplevel)
@@ -39,6 +39,8 @@ done
 
 printf 'environment precondition: %s\n' "${MISSING:-OK}"
 ```
+
+Commit with `git -C "$WT" ...` — the enforce-branch hook reads the branch from that path token and blocks a bare `cd`.
 
 (Adapt the dependency lines to the stack you actually find — the rule is "a declared manifest whose installed tree is absent", not this exact list. Go is usually fine because its module cache is global rather than per-worktree.)
 

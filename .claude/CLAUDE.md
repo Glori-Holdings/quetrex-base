@@ -15,10 +15,6 @@ This repo IS the Quetrex engine — the hooks, agents, commands and installer th
 - **A change to a hook's blocking behavior ships in the same commit as a test under `test/` that proves both the new block and the new allow.**
 - Generic pipeline doctrine (agent roles, branch rules, permission model) lives in the on-demand `.claude/skills/quetrex-pipeline/` skill — nothing loads it globally. Keep THIS file to what is true of THIS repo only.
 
-# Learning
-
-When I correct you or you catch yourself making a mistake, before continuing, add the lesson as a one-line rule under #LESSONS so it never happens again.
-
 # LESSONS
 - A PreToolUse hook's `permissionDecision:"ask"` only actually prompts in `default` mode — it is AUTO-ALLOWED under `bypassPermissions`, `acceptEdits`, `dontAsk`, `auto`, `plan`, and when `permission_mode` is absent (measured 2026-08-27/28). Never let a guard DEPEND on `ask`, and gate it with an ALLOWLIST (`= "default"`), never a denylist against `bypassPermissions`.
 - The human channel in `transcript_path` is `origin.kind == "human"` — NOT string `message.content`. Measured: 667 of 1366 string-content `type=="user"` rows are agent-reachable (SendMessage peer rows, task-notification summaries, agent-invoked SlashCommands), and one was replayed to rewrite the verify chain. Do NOT key on `promptSource=="typed"` either: `queued` and `suggestion_accepted` are also genuinely human. Absent origin fails CLOSED.

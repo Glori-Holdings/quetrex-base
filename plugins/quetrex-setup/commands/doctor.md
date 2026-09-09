@@ -16,7 +16,7 @@ itself. If a check below reveals a platform/plugin-install problem (a plugin not
 enabled, the CLI unhealthy), say so and **point the user at `/doctor`** rather
 than re-implementing those checks here.
 
-What THIS command owns are the fourteen Quetrex-app checks native `/doctor` knows
+What THIS command owns are the fifteen Quetrex-app checks native `/doctor` knows
 nothing about. Run them all, then print one line per check:
 
 - `✓ <check> — <what's good>`
@@ -923,9 +923,71 @@ fi
 
 ---
 
+## Check 15 — No local fork of the floor or the engine agents
+
+An armed repo (`quetrex-factory` enabled) runs the plugin's own copy of every
+floor hook and every engine agent. A project-local file of the same name under
+`.claude/hooks/` or `.claude/agents/` shadows the plugin's copy — the floor
+hook runs twice per event, or a project agent silently overrides the reviewed
+engine agent. Detect only the known floor/agent basenames; a different local
+hook such as `serialize.sh` is not a fork and must not be flagged:
+
+```bash
+FORK_ARMED="$(node -e '
+  let o={}; try{o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))}catch{}
+  const e=o.enabledPlugins||{};
+  process.stdout.write(String(e["quetrex-factory@quetrex"]===true));
+' "$SETTINGS" 2>/dev/null)"
+
+FORK_HITS=0
+if [ "$FORK_ARMED" = "true" ]; then
+  while IFS= read -r qx_hook; do
+    [ -n "$qx_hook" ] || continue
+    if [ -e "$REPO_ROOT/.claude/hooks/$qx_hook.sh" ]; then
+      FORK_HITS=$((FORK_HITS + 1))
+      echo "✗ No local fork of the floor or the engine agents — .claude/hooks/$qx_hook.sh"
+      echo "    Fix: rm .claude/hooks/$qx_hook.sh — the enabled quetrex-factory plugin already runs it; two copies run twice per event."
+    fi
+  done <<QX_FLOOR_EOF
+deny-guard
+secret-scan
+enforce-branch
+merge-gate
+verify-gate
+verify-gate-quick-chain
+qx-verify-baseline
+QX_FLOOR_EOF
+
+  while IFS= read -r qx_agent; do
+    [ -n "$qx_agent" ] || continue
+    if [ -e "$REPO_ROOT/.claude/agents/$qx_agent.md" ]; then
+      FORK_HITS=$((FORK_HITS + 1))
+      echo "✗ No local fork of the floor or the engine agents — .claude/agents/$qx_agent.md"
+      echo "    Fix: rm .claude/agents/$qx_agent.md — a project agent shadows the plugin agent of the same name."
+    fi
+  done <<QX_AGENTS_EOF
+architect
+database-architect
+developer
+git-workflow
+qa
+reviewer
+security-reviewer
+QX_AGENTS_EOF
+
+  if [ "$FORK_HITS" -eq 0 ]; then
+    echo "✓ No local fork of the floor or the engine agents — quetrex-factory is armed and no forked copy shadows it."
+  fi
+else
+  echo "✓ No local fork of the floor or the engine agents — quetrex-factory is not armed here, so this repo's local .claude/hooks are its only floor."
+fi
+```
+
+---
+
 ## Final summary
 
-After the fourteen checks, print a one-line roll-up: *"Quetrex health: N/14 green."*
+After the fifteen checks, print a one-line roll-up: *"Quetrex health: N/15 green."*
 If any check surfaced a **platform or plugin-install** symptom (a plugin not
 enabled, the CLI itself unhealthy, marketplace unreachable), add one line
 directing the user to native **`/doctor`** for that layer — this command

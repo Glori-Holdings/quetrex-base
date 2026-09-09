@@ -118,10 +118,10 @@ if ! grep -q 'AskUserQuestion' "$DOCTOR_MD"; then
 else
   fail "AC2: doctor.md mentions AskUserQuestion ($(grep -c 'AskUserQuestion' "$DOCTOR_MD") time(s))"
 fi
-if grep -q 'N/14 green' "$DOCTOR_MD"; then
-  pass "AC2: the roll-up counts 14 checks"
+if grep -q 'N/15 green' "$DOCTOR_MD"; then
+  pass "AC2: the roll-up counts 15 checks"
 else
-  fail "AC2: the roll-up does not say N/14 green"
+  fail "AC2: the roll-up does not say N/15 green"
 fi
 if grep -qF '## Check 14 — Webhook registered' "$DOCTOR_MD"; then
   pass "AC2: doctor.md has '## Check 14 — Webhook registered'"

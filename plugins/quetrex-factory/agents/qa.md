@@ -4,7 +4,7 @@ description: The GREEN-PROOF gate. Reads the single-source verify chain (.quetre
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
 effort: high
-permissionMode: bypassPermissions
+permissionMode: auto
 maxTurns: 80
 color: red
 ---

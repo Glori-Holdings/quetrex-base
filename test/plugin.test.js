@@ -358,7 +358,7 @@ check('.claude-plugin/plugin.json parses and carries the v2 identity', () => {
 check('plugin.json still declares the paths and identity the marketplace needs', () => {
   const p = readJson('.claude-plugin/plugin.json');
   assert.strictEqual(p.name, 'quetrex');
-  assert.ok(Array.isArray(p.agents) && p.agents.length > 0, 'the engine agents must still be declared');
+  assert.ok(!('agents' in p), 'root plugin.json must not declare agents — the factory manifest is the single owner');
 });
 
 check('plugin.json declares custom paths that keep content under .claude/', () => {
@@ -374,45 +374,38 @@ check('plugin.json declares custom paths that keep content under .claude/', () =
     'hooks/hooks.json must exist at the plugin root so it auto-loads');
 });
 
-// ONE-COPY (final reconciliation with dev-floor): ALL 9 agents — the 7
-// pipeline agents (architect, database-architect, developer, git-workflow,
-// qa, reviewer, security-reviewer) AND the 2 cleanup agents
-// (quetrex-cleanup-auditor, quetrex-cleanup-proposer) — live in exactly ONE
-// place: plugins/quetrex-factory/agents/ (git-mv'd there by the floor
-// workstream; floor's OWN plugin.json still lists only its 7 pipeline
-// agents — that manifest is a different concern from quetrex's). .claude/
+// ONE-COPY: the 7 engine agents (architect, database-architect, developer,
+// git-workflow, qa, reviewer, security-reviewer) are declared exactly once,
+// by the factory's OWN manifest (plugins/quetrex-factory/.claude-plugin/
+// plugin.json) — the root plugin.json declares none (checked above). .claude/
 // agents/ no longer holds any agent file at all (it may not even exist).
 const ALL_AGENTS = ['architect.md', 'database-architect.md', 'developer.md',
-  'git-workflow.md', 'qa.md', 'quetrex-cleanup-auditor.md',
-  'quetrex-cleanup-proposer.md', 'reviewer.md', 'security-reviewer.md'];
+  'git-workflow.md', 'qa.md', 'reviewer.md', 'security-reviewer.md'];
 
-check('plugin.json declares all 9 agents at plugins/quetrex-factory/agents/, none left in .claude/agents/', () => {
-  const p = readJson('.claude-plugin/plugin.json');
+check('factory plugin.json declares exactly the 7 engine agents, none left in .claude/agents/', () => {
+  const p = readJson('plugins/quetrex-factory/.claude-plugin/plugin.json');
   // `agents` MUST be individual .md FILE paths — the Claude Code plugin validator
   // rejects a directory for `agents` (unlike commands/skills, which take a dir).
   assert.ok(Array.isArray(p.agents) && p.agents.length > 0, 'agents must be a non-empty array');
   assert.ok(p.agents.every((a) => a.endsWith('.md')),
     'agents must be individual .md file paths, not a directory (the plugin validator rejects a dir)');
   for (const a of p.agents) {
-    assert.ok(exists(a.replace(/^\.\//, '')), `plugin.json declares agent ${a}, which does not exist on disk`);
+    assert.ok(exists(path.join('plugins/quetrex-factory', a.replace(/^\.\//, ''))),
+      `factory plugin.json declares agent ${a}, which does not exist on disk`);
   }
 
   const declared = new Set(p.agents);
   for (const f of ALL_AGENTS) {
-    assert.ok(declared.has(`./plugins/quetrex-factory/agents/${f}`),
-      `${f} must be declared at ./plugins/quetrex-factory/agents/${f}`);
+    assert.ok(declared.has(`./agents/${f}`), `${f} must be declared at ./agents/${f}`);
   }
   assert.strictEqual(p.agents.length, ALL_AGENTS.length,
-    `plugin.json agents must declare exactly these ${ALL_AGENTS.length} agents, nothing more`);
+    `factory plugin.json agents must declare exactly these ${ALL_AGENTS.length} agents, nothing more`);
 
-  // No unlisted .md may survive in the factory agents dir (checked when it
-  // exists — it is owned by the floor workstream, asserted for real post-merge).
+  // No unlisted .md may survive in the factory agents dir.
   const factoryDir = path.join(REPO_ROOT, 'plugins/quetrex-factory/agents');
-  if (fs.existsSync(factoryDir)) {
-    for (const f of fs.readdirSync(factoryDir).filter((x) => x.endsWith('.md'))) {
-      assert.ok(declared.has(`./plugins/quetrex-factory/agents/${f}`),
-        `plugins/quetrex-factory/agents/${f} exists on disk but is not declared in plugin.json agents`);
-    }
+  for (const f of fs.readdirSync(factoryDir).filter((x) => x.endsWith('.md'))) {
+    assert.ok(declared.has(`./agents/${f}`),
+      `plugins/quetrex-factory/agents/${f} exists on disk but is not declared in factory plugin.json agents`);
   }
 
   // .claude/agents/ must hold NO agent .md file — the directory may not even
@@ -421,7 +414,7 @@ check('plugin.json declares all 9 agents at plugins/quetrex-factory/agents/, non
   if (fs.existsSync(claudeAgentsDir)) {
     const stray = fs.readdirSync(claudeAgentsDir).filter((f) => f.endsWith('.md'));
     assert.deepStrictEqual(stray, [],
-      `.claude/agents/ must be empty of .md files (all 9 moved to plugins/quetrex-factory/agents/): found ${stray.join(', ')}`);
+      `.claude/agents/ must be empty of .md files (all moved to plugins/quetrex-factory/agents/): found ${stray.join(', ')}`);
   }
 });
 
@@ -647,8 +640,7 @@ check('init.md sets the branch prefix without prompting for it', () => {
 });
 
 // --- 5c. the file-edit grant stays scoped and enforceable ------------------
-// defaultMode "dontAsk" makes permissions.allow the COMPLETE grant set, so a
-// bare "Edit"/"Write" grants every path on the machine with no prompt. And
+// A bare "Edit"/"Write" grants every path on the machine with no prompt. And
 // Claude Code consults Edit(path)/Read(path) rules ONLY — a Write(path) rule is
 // accepted, never enforced, and warns at startup. Both mistakes look correct in
 // review, so assert against both, here and in the need[] array /quetrex-setup:init
@@ -658,7 +650,7 @@ check('the file-edit permission grant is path-scoped and uses an enforceable Edi
   const allow = readJson('.claude/settings.json').permissions.allow;
   for (const bare of BARE_EDIT_GRANTS) {
     assert.ok(!allow.includes(bare),
-      `permissions.allow contains bare "${bare}" — under dontAsk that grants every path on the machine; use Edit(/**)`);
+      `permissions.allow contains bare "${bare}" — that grants every path on the machine; use Edit(/**)`);
   }
   const unenforceable = allow.filter((r) => /^(Write|NotebookEdit|MultiEdit|Glob)\(/.test(r));
   assert.deepStrictEqual(unenforceable, [],

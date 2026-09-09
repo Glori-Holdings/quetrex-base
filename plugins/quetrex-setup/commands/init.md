@@ -825,7 +825,7 @@ node -e '
   const header = cur ? "" :
     "# Git-ignored paths every worktree needs. Listing a path here does NOT commit it.\n" +
     "# NOTE: the harness applies this to the worktrees IT creates; a manual\n" +
-    "# `git worktree add` must copy these itself (see the worktree-workflow skill).\n";
+    "# `git worktree add` must copy these itself.\n";
   fs.writeFileSync(file, header + cur + (cur && !cur.endsWith("\n") ? "\n" : "") + add.join("\n") + "\n");
   console.log("Added to .worktreeinclude: " + add.join(", "));
 ' "$WTI" ".env" ".env.local" ".claude/settings.local.json" "${ENV_FILES[@]}"
@@ -1235,8 +1235,8 @@ unset -f qx_ctl
 
 The npm era seeded Quetrex files into the operator's **global** `~/.claude`; the plugin era
 does not. Offer to clean those leftovers **once per machine** — idempotent, allowlist-scoped,
-pristine-only, reversible (quarantine, never hard-delete), and gated by two agreeing agents
-plus a per-item human decision. The deterministic engine ships as the `quetrex-cleanup` tool
+pristine-only, reversible (quarantine, never hard-delete), and gated by a per-item human
+decision. The deterministic engine ships as the `quetrex-cleanup` tool
 on the plugin's PATH (it keeps its once-per-machine marker under `${CLAUDE_PLUGIN_DATA}`,
 never `~/.claude`, never the repo).
 
@@ -1253,23 +1253,12 @@ fi
 If `scan` prints nothing, say *"No npm-era Quetrex artifacts found in ~/.claude."*, run
 `quetrex-cleanup mark-done`, and move on.
 
-**2. Two-agent gate.** When `scan` returns candidates, launch **both** cleanup agents (via
-the Task tool) on the scan output:
+**2. Per-item human gate.** For each candidate `scan` returned, ask the user in plain English
+— *what* the item is and *why* it is proposed for removal — and take a **per-item
+KEEP/REMOVE** decision. The default is **KEEP**; the user may decline any single item. Never
+batch-remove without per-item consent.
 
-- `quetrex-cleanup-proposer` — proposes a per-item KEEP/REMOVE/STRIP plan (conservative,
-  default KEEP).
-- `quetrex-cleanup-auditor` — independently re-inspects each proposed REMOVE/STRIP and
-  **vetoes** anything user-owned or modified.
-
-Only items **both** agents agree are removable proceed. Any disagreement is **escalated to
-the human** as an open question — never auto-resolved.
-
-**3. Per-item human gate.** For each agreed item, ask the user in plain English — *what* the
-item is and *why* it is proposed for removal — and take a **per-item KEEP/REMOVE** decision.
-The default is **KEEP**; the user may decline any single item. Never batch-remove without
-per-item consent.
-
-**4. Apply — reversibly.** For the items the user approved:
+**3. Apply — reversibly.** For the items the user approved:
 
 ```bash
 # APPROVED = the ~/.claude-relative paths the user confirmed for removal.
@@ -1377,7 +1366,7 @@ a credential that was just imported.
 
 ## 6. Commit the additions — PR if possible, else local
 
-Follow the `worktree-workflow` conventions. Stage **only** the additions/cleanups:
+Commit in the worktree with `git -C`. Stage **only** the additions/cleanups:
 `.quetrex/project.json` plus any `CLAUDE.md` edits made in step 4. The build gates
 (`verify-gate.sh`/`merge-gate.sh`/`secret-scan.sh` and the fat pipeline agents) are
 delivered by the `quetrex-factory` plugin pin (4h) — this command never copies hook or

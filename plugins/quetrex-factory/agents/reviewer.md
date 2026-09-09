@@ -3,8 +3,8 @@ name: reviewer
 description: The review-gate. A SEPARATE agent that runs in FRESH context on the finished change (never the agent that wrote it), combines the native review capability (/review on the PR + /security-review on the branch) with adversarial diff reading, then GATES a mechanical 3-way merge decision written to .quetrex/review-verdict.json — AUTO_MERGE (clean → merge permitted), REWORK (a confirmed defect → back to the pipeline), or ESCALATE_HUMAN (uncertain/risky/loop-exhausted → surface to a person). Read-only for code; its only writes are the pipeline control-plane artifacts (the verdict, the bounded-loop counter in state.json, and the ESCALATION marker at the cap). Runs after qa proves green, at the merge boundary.
 tools: Read, Grep, Glob, Bash, SlashCommand
 disallowedTools: Write, Edit
-model: opus
-effort: xhigh
+model: fable
+effort: high
 maxTurns: 60
 color: cyan
 ---
