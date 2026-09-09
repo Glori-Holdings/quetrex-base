@@ -3,7 +3,9 @@
 # for ONE-COPY item (e): every ${CLAUDE_PLUGIN_ROOT}/scripts/*.sh named by
 # plugins/quetrex-factory/hooks/hooks.json exists under
 # plugins/quetrex-factory/scripts/ and passes bash -n, and every agent
-# listed in .claude-plugin/plugin.json's "agents" array exists on disk.
+# listed in the factory's own plugin.json "agents" array exists on disk
+# (the root plugin.json declares no agents — the factory manifest is the
+# single owner).
 #
 # Run: bash test/qa-wiring-independent.test.sh
 
@@ -13,12 +15,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOOKS_JSON="$REPO_ROOT/plugins/quetrex-factory/hooks/hooks.json"
 SCRIPTS_DIR="$REPO_ROOT/plugins/quetrex-factory/scripts"
 PLUGIN_JSON="$REPO_ROOT/.claude-plugin/plugin.json"
+FACTORY_PLUGIN_JSON="$REPO_ROOT/plugins/quetrex-factory/.claude-plugin/plugin.json"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "SKIP: jq is not installed"
   exit 0
 fi
-for f in "$HOOKS_JSON" "$PLUGIN_JSON"; do
+for f in "$HOOKS_JSON" "$PLUGIN_JSON" "$FACTORY_PLUGIN_JSON"; do
   if [ ! -f "$f" ]; then
     echo "FAIL: expected file not found: $f"
     exit 1
@@ -98,23 +101,23 @@ else
 fi
 
 # =============================================================================
-# plugin.json: every agent path exists on disk
+# factory plugin.json: every agent path exists on disk
 # =============================================================================
-AGENT_PATHS=$(jq -r '.agents[]?' "$PLUGIN_JSON")
+AGENT_PATHS=$(jq -r '.agents[]?' "$FACTORY_PLUGIN_JSON")
 AGENT_COUNT=$(printf '%s\n' "$AGENT_PATHS" | grep -c '.' || true)
 if [ "$AGENT_COUNT" -ge 1 ]; then
-  ok "plugin.json: found $AGENT_COUNT declared agent(s)"
+  ok "factory plugin.json: found $AGENT_COUNT declared agent(s)"
 else
-  notok "plugin.json: expected >= 1 declared agent, found $AGENT_COUNT"
+  notok "factory plugin.json: expected >= 1 declared agent, found $AGENT_COUNT"
 fi
 
 while IFS= read -r rel; do
   [ -n "$rel" ] || continue
-  ABS="$REPO_ROOT/${rel#./}"
+  ABS="$REPO_ROOT/plugins/quetrex-factory/${rel#./}"
   if [ -f "$ABS" ]; then
-    ok "plugin.json agent exists: $rel"
+    ok "factory plugin.json agent exists: $rel"
   else
-    notok "plugin.json agent MISSING: $rel (resolved $ABS)"
+    notok "factory plugin.json agent MISSING: $rel (resolved $ABS)"
   fi
 done <<< "$AGENT_PATHS"
 
@@ -130,6 +133,24 @@ if [ -d "$REPO_ROOT/.claude/agents" ]; then
   fi
 else
   ok ".claude/agents/ does not exist — one-copy satisfied trivially"
+fi
+
+# =============================================================================
+# the right-size router is gone: no UserPromptSubmit hook, no script on disk
+# (mirrors test/no-workflow-reminder.test.sh's shape for a deleted hook).
+# =============================================================================
+ROUTER_SCRIPT="$SCRIPTS_DIR/right-size-router.sh"
+if [ ! -e "$ROUTER_SCRIPT" ]; then
+  ok "right-size-router.sh no longer exists at plugins/quetrex-factory/scripts/right-size-router.sh"
+else
+  notok "right-size-router.sh still exists at $ROUTER_SCRIPT"
+fi
+
+UPS_COUNT=$(jq -r '(.hooks.UserPromptSubmit // .UserPromptSubmit // []) | length' "$HOOKS_JSON")
+if [ "$UPS_COUNT" = "0" ]; then
+  ok "plugins/quetrex-factory/hooks/hooks.json has no UserPromptSubmit key"
+else
+  notok "plugins/quetrex-factory/hooks/hooks.json still registers $UPS_COUNT UserPromptSubmit hook(s)"
 fi
 
 echo

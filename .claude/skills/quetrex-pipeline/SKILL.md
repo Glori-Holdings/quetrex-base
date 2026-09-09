@@ -70,7 +70,7 @@ environment is bound, the environment binding is the fix, and the command stops.
   or carries someone else's commits — which rules out shared `feature/*` branches
 - Regular merge: sub-branches → feature branch. Squash merge: feature branch → default branch
 - Max 3 QA failures before escalating to the user — do not loop forever
-- Isolated work and teardown are governed by the `worktree-workflow` skill: branch, commit in the worktree with `git -C <path>` so the enforce-branch hook sees the branch, PR, merge, then remove the worktree and both branches. Never leave a dangling worktree, an unmerged PR, or a stale local or remote branch.
+- Isolated work and teardown: branch, commit in the worktree with `git -C <path>` so the enforce-branch hook sees the branch, PR, merge, then remove the worktree and both branches. Never leave a dangling worktree, an unmerged PR, or a stale local or remote branch.
 
 ## Merge Gate
 

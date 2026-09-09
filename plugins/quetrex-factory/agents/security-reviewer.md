@@ -1,11 +1,11 @@
 ---
 name: security-reviewer
-description: Mandatory security gate. Runs the OWASP-boundary checklist against the diff, writes structured findings to .quetrex/security-findings.json, and hard-blocks the PR on any open Critical. Read-only — finds and records issues, never fixes them. Force-triggered by the router when a change touches auth/authz/secret/migration/payment/infra/ci paths, independent of architect discretion.
+description: Mandatory security gate. Runs the OWASP-boundary checklist against the diff, writes structured findings to .quetrex/security-findings.json, and hard-blocks the PR on any open Critical. Read-only — finds and records issues, never fixes them. Force-triggered by the merge gate's path detection when a change touches auth/authz/secret/migration/payment/infra/ci paths, independent of architect discretion.
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit
 skills: security-review
-model: opus
-effort: xhigh
+model: fable
+effort: high
 maxTurns: 60
 color: red
 ---

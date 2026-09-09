@@ -187,7 +187,7 @@ rebuild:
 Review what it changed before accepting it; `--fix` is a convenience, not an authority.
 
 **3. Commit and PUSH the nit fixes onto the existing unit branch**, using the
-`worktree-workflow` skill's `git -C <path>` form so the enforce-branch hook sees the branch.
+`git -C <path>` commit form so the enforce-branch hook sees the branch.
 Pushing is not optional: the cloud run in Step 4 **resumes** `UNIT_BRANCH` from its pushed tip
 (`quetrex-cloud-prep sync`, which never rebases and never force-pushes), so anything left
 uncommitted or unpushed here is simply not part of the rework.
