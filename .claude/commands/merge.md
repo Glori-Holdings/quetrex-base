@@ -646,8 +646,7 @@ git -C <REPO_ROOT> ls-remote --heads origin '<prefix><TASK>-gates-*' 'quetrex-sp
 ``` The spec branch was never
 deleted by anything in the engine, so every task ever built left one behind on the customer's
 origin, permanently, carrying that task's acceptance criteria, ownership map and security
-surface. Leaving them is the exact dangling-branch failure the worktree-workflow doctrine
-forbids.
+surface. Leaving them is the exact dangling-branch failure teardown must never allow.
 
 **Rule B applies here too, and there are two separate reasons:**
 

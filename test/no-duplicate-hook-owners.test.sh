@@ -9,7 +9,7 @@
 # produced exit 124 and exit 143 kills that blocked the operator's turn outright,
 # because two ~3-minute chains contending are slower than the gate's own budget.
 #
-#   factory 1.7.1 registers: right-size-router deny-guard secret-scan
+#   factory 1.7.1 registers: deny-guard secret-scan
 #                            enforce-branch merge-gate format verify-gate
 #   quetrex 2.5.1 registers: session-state quetrex-update-check edit-gate
 #   this repo registered:    ALL EIGHT of the overlapping ones
@@ -49,8 +49,7 @@ enforce-branch.sh
 merge-gate.sh
 verify-gate.sh
 format.sh
-auto-format.sh
-right-size-router.sh'
+auto-format.sh'
 # quetrex-update-check.sh and quetrex-bound-version-guard.sh MOVED to
 # quetrex-setup with the setup-plugin split (GLOBAL.json) — they are no
 # longer registered by `quetrex`'s own hooks.json. See SETUP_OWNED below.
@@ -173,9 +172,13 @@ assert_no_drift() {  # assert_no_drift <label> <live-basenames>
 FOUND=""
 for cand in "$HOME"/.claude/plugins/marketplaces/quetrex/plugins/quetrex-factory/hooks/hooks.json \
             "$HOME"/.claude/plugins/cache/quetrex/quetrex-factory/*/hooks/hooks.json \
-            "$ROOT/../quetrex-plugins/plugins/quetrex-factory/hooks/hooks.json"; do
+            "$ROOT/../quetrex-plugins/plugins/quetrex-factory/hooks/hooks.json" \
+            "$ROOT/plugins/quetrex-factory/hooks/hooks.json"; do
   [ -f "$cand" ] && FOUND="$cand"
 done
+# quetrex-base is factory's SOURCE repo (this file lives right here, committed),
+# so its own copy is checked LAST and wins over a machine-installed cache that
+# may still lag behind an in-progress edit to that same committed file.
 if [ -n "$FOUND" ]; then
   assert_no_drift "the live quetrex-factory (checked against $(basename "$(dirname "$(dirname "$FOUND")")"))" "$(live_hook_basenames "$FOUND")"
 else

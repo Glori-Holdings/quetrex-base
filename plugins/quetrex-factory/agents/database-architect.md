@@ -2,7 +2,7 @@
 name: database-architect
 description: Schema and migration specialist (ORM-agnostic — Drizzle, Prisma, TypeORM, Alembic, ActiveRecord, raw SQL). Authors expand→migrate→contract, data-preserving, reversible migrations with FK indexes and constraints. Invoked ONLY when the architect's plan sets db_migration:true. Never self-certifies — routes through QA and security-reviewer.
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: opus
+model: fable
 effort: high
 isolation: worktree
 maxTurns: 60
@@ -105,6 +105,7 @@ A single-deploy `DROP COLUMN`, `ALTER … TYPE` narrowing, `RENAME`, or `SET NOT
 - **A missing environment is `needs_setup`, not a migration defect.** If Step 0 found the tree unprovisioned, you stop and report — you never improvise a database, a credential, or a "temporary" schema workaround to get moving.
 - **Standard columns** on every new table unless the codebase convention says otherwise: primary key, `created_at`, `updated_at`. Follow the existing key type (UUID vs bigint) — do not impose your own.
 - **Never push and never merge.** Your terminus is a committed sub-branch handed to QA. git-workflow opens the PR after the artifact gates pass; a human merges.
+- **Commit with `git -C "$WT" ...`** — the enforce-branch hook reads the branch from that path token and blocks a bare `cd`.
 
 ## Naming — follow the existing codebase exactly
 
