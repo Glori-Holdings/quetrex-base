@@ -921,9 +921,14 @@ fi
 # requires it to come back empty for the gates-carrying slug.
 # --------------------------------------------------------------------------
 extract_discovery() {  # extract_discovery <task-build.md> > file
+  # Two terminators, either one closing the capture: the sentinel comment the
+  # current (post-fix) block ends on, OR the bare `head -1` tail every pre-fix
+  # fixture (199e648/68ea3ef/df430d6) still carries — the fix removed `head -1`
+  # from the shipped block, so only ONE of the two ever actually fires per input.
   awk '
     /UNIT_BRANCH=/ && /ls-remote/ { inb = 1 }
     inb { print }
+    inb && /end 6L unit-branch discovery/ { exit }
     inb && /head -1/ { exit }
   ' "$1"
 }
@@ -987,7 +992,8 @@ extract_discovery "$COMMAND" > "$DISC_NOW"
 # line at the bottom.
 if grep -q 'ls-remote' "$DISC_NOW" \
    && grep -qF 'printf' "$DISC_NOW" && grep -q 'qx_ref"$' "$DISC_NOW" \
-   && [ "$(tail -1 "$DISC_NOW" | tr -d ' ')" = 'done|head-1)"' ]; then
+   && grep -q 'qx_unit_n' "$DISC_NOW" \
+   && [ "$(tail -1 "$DISC_NOW" | tr -d ' ')" = '#──end6Lunit-branchdiscovery──' ]; then
   pass "(q) extracted Step 6L's discovery pipeline WHOLE from the shipped command ($(wc -l < "$DISC_NOW" | tr -d ' ') lines, closing on the real pipeline tail)"
 else
   fail "(q) extraction of Step 6L's discovery pipeline is missing or TRUNCATED (last line: [$(tail -1 "$DISC_NOW")]) — the assertions below would prove nothing"
@@ -1114,6 +1120,65 @@ if [ -s "$TAIL_FIXTURE" ]; then
 else
   fail "(s) FAIL-FIRST: baseline fixture $TAIL_FIXTURE is missing or empty — refusing to report a pass having compared against nothing"
 fi
+
+# FOURTH FAIL-FIRST BASELINE — 8ea5233, the reviewed pre-fix head this rework
+# corrects (SEC-1, reviewer-confirmed, high). The literal-prefix guard and the
+# sha7 evidence exclusion above are both correct and unchanged; what is missing
+# is an ambiguity check on what survives them — `head -1` over MULTIPLE
+# non-evidence candidates picks whichever sorts first, deterministically for
+# anyone with push access to origin and by accident for anyone without.
+# Reproduced here against that commit's SHIPPED bytes, on a real bare origin,
+# never a retyped pipeline.
+SEC1_SHA="8ea5233"
+SEC1_TB="$WORK/sec1-task-build.md"
+# 8ea5233 is a commit of this branch only; its bytes were captured ahead of
+# the squash-merge into test/fixtures/task-build/8ea5233-task-build.md
+# (3-line header, byte-identical content from line 4 on) — read from there.
+SEC1_FIXTURE="$REPO_ROOT/test/fixtures/task-build/${SEC1_SHA}-task-build.md"
+if [ -s "$SEC1_FIXTURE" ]; then
+  tail -n +4 "$SEC1_FIXTURE" > "$SEC1_TB"
+  DISC_SEC1="$WORK/discovery-sec1.sh"
+  extract_discovery "$SEC1_TB" > "$DISC_SEC1"
+  if grep -q 'done | head -1)"' "$DISC_SEC1"; then
+    pass "(t) FAIL-FIRST: $SEC1_SHA carries the unguarded \`head\`-over-multiple-candidates pick"
+  else
+    fail "(t) FAIL-FIRST: $SEC1_SHA does NOT carry the unguarded pick — the baseline is wrong, refusing to claim a fix"
+  fi
+
+  SEC1_GOT="$(disc_run bash "$DISC_SEC1" "$WORK/ff-sec1" "claude/" "SMA-1" \
+      "claude/SMA-1-aaa-attacker" "claude/SMA-1-real-slug")"
+  if [ "$SEC1_GOT" = "claude/SMA-1-aaa-attacker" ]; then
+    pass "(t) FAIL-FIRST: $SEC1_SHA silently picked claude/SMA-1-aaa-attacker over claude/SMA-1-real-slug — the ASCII-order defect reproduced exactly as the reviewer found it"
+  else
+    fail "(t) FAIL-FIRST: $SEC1_SHA returned '${SEC1_GOT:-<empty>}' for the two-candidate case — it did NOT reproduce, so the assertions below prove nothing"
+  fi
+else
+  fail "(t) FAIL-FIRST: $SEC1_FIXTURE is missing or empty — refusing to report a pass having compared against nothing"
+fi
+
+# Same driver as disc_run, but captures rc + stderr instead of discarding them:
+# a refusal exits before the driver's trailing printf runs, so its evidence is
+# on stderr, not stdout. Prints "RC=<n>|OUT=<stdout>|ERR=<stderr>".
+disc_run_refusal() {   # disc_run_refusal <shell> <disc> <outdir> <prefix> <task> <branch>...
+  local shell="$1" disc="$2" outdir="$3" prefix="$4" task="$5"; shift 5
+  local o="$outdir/o.git" r="$outdir/r" b rc
+  rm -rf "$o" "$r"
+  git init -q --bare "$o"
+  git init -q "$r"
+  git -C "$r" remote add origin "$o"
+  echo seed > "$r/f"
+  git -C "$r" add -A >/dev/null 2>&1
+  git -C "$r" -c user.email=t@t -c user.name=t commit -qm seed
+  for b in "$@"; do git -C "$r" push -q origin "HEAD:refs/heads/$b"; done
+  {
+    printf '%s\n' 'REPO_ROOT="$1"; BRANCH_PREFIX="$2"; TASK_ID="$3"'
+    cat "$disc"
+    printf '%s\n' 'printf "%s\n" "$UNIT_BRANCH"'
+  } > "$outdir/drive.sh"
+  "$shell" "$outdir/drive.sh" "$r" "$prefix" "$task" >"$outdir/out.txt" 2>"$outdir/err.txt"
+  rc=$?
+  printf 'RC=%s|OUT=%s|ERR=%s' "$rc" "$(cat "$outdir/out.txt")" "$(cat "$outdir/err.txt")"
+}
 
 for SH in bash zsh; do
   if ! command -v "$SH" >/dev/null 2>&1; then
@@ -1302,6 +1367,32 @@ for SH in bash zsh; do
     pass "$SH: (s) the guard anchors at position 0 — a mid-path occurrence of the prefix loses to the real unit branch"
   else
     fail "$SH: (s) prefix-anchoring: got '${GOT:-<empty>}', want claude/QUE-13-legit"
+  fi
+
+  # ------------------------------------------------------------------------
+  # (t) SEC-1 FIX. Two non-evidence candidates survive the literal-prefix guard
+  # and the sha7 evidence exclusion (the same pair the reviewer reproduced
+  # against 8ea5233 above) -> refuse, name both, exit non-zero. Never pick.
+  # ------------------------------------------------------------------------
+  RES="$(disc_run_refusal "$SH" "$DISC_NOW" "$WORK/o-$SH-t1" "claude/" "SMA-1" \
+      "claude/SMA-1-aaa-attacker" "claude/SMA-1-real-slug")"
+  RC="${RES%%|*}"; REST="${RES#*|}"; OUT="${REST%%|ERR=*}"; ERR="${RES#*ERR=}"
+  if [ "$RC" = "RC=1" ] && [ "$OUT" = "OUT=" ] \
+     && printf '%s' "$ERR" | grep -q 'claude/SMA-1-aaa-attacker' \
+     && printf '%s' "$ERR" | grep -q 'claude/SMA-1-real-slug'; then
+    pass "$SH: (t) two non-evidence candidates -> refused (rc=1, no branch chosen), naming both claude/SMA-1-aaa-attacker and claude/SMA-1-real-slug"
+  else
+    fail "$SH: (t) ambiguous two-candidate case not refused correctly: $RES"
+  fi
+
+  # CONTROL. Exactly one non-evidence candidate is still chosen, not refused —
+  # the ambiguity check must not fire on the ordinary single-candidate case.
+  GOT="$(disc_run "$SH" "$DISC_NOW" "$WORK/o-$SH-t2" "claude/" "SMA-2" \
+      "claude/SMA-2-real-slug" "claude/SMA-2-gates-a1b2c3d")"
+  if [ "$GOT" = "claude/SMA-2-real-slug" ]; then
+    pass "$SH: (t) CONTROL: exactly one non-evidence candidate is still chosen, not refused"
+  else
+    fail "$SH: (t) CONTROL: single-candidate case broken: got '${GOT:-<empty>}', want claude/SMA-2-real-slug"
   fi
 
   # NO PATTERN IS BUILT FROM EITHER VALUE. Shape assertion on the shipped bytes.

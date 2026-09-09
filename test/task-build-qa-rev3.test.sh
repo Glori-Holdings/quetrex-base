@@ -285,6 +285,7 @@ fi
 awk '
   /UNIT_BRANCH=/ && /ls-remote/ { inb = 1 }
   inb { print }
+  inb && /end 6L unit-branch discovery/ { exit }
   inb && /head -1/ { exit }
 ' "$COMMAND" > "$WORK/disc_head.sh"
 
