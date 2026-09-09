@@ -1395,6 +1395,44 @@ for SH in bash zsh; do
     fail "$SH: (t) CONTROL: single-candidate case broken: got '${GOT:-<empty>}', want claude/SMA-2-real-slug"
   fi
 
+  # ------------------------------------------------------------------------
+  # (t2) QA-independent, adversarial: the reviewer's ORIGINAL four-ref
+  # reproduction (review-verdict.json / security-findings.json SEC-1),
+  # replayed verbatim rather than the developer's own narrowed two-ref
+  # fixture above. Both a foreign-namespace decoy (backup/claude/SMA-1-old)
+  # and a real evidence ref (claude/SMA-1-gates-abc1234) sit on origin
+  # ALONGSIDE the two genuine candidates. The fix must still refuse, and its
+  # refusal message must name EXACTLY the two real candidates — proving the
+  # noise refs are excluded from both the count and the message, not merely
+  # from a bare two-ref set that never exercised the exclusion filters at the
+  # same time as the ambiguity check.
+  # ------------------------------------------------------------------------
+  RES="$(disc_run_refusal "$SH" "$DISC_NOW" "$WORK/o-$SH-t2r" "claude/" "SMA-1" \
+      "backup/claude/SMA-1-old" "claude/SMA-1-aaa-attacker" \
+      "claude/SMA-1-gates-abc1234" "claude/SMA-1-real-slug")"
+  RC="${RES%%|*}"; REST="${RES#*|}"; OUT="${REST%%|ERR=*}"; ERR="${RES#*ERR=}"
+  if [ "$RC" = "RC=1" ] && [ "$OUT" = "OUT=" ] \
+     && printf '%s' "$ERR" | grep -q 'claude/SMA-1-aaa-attacker' \
+     && printf '%s' "$ERR" | grep -q 'claude/SMA-1-real-slug' \
+     && ! printf '%s' "$ERR" | grep -q 'backup/claude/SMA-1-old' \
+     && ! printf '%s' "$ERR" | grep -q 'claude/SMA-1-gates-abc1234' \
+     && [ "$(printf '%s' "$ERR" | grep -o '2 candidate')" = '2 candidate' ]; then
+    pass "$SH: (t2) reviewer's exact 4-ref repro (foreign-namespace + evidence noise alongside 2 real candidates) -> refused, naming exactly the 2 real candidates and excluding both noise refs"
+  else
+    fail "$SH: (t2) reviewer's exact 4-ref repro not refused correctly, or noise ref leaked into the message: $RES"
+  fi
+
+  # CONTROL for (t2): the SAME noise refs, but only ONE real candidate
+  # (claude/SMA-1-real-slug) — must still be chosen, not refused. Proves the
+  # ambiguity check counts only genuine candidates, not raw ls-remote hits.
+  GOT="$(disc_run "$SH" "$DISC_NOW" "$WORK/o-$SH-t2c" "claude/" "SMA-1" \
+      "backup/claude/SMA-1-old" "claude/SMA-1-gates-abc1234" "claude/SMA-1-real-slug")"
+  if [ "$GOT" = "claude/SMA-1-real-slug" ]; then
+    pass "$SH: (t2) CONTROL: noise refs present but exactly one real candidate -> still chosen, not refused"
+  else
+    fail "$SH: (t2) CONTROL: got '${GOT:-<empty>}', want claude/SMA-1-real-slug"
+  fi
+
   # NO PATTERN IS BUILT FROM EITHER VALUE. Shape assertion on the shipped bytes.
   if grep -q 'grep -v -E' "$DISC_NOW" || grep -q 'grep -vE' "$DISC_NOW"; then
     fail "$SH: (q) the discovery block still interpolates values into a \`grep -E\` pattern"
