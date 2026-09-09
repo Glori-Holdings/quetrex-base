@@ -45,9 +45,15 @@
 #       (the shipped pipeline is extracted and executed under bash AND zsh),
 #   (r) qx_approved_base_sha is defined before every call site.
 # Fail-first: (a),(b),(c),(e),(f),(g),(h) are proven ABSENT from the pre-fix
-# baseline 85ec69c, (j),(k) from the pre-rework head 31d6489, and (q) from the
-# pre-fix head 199e648, whose discovery returns EMPTY for a gates-carrying slug
-# (literal shas, never `main`) before the shipped text is checked.
+# baseline 85ec69c (reachable from main via `git show`), (j),(k) from the
+# pre-rework head 31d6489, and (q) from the pre-fix heads 199e648, 68ea3ef and
+# df430d6 (literal shas, never `main`) before the shipped text is checked.
+# 31d6489/80b7895/199e648/68ea3ef/df430d6 are commits of THIS branch only: once
+# PR #145 squash-merges, those objects are unreachable from main, so `git show
+# <sha>:<path>` at test time would fail there. Their exact bytes are captured
+# ahead of time under test/fixtures/task-build/<sha>-<basename> (see the
+# capture note at each FAIL-FIRST block below) and read from the fixture
+# instead — a missing/empty fixture is a FAILURE, never a skip.
 
 set -uo pipefail
 
@@ -333,20 +339,26 @@ present "(i) task-rework.md: if this fails, the command is over"         "$REWOR
 LOCAL_S7="**Single unit, \`local\` (Step 6L).**"
 NO_CONTRADICTION="neither cloud dispatch needs this session"
 RW_SHA="31d6489"
-if git -C "$REPO_ROOT" cat-file -e "$RW_SHA^{commit}" 2>/dev/null || { git -C "$REPO_ROOT" fetch --quiet --depth=1 origin "$RW_SHA" 2>/dev/null && git -C "$REPO_ROOT" cat-file -e "$RW_SHA^{commit}" 2>/dev/null; }; then
-  RW_TB="$WORK/rework-base-task-build.md"; git -C "$REPO_ROOT" show "$RW_SHA:.claude/commands/task-build.md" > "$RW_TB"
+# 31d6489 is a commit of this branch only. Its exact `git show
+# 31d6489:.claude/commands/task-build.md` bytes were captured ahead of the
+# squash-merge into test/fixtures/task-build/31d6489-task-build.md (a 3-line
+# header, then byte-identical content from line 4 on) — read that instead of
+# running `git show` against an object main will never have.
+RW_FIXTURE="$REPO_ROOT/test/fixtures/task-build/${RW_SHA}-task-build.md"
+if [ -s "$RW_FIXTURE" ]; then
+  RW_TB="$WORK/rework-base-task-build.md"; tail -n +4 "$RW_FIXTURE" > "$RW_TB"
   if [ -s "$RW_TB" ]; then
-    pass "FAIL-FIRST (j-l): rework baseline $RW_SHA task-build.md extracted"
+    pass "FAIL-FIRST (j-l): rework baseline $RW_SHA task-build.md extracted from fixture"
     absent "(j) 6L publishes the gates"     "$RW_TB" "quetrex:exec-block qx_publish_gates"
     absent "(j) 6L runs the routine's block" "$RW_TB" "QUETREX GATE PUBLICATION"
     absent "(j) Step 7 local branch"        "$RW_TB" "$LOCAL_S7"
     absent "(j) Step 7 contradiction fixed" "$RW_TB" "$NO_CONTRADICTION"
     absent "(k) parse-time epic guard"      "$RW_TB" "quetrex:exec-block qx_reject_local_epic"
   else
-    fail "FAIL-FIRST (j-l): baseline task-build.md came back empty from git show $RW_SHA"
+    fail "FAIL-FIRST (j-l): baseline task-build.md came back empty from fixture $RW_FIXTURE"
   fi
 else
-  fail "FAIL-FIRST (j-l): rework baseline $RW_SHA is not reachable even after a depth-1 fetch — refusing to report a pass having compared against nothing"
+  fail "FAIL-FIRST (j-l): rework baseline fixture $RW_FIXTURE is missing or empty — cannot prove the fix, refusing to report a pass having compared against nothing"
 fi
 
 # (j) Step 6L text — scoped to the 6L section, not the whole file.
@@ -755,14 +767,16 @@ done
 # They must EXECUTE there. A refusal above that cannot be shown to have been an
 # execution before is a test of nothing.
 SEC_SHA="80b7895"
-if ! git -C "$REPO_ROOT" cat-file -e "$SEC_SHA^{commit}" 2>/dev/null; then
-  git -C "$REPO_ROOT" fetch --quiet --depth=1 origin "$SEC_SHA" 2>/dev/null || true
-fi
-if ! git -C "$REPO_ROOT" cat-file -e "$SEC_SHA^{commit}" 2>/dev/null; then
-  fail "(o) FAIL-FIRST: baseline $SEC_SHA unreachable — refusing to report a pass having compared against nothing"
+# 80b7895 is a commit of this branch only; its bytes for both paths were
+# captured ahead of the squash-merge under test/fixtures/task-build/ (3-line
+# header, byte-identical content from line 4 on) — read from there, not git show.
+SEC_FIX_TB="$REPO_ROOT/test/fixtures/task-build/${SEC_SHA}-task-build.md"
+SEC_FIX_RT="$REPO_ROOT/test/fixtures/task-build/${SEC_SHA}-cloud-build-routine.md"
+if [ ! -s "$SEC_FIX_TB" ] || [ ! -s "$SEC_FIX_RT" ]; then
+  fail "(o) FAIL-FIRST: baseline fixture(s) for $SEC_SHA missing or empty ($SEC_FIX_TB, $SEC_FIX_RT) — refusing to report a pass having compared against nothing"
 else
-  OLD_TB="$WORK/sec4-task-build.md"; git -C "$REPO_ROOT" show "$SEC_SHA:.claude/commands/task-build.md"      > "$OLD_TB"
-  OLD_RT="$WORK/sec4-routine.md";    git -C "$REPO_ROOT" show "$SEC_SHA:.claude/lib/cloud-build-routine.md"  > "$OLD_RT"
+  OLD_TB="$WORK/sec4-task-build.md"; tail -n +4 "$SEC_FIX_TB" > "$OLD_TB"
+  OLD_RT="$WORK/sec4-routine.md";    tail -n +4 "$SEC_FIX_RT" > "$OLD_RT"
   OLD_PUB="$WORK/sec4-qx_publish_gates.sh"
   awk -v name="qx_publish_gates" '
     $0 ~ ("quetrex:exec-block " name "([^A-Za-z0-9_]|$)") && $0 !~ ("end quetrex:exec-block") { inb=1 }
@@ -804,8 +818,11 @@ else
   done
 fi
 
-# (l) ONE COPY of the publication logic.
-N_SENT="$(git -C "$REPO_ROOT" grep -l -E '^[[:space:]]*# >>> QUETREX GATE PUBLICATION >>>[[:space:]]*$' -- . 2>/dev/null | wc -l | tr -d ' ')"
+# (l) ONE COPY of the publication logic. Frozen pre-fix fixtures under
+# test/fixtures/task-build/ are historical `git show <sha>:<path>` captures of
+# files that (at that sha) also carried the sentinel — they are test data, not
+# a second shipped copy, so they are excluded from this scan by path.
+N_SENT="$(git -C "$REPO_ROOT" grep -l -E '^[[:space:]]*# >>> QUETREX GATE PUBLICATION >>>[[:space:]]*$' -- . ':!test/fixtures/task-build/**' 2>/dev/null | wc -l | tr -d ' ')"
 if [ "$N_SENT" = "1" ] && git -C "$REPO_ROOT" grep -q -E '^[[:space:]]*# >>> QUETREX GATE PUBLICATION >>>[[:space:]]*$' -- .claude/lib/cloud-build-routine.md; then
   pass "(l) exactly one tracked file carries the publication block, and it is cloud-build-routine.md"
 else
@@ -979,8 +996,12 @@ fi
 # FAIL-FIRST against the pre-fix head. Same extractor, same cases.
 PRE_SHA="199e648"
 PRE_TB="$WORK/pre-task-build.md"
-if git -C "$REPO_ROOT" cat-file -e "$PRE_SHA^{commit}" 2>/dev/null; then
-  git -C "$REPO_ROOT" show "$PRE_SHA:.claude/commands/task-build.md" > "$PRE_TB"
+# 199e648 is a commit of this branch only; its bytes were captured ahead of
+# the squash-merge into test/fixtures/task-build/199e648-task-build.md
+# (3-line header, byte-identical content from line 4 on) — read from there.
+PRE_FIXTURE="$REPO_ROOT/test/fixtures/task-build/${PRE_SHA}-task-build.md"
+if [ -s "$PRE_FIXTURE" ]; then
+  tail -n +4 "$PRE_FIXTURE" > "$PRE_TB"
   DISC_PRE="$WORK/discovery-pre.sh"
   extract_discovery "$PRE_TB" > "$DISC_PRE"
   if grep -q "grep -v -- '-gates-'" "$DISC_PRE"; then
@@ -996,7 +1017,7 @@ if git -C "$REPO_ROOT" cat-file -e "$PRE_SHA^{commit}" 2>/dev/null; then
     fail "(q) FAIL-FIRST: pre-fix discovery returned '$PRE_GOT' — it did NOT reproduce the defect, so the assertions below prove nothing"
   fi
 else
-  fail "(q) FAIL-FIRST: pre-fix commit $PRE_SHA is not reachable in this checkout — refusing to report a pass having compared against nothing"
+  fail "(q) FAIL-FIRST: pre-fix fixture $PRE_FIXTURE is missing or empty — refusing to report a pass having compared against nothing"
 fi
 
 # SECOND FAIL-FIRST BASELINE — the anchored-regex era (68ea3ef). The anchor fixed
@@ -1005,8 +1026,12 @@ fi
 # against the SHIPPED bytes of that commit, never a retyped pattern.
 ANCHOR_SHA="68ea3ef"
 ANCHOR_TB="$WORK/anchor-task-build.md"
-if git -C "$REPO_ROOT" cat-file -e "$ANCHOR_SHA^{commit}" 2>/dev/null; then
-  git -C "$REPO_ROOT" show "$ANCHOR_SHA:.claude/commands/task-build.md" > "$ANCHOR_TB"
+# 68ea3ef is a commit of this branch only; its bytes were captured ahead of
+# the squash-merge into test/fixtures/task-build/68ea3ef-task-build.md
+# (3-line header, byte-identical content from line 4 on) — read from there.
+ANCHOR_FIXTURE="$REPO_ROOT/test/fixtures/task-build/${ANCHOR_SHA}-task-build.md"
+if [ -s "$ANCHOR_FIXTURE" ]; then
+  tail -n +4 "$ANCHOR_FIXTURE" > "$ANCHOR_TB"
   DISC_ANCHOR="$WORK/discovery-anchor.sh"
   extract_discovery "$ANCHOR_TB" > "$DISC_ANCHOR"
   if grep -q 'grep -v -E' "$DISC_ANCHOR"; then
@@ -1036,7 +1061,7 @@ if git -C "$REPO_ROOT" cat-file -e "$ANCHOR_SHA^{commit}" 2>/dev/null; then
     fail "(q) FAIL-FIRST: $ANCHOR_SHA returned '$ANCHOR_GOT' — the dot-wildcard residual did NOT reproduce, so the assertion below proves nothing"
   fi
 else
-  fail "(q) FAIL-FIRST: anchor-era commit $ANCHOR_SHA is not reachable in this checkout — refusing to report a pass having compared against nothing"
+  fail "(q) FAIL-FIRST: anchor-era fixture $ANCHOR_FIXTURE is missing or empty — refusing to report a pass having compared against nothing"
 fi
 
 # THIRD FAIL-FIRST BASELINE — df430d6, the literal-strip era. It fixed the two
@@ -1046,8 +1071,12 @@ fi
 # SHIPPED bytes, on a real bare origin, never a retyped pipeline.
 TAIL_SHA="df430d6"
 TAIL_TB="$WORK/tail-task-build.md"
-if git -C "$REPO_ROOT" cat-file -e "$TAIL_SHA^{commit}" 2>/dev/null; then
-  git -C "$REPO_ROOT" show "$TAIL_SHA:.claude/commands/task-build.md" > "$TAIL_TB"
+# df430d6 is a commit of this branch only; its bytes were captured ahead of
+# the squash-merge into test/fixtures/task-build/df430d6-task-build.md
+# (3-line header, byte-identical content from line 4 on) — read from there.
+TAIL_FIXTURE="$REPO_ROOT/test/fixtures/task-build/${TAIL_SHA}-task-build.md"
+if [ -s "$TAIL_FIXTURE" ]; then
+  tail -n +4 "$TAIL_FIXTURE" > "$TAIL_TB"
   DISC_TAIL="$WORK/discovery-tail.sh"
   extract_discovery "$TAIL_TB" > "$DISC_TAIL"
   if grep -q 'ls-remote' "$DISC_TAIL" && ! grep -q 'case "$qx_ref" in' "$DISC_TAIL"; then
@@ -1083,7 +1112,7 @@ if git -C "$REPO_ROOT" cat-file -e "$TAIL_SHA^{commit}" 2>/dev/null; then
     fail "(s) FAIL-FIRST: $TAIL_SHA returned '${TAIL_GOT:-<empty>}' for the nested case — it did NOT reproduce"
   fi
 else
-  fail "(s) FAIL-FIRST: baseline commit $TAIL_SHA is not reachable in this checkout — refusing to report a pass having compared against nothing"
+  fail "(s) FAIL-FIRST: baseline fixture $TAIL_FIXTURE is missing or empty — refusing to report a pass having compared against nothing"
 fi
 
 for SH in bash zsh; do

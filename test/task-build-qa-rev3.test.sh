@@ -38,6 +38,13 @@
 #       .quetrex/qa-report.json's not_verified[] is pinned to 68ea3ef and
 #       describes the state of the code at that sha.
 #
+# 199e648 and 68ea3ef are commits of THIS branch only: once PR #145
+# squash-merges, those objects are unreachable from main, so `git show
+# <sha>:<path>` at test time would fail there. Their exact bytes are captured
+# ahead of time under test/fixtures/task-build/<sha>-task-build.md (a 3-line
+# header, then byte-identical content from line 4 on) and read from there
+# instead — a missing/empty fixture is a FAILURE, never a skip.
+#
 # Run: bash test/task-build-qa-rev3.test.sh
 
 set -uo pipefail
@@ -62,7 +69,21 @@ extract_marked_block() {  # extract_marked_block <name> <ref:path> -> stdout
 OLD_HEAD="199e648"
 NEW_HEAD="$(git -C "$ROOT" rev-parse HEAD)"
 
-extract_marked_block qx_approved_base_sha "$OLD_HEAD:.claude/commands/task-build.md" > "$WORK/old_block.txt"
+# 199e648 is a commit of this branch only: once PR #145 squash-merges, that
+# object is unreachable from main, so `git show 199e648:...` would fail there.
+# Its exact bytes were captured ahead of time into
+# test/fixtures/task-build/199e648-task-build.md (3-line header, then
+# byte-identical content from line 4 on) — read from the fixture instead. A
+# missing/empty fixture is a FAILURE below (both *_block.txt checks require
+# -s), never a skip.
+OLD_FIXTURE="$ROOT/test/fixtures/task-build/${OLD_HEAD}-task-build.md"
+if [ -s "$OLD_FIXTURE" ]; then
+  tail -n +4 "$OLD_FIXTURE" | sed -n \
+    "/# ── quetrex:exec-block qx_approved_base_sha ────/,/# ── end quetrex:exec-block qx_approved_base_sha ───/p" \
+    > "$WORK/old_block.txt"
+else
+  : > "$WORK/old_block.txt"
+fi
 extract_marked_block qx_approved_base_sha "$NEW_HEAD:.claude/commands/task-build.md" > "$WORK/new_block.txt"
 
 if [ -s "$WORK/old_block.txt" ] && [ -s "$WORK/new_block.txt" ]; then
@@ -215,15 +236,19 @@ done
 # --------------------------------------------------------------------------
 ANCHOR_SHA="68ea3ef"
 ANCHOR_PATTERN=""
-if git -C "$ROOT" cat-file -e "$ANCHOR_SHA^{commit}" 2>/dev/null; then
+# 68ea3ef is a commit of this branch only; its bytes were captured ahead of
+# the squash-merge into test/fixtures/task-build/68ea3ef-task-build.md
+# (3-line header, byte-identical content from line 4 on) — read from there.
+ANCHOR_FIXTURE="$ROOT/test/fixtures/task-build/${ANCHOR_SHA}-task-build.md"
+if [ -s "$ANCHOR_FIXTURE" ]; then
   # The anchor's own text, lifted from the shipped line: grep -v -E "<pattern>"
-  ANCHOR_PATTERN="$(git -C "$ROOT" show "$ANCHOR_SHA:.claude/commands/task-build.md" \
+  ANCHOR_PATTERN="$(tail -n +4 "$ANCHOR_FIXTURE" \
     | sed -n 's/.*grep -v -E "\([^"]*\)".*/\1/p' | head -1)"
 fi
 if [ -n "$ANCHOR_PATTERN" ]; then
-  pass "(B) read the anchor pattern out of $ANCHOR_SHA's shipped bytes: $ANCHOR_PATTERN"
+  pass "(B) read the anchor pattern out of $ANCHOR_SHA's shipped bytes (fixture $ANCHOR_FIXTURE): $ANCHOR_PATTERN"
 else
-  fail "(B) could not read the anchor pattern from $ANCHOR_SHA — the fail-first below would prove nothing"
+  fail "(B) could not read the anchor pattern from fixture $ANCHOR_FIXTURE — the fail-first below would prove nothing"
 fi
 
 # Residual 1 — the concrete, reachable collision: a task whose title slugifies
