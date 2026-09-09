@@ -1,3 +1,6 @@
+# Fixture captured from `git show df430d6:.claude/commands/task-build.md` on branch feature/task-build-cloud-or-local (PR #145),
+# whose objects become unreachable from main after the squash-merge. source sha (full): df430d6106f3e63e4ba486b6c604ef1a74a0c7c8
+# source path: .claude/commands/task-build.md -- content begins at line 4, byte-identical to the git show output.
 ---
 description: Vet, classify, and build one Quetrex task end to end. Splits at the human scope gate — a PLAN half that produces the architect's plan and asks for approval, and a BUILD half that a routine can run unattended from the approved payload. Single unit for a feature/bug, or one-level epic decomposition with a DAG of child workflows that auto-merge into a per-epic integration branch. Usage: /quetrex:task-build SMA-1 [cloud|local] [--build-only|--tick]
 argument-hint: <TASK-ID like SMA-1> [cloud|local] [--build-only | --tick]
@@ -1057,7 +1060,7 @@ done
 ```
 
 Then create the **per-epic integration branch** `${BRANCH_PREFIX}<EPIC-ID>` off `main` via
-standard branch isolation (use `git -C` so the enforce-branch hook sees the branch).
+the `worktree-workflow` skill (use `git -C` so the enforce-branch hook sees the branch).
 Finally set the **epic** itself to `in_progress` and post a summary comment:
 
 ```bash
@@ -1247,28 +1250,6 @@ else
     | awk '{sub("refs/heads/","",$2); print $2}' \
     | while IFS= read -r qx_ref; do
         [ -n "$qx_ref" ] || continue
-        # A ref-listing PATTERN IS NOT AN ANCHOR. `ls-remote --heads origin
-        # "<prefix><TASK>-*"` matches the TAIL of the ref path on `/` boundaries,
-        # so `refs/heads/evil/claude/SMA-1-hijack`, `refs/heads/backup/claude/
-        # SMA-1-old` and `refs/heads/x/y/claude/SMA-1-deep` are ALL returned for
-        # pattern `claude/SMA-1-*` (measured against a real bare origin). The
-        # evidence-strip below cannot catch them: stripping a prefix a ref does
-        # not start with is a NO-OP, so a foreign ref falls straight through as
-        # "the unit". `backup/...` even sorts AHEAD of `claude/...`, so the
-        # first-candidate-wins tail of this pipeline picks it with no attacker
-        # involved — a leftover personal or backup ref is enough. (Do not write
-        # the two words of that tail command in a comment here: the test
-        # extractor stops at the FIRST line carrying them, and a truncated
-        # extraction silently proves nothing.)
-        # Whatever wins here is handed to `quetrex-cloud-prep sync`,
-        # which either dead-ends the local path or resumes the build on that ref
-        # and publishes its PR and its gates branch from it.
-        # So require the LITERAL prefix, by the same quoted-comparison technique
-        # the evidence exclusion uses two lines below: the quoted expansion makes
-        # every character in BRANCH_PREFIX and TASK_ID literal (a `.` in the
-        # epic-child shape `SMA-1.2` included), so nothing is interpolated into a
-        # pattern here either. Identical under bash, zsh and dash.
-        case "$qx_ref" in "${BRANCH_PREFIX}${TASK_ID}-"*) ;; *) continue ;; esac
         qx_rest="${qx_ref#"${BRANCH_PREFIX}${TASK_ID}-gates-"}"
         if [ "$qx_rest" != "$qx_ref" ] && [ "${#qx_rest}" -eq 7 ]; then
           case "$qx_rest" in
@@ -1277,19 +1258,7 @@ else
           esac
         fi
         printf '%s\n' "$qx_ref"
-      done)"
-  # MORE THAN ONE candidate survives (reviewer SEC-1, confirmed): the selection
-  # criterion for a lone `head`-style pick is a ref NAME, which anyone with push
-  # access to origin controls — never guess between them. Collect, count, refuse
-  # when not exactly one, mirroring qx_probe_gate_refusal's own rule above (Step
-  # ~584): zero falls through to the fallback below unchanged; exactly one is
-  # used as-is; more than one refuses, naming every candidate.
-  qx_unit_n="$(printf '%s\n' "$UNIT_BRANCH" | grep -c .)"
-  if [ "$qx_unit_n" -gt 1 ]; then
-    echo "REFUSE — $qx_unit_n candidate unit branches for ${BRANCH_PREFIX}${TASK_ID} exist on origin and nothing disambiguates them: $(printf '%s' "$UNIT_BRANCH" | tr '\n' ' '). Confirm the authoritative one (RemoteTrigger action:\"get_run_log\" states the routine's own branch name), delete or rename the others, then re-run" >&2
-    exit 1
-  fi
-  # ── end 6L unit-branch discovery ──
+      done | head -1)"
   [ -n "$UNIT_BRANCH" ] || UNIT_BRANCH="${BRANCH_PREFIX}${TASK_ID}-$(printf '%s' "$TASK_TITLE" \
     | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//; s/-$//' | cut -c1-40)"
   WT="$(mktemp -d)"

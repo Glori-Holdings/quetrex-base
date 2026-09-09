@@ -1,3 +1,6 @@
+# Fixture captured from `git show 8ea5233:.claude/commands/task-build.md` on branch feature/task-build-cloud-or-local (PR #145),
+# whose objects become unreachable from main after the squash-merge. source sha (full): 8ea52333a2bba5438894025ce7a7abcdc0c360ea
+# source path: .claude/commands/task-build.md -- content begins at line 4, byte-identical to the git show output.
 ---
 description: Vet, classify, and build one Quetrex task end to end. Splits at the human scope gate — a PLAN half that produces the architect's plan and asks for approval, and a BUILD half that a routine can run unattended from the approved payload. Single unit for a feature/bug, or one-level epic decomposition with a DAG of child workflows that auto-merge into a per-epic integration branch. Usage: /quetrex:task-build SMA-1 [cloud|local] [--build-only|--tick]
 argument-hint: <TASK-ID like SMA-1> [cloud|local] [--build-only | --tick]
@@ -1277,19 +1280,7 @@ else
           esac
         fi
         printf '%s\n' "$qx_ref"
-      done)"
-  # MORE THAN ONE candidate survives (reviewer SEC-1, confirmed): the selection
-  # criterion for a lone `head`-style pick is a ref NAME, which anyone with push
-  # access to origin controls — never guess between them. Collect, count, refuse
-  # when not exactly one, mirroring qx_probe_gate_refusal's own rule above (Step
-  # ~584): zero falls through to the fallback below unchanged; exactly one is
-  # used as-is; more than one refuses, naming every candidate.
-  qx_unit_n="$(printf '%s\n' "$UNIT_BRANCH" | grep -c .)"
-  if [ "$qx_unit_n" -gt 1 ]; then
-    echo "REFUSE — $qx_unit_n candidate unit branches for ${BRANCH_PREFIX}${TASK_ID} exist on origin and nothing disambiguates them: $(printf '%s' "$UNIT_BRANCH" | tr '\n' ' '). Confirm the authoritative one (RemoteTrigger action:\"get_run_log\" states the routine's own branch name), delete or rename the others, then re-run" >&2
-    exit 1
-  fi
-  # ── end 6L unit-branch discovery ──
+      done | head -1)"
   [ -n "$UNIT_BRANCH" ] || UNIT_BRANCH="${BRANCH_PREFIX}${TASK_ID}-$(printf '%s' "$TASK_TITLE" \
     | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//; s/-$//' | cut -c1-40)"
   WT="$(mktemp -d)"

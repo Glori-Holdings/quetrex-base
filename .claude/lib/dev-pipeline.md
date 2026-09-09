@@ -186,6 +186,13 @@ converges) and neither substitutes for the other.
    handling / secrets / external calls / data access), `security-reviewer` (opus) also runs and an
    open CONFIRMED **Critical** blocks.
 
+   **Stage order is qa → security-reviewer (when required) → reviewer → git-workflow.** The
+   reviewer reads `security-findings.json` as an input, so when `security_review_required` is
+   true the reviewer must not run until `.quetrex/security-findings.json` exists for HEAD: a
+   reviewer dispatched first finds no artifact and writes `ESCALATE_HUMAN` mechanically for a
+   build nothing was wrong with (measured on a local run, 2026-09-03). Never dispatch the two
+   in parallel.
+
    The reviewer emits a **3-way verdict** to `.quetrex/review-verdict.json`, pinned by sha to the
    commit it read:
 
