@@ -45,6 +45,11 @@
 #         ABSOLUTELY NOTHING and PATCHes nothing, and bc64a9b's doctor Check 14
 #         prints "✓ Webhook registered … project linked to Someone-Else/other-app
 #         — board shows the repository as linked". Both reproduce the silent mask.
+#         bc64a9b predates this branch's merge base with main and is unreachable
+#         from main after a squash-merge, so the baseline is read from two
+#         checked-in fixtures (test/fixtures/board-repo-link/bc64a9b-{link,check14}.sh,
+#         captured verbatim from that real commit) rather than `git show`. A
+#         missing or empty fixture is still a FAILURE, never a skip.
 
 set -uo pipefail
 
@@ -52,7 +57,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INIT_MD="$ROOT/plugins/quetrex-setup/commands/init.md"
 DOCTOR_MD="$ROOT/plugins/quetrex-setup/commands/doctor.md"
 REAL_BIN="$ROOT/plugins/quetrex-setup/bin"
-BASE_SHA="bc64a9b"   # the pre-change sha; the silent mask must reproduce HERE
+BASE_SHA="bc64a9b"   # the pre-change sha the fixtures below were captured from
+BASE_LINK_FIXTURE="$ROOT/test/fixtures/board-repo-link/bc64a9b-link.sh"
+BASE_CHECK14_FIXTURE="$ROOT/test/fixtures/board-repo-link/bc64a9b-check14.sh"
 
 PASS=0; FAIL=0
 ok()    { PASS=$((PASS+1)); printf 'ok - %s\n' "$1"; }
@@ -305,13 +312,13 @@ else
 fi
 
 # --- AC-N6: fail-first against the literal pre-change sha --------------------
-# A baseline that cannot be read is a FAILURE, never a skip.
-if git -C "$ROOT" show "$BASE_SHA:plugins/quetrex-setup/commands/init.md" > "$WORK/old-init.md" 2>/dev/null \
-   && [ -s "$WORK/old-init.md" ] \
-   && git -C "$ROOT" show "$BASE_SHA:plugins/quetrex-setup/commands/doctor.md" > "$WORK/old-doctor.md" 2>/dev/null \
-   && [ -s "$WORK/old-doctor.md" ]; then
-  extract_exec_block "$WORK/old-init.md" qx_link_project_repo > "$WORK/old-link.sh"
-  extract_check14 "$WORK/old-doctor.md" > "$WORK/old-check14.sh"
+# A baseline that cannot be read is a FAILURE, never a skip. bc64a9b is
+# unreachable from main after a squash-merge, so the baseline comes from
+# checked-in fixtures captured verbatim from that real commit, not `git show`.
+if [ -s "$BASE_LINK_FIXTURE" ] && bash -n "$BASE_LINK_FIXTURE" 2>/dev/null \
+   && [ -s "$BASE_CHECK14_FIXTURE" ] && bash -n "$BASE_CHECK14_FIXTURE" 2>/dev/null; then
+  cp "$BASE_LINK_FIXTURE" "$WORK/old-link.sh"
+  cp "$BASE_CHECK14_FIXTURE" "$WORK/old-check14.sh"
   # `empty` is the exact shape QA reproduced: exit 0, print nothing. It is also
   # the only silent one, so "printed NOTHING" is assertable without a stub's own
   # command-not-found noise confusing it.
@@ -332,7 +339,7 @@ if git -C "$ROOT" show "$BASE_SHA:plugins/quetrex-setup/commands/init.md" > "$WO
     notok "AC-N6: $BASE_SHA's doctor Check 14 did not reproduce the false ✓: $(flat "$OUT")"
   fi
 else
-  notok "AC-N6: baseline blobs at $BASE_SHA are unreadable (shallow clone?) — fail-first arm cannot run"
+  notok "AC-N6: baseline fixtures for $BASE_SHA are missing, empty, or unparseable ($BASE_LINK_FIXTURE / $BASE_CHECK14_FIXTURE) — fail-first arm cannot run"
 fi
 
 finish
